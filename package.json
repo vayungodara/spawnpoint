@@ -1,0 +1,21 @@
+{
+  "name": "spawnpoint",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Self-hosted web control panel for the Minecraft server environment",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w web && npm run build -w server",
+    "start": "node server/dist/index.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vayungodara/spawnpoint"
+  }
+}

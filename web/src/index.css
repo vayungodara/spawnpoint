@@ -1,0 +1,416 @@
+@import '@fontsource-variable/geologica';
+@import '@fontsource/silkscreen';
+@import '@fontsource/silkscreen/700.css';
+@import 'tailwindcss';
+
+/* ============================================================
+   SPAWNPOINT PANEL · the control room under the world
+   Design system: Spawnpoint-design (landing) · DESIGN.md
+   Materials, not decoration. radius 0 · ink borders ·
+   hard offset shadows · Geologica + Silkscreen HUD ·
+   pixel cursors · crack on press · strata teeth between bands
+   ============================================================ */
+
+@theme {
+  /* materials (from the landing) */
+  --color-ink: oklch(24% 0.02 255);
+  --color-paper: oklch(96% 0.012 95);
+  --color-sky: oklch(87% 0.06 230);
+  --color-grass: #7cc24f;
+  --color-grass-dark: #5c9c3c;
+  --color-dirt: #5c3f28;
+  --color-dirt-deep: #4e3520;
+  --color-stone: #c9cdd3;
+  --color-stone-dark: #b0b5bd;
+  --color-tuff: #453b33;
+  --color-deepslate: #262b33;
+  --color-deepslate-2: #2e3440; /* raised block on deepslate */
+  --color-bedrock: #16191f;
+  --color-emerald: #4ec97a;
+  --color-emerald-dark: #2e9c55;
+  --color-redstone: #e2483d;
+  /* Danger red for irreversible actions (ban, world reset, delete). This token
+     was USED in five places and never DEFINED — Tailwind v4 only emits a
+     `text-<name>` utility when `--color-<name>` exists, so `text-crimson` was
+     never generated and every destructive control rendered with no danger
+     styling at all. Deeper than redstone so "ban" doesn't read as "restart". */
+  --color-crimson: #c2352b;
+  --color-gold: #e9c53e;
+  --color-torch: #ffd85e;
+  --color-diamond: #7fd8df;
+
+  /* semantic (product register: dark cave interior) */
+  --color-bg: #262b33;          /* deepslate — content */
+  --color-panel: #16191f;       /* bedrock — sidebar */
+  --color-block: #2e3440;       /* raised surface */
+  --color-block-2: #383f4d;     /* hover surface */
+  --color-line: oklch(35% 0.02 260);
+  --color-text: oklch(96% 0.012 95);
+  --color-text-dim: oklch(72% 0.015 250);
+
+  --font-sans: 'Geologica Variable', system-ui, sans-serif;
+  --font-px: 'Silkscreen', monospace;
+  --font-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+
+  --ease-quint: cubic-bezier(0.22, 0.9, 0.27, 1);
+  --ease-pop: cubic-bezier(0.34, 1.42, 0.44, 1);
+}
+
+/* pixel textures + strata masks (verbatim from the landing) */
+:root {
+  --noise: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2296%22%20height%3D%2296%22%3E%3Cpath%20d%3D%22M64%2048h8v8h-8zM40%2016h8v8h-8zM64%2024h8v8h-8zM72%2048h8v8h-8zM32%2024h8v8h-8zM24%2088h8v8h-8zM80%2016h8v8h-8zM8%2024h8v8h-8zM72%200h8v8h-8zM32%2040h8v8h-8zM8%2072h8v8h-8zM64%2064h8v8h-8zM32%208h8v8h-8zM80%2024h8v8h-8zM56%2032h8v8h-8zM64%2088h8v8h-8zM48%2072h8v8h-8z%22%20fill%3D%22%23000%22%20fill-opacity%3D%220.045%22%2F%3E%3Cpath%20d%3D%22M0%200h8v8h-8zM72%200h8v8h-8zM48%2056h8v8h-8zM88%2056h8v8h-8zM40%2040h8v8h-8zM72%2056h8v8h-8zM8%2048h8v8h-8zM80%2088h8v8h-8zM56%2088h8v8h-8z%22%20fill%3D%22%23fff%22%20fill-opacity%3D%220.05%22%2F%3E%3C%2Fsvg%3E");
+  --noise-dense: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2296%22%20height%3D%2296%22%3E%3Cpath%20d%3D%22M48%2032h8v8h-8zM0%200h8v8h-8zM8%2032h8v8h-8zM24%208h8v8h-8zM8%2056h8v8h-8zM56%2032h8v8h-8zM64%2032h8v8h-8zM24%200h8v8h-8zM24%2080h8v8h-8zM64%2016h8v8h-8zM24%2064h8v8h-8zM48%200h8v8h-8zM32%208h8v8h-8zM24%2088h8v8h-8zM16%2072h8v8h-8zM88%2072h8v8h-8zM8%2016h8v8h-8zM64%2088h8v8h-8zM24%2056h8v8h-8zM40%2024h8v8h-8zM80%2080h8v8h-8zM80%2064h8v8h-8z%22%20fill%3D%22%23000%22%20fill-opacity%3D%220.09%22%2F%3E%3Cpath%20d%3D%22M80%2056h8v8h-8zM32%2048h8v8h-8zM8%2024h8v8h-8zM32%200h8v8h-8zM64%2072h8v8h-8zM32%2032h8v8h-8zM72%2048h8v8h-8zM8%200h8v8h-8zM8%2088h8v8h-8zM32%2080h8v8h-8zM16%2056h8v8h-8zM24%2080h8v8h-8zM48%2016h8v8h-8zM48%2080h8v8h-8zM88%2088h8v8h-8z%22%20fill%3D%22%23fff%22%20fill-opacity%3D%220.05%22%2F%3E%3C%2Fsvg%3E");
+  --crack: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20shape-rendering%3D%22crispEdges%22%3E%3Cpath%20d%3D%22M12%2012h1v1h-1zM13%2011h1v1h-1zM15%2010h1v1h-1zM17%209h1v1h-1zM19%209h1v1h-1zM20%209h1v1h-1zM12%2011h1v1h-1zM10%2010h1v1h-1zM9%2010h1v1h-1zM8%2010h1v1h-1zM6%2010h1v1h-1zM5%2011h1v1h-1zM4%2011h1v1h-1zM12%2013h1v1h-1zM12%2014h1v1h-1zM11%2016h1v1h-1zM11%2018h1v1h-1zM10%2019h1v1h-1zM13%2010h1v1h-1zM13%209h1v1h-1zM14%208h1v1h-1zM13%207h1v1h-1zM13%206h1v1h-1zM15%209h1v1h-1zM18%208h1v1h-1zM18%207h1v1h-1zM19%206h1v1h-1zM20%206h1v1h-1zM21%205h1v1h-1z%22%20fill%3D%22%231b2130%22%20fill-opacity%3D%220.55%22%2F%3E%3C%2Fsvg%3E");
+  --mask-hills: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22144%22%20height%3D%2248%22%3E%3Cpath%20d%3D%22M0%200h24v48h-24zM24%2024h16v24h-16zM40%208h24v40h-24zM64%2036h16v12h-16zM80%2016h24v32h-24zM104%2028h8v20h-8zM112%204h16v44h-16zM128%2040h16v8h-16z%22%20fill%3D%22%23000%22%2F%3E%3C%2Fsvg%3E");
+  --mask-a: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22128%22%20height%3D%2232%22%3E%3Cpath%20d%3D%22M0%200h16v32h-16zM16%2020h16v12h-16zM32%208h24v24h-24zM56%2024h8v8h-8zM64%204h16v28h-16zM80%2016h24v16h-24zM104%208h16v24h-16zM120%2028h8v4h-8z%22%20fill%3D%22%23000%22%2F%3E%3C%2Fsvg%3E");
+  --mask-b: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22128%22%20height%3D%2232%22%3E%3Cpath%20d%3D%22M0%2012h8v20h-8zM8%200h24v32h-24zM32%2024h16v8h-16zM48%208h16v24h-16zM64%2020h8v12h-8zM72%204h24v28h-24zM96%2016h16v16h-16zM112%2028h16v4h-16z%22%20fill%3D%22%23000%22%2F%3E%3C%2Fsvg%3E");
+}
+
+body {
+  background: var(--color-bg);
+  background-image: var(--noise-dense);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 15.5px;
+  line-height: 1.6;
+  /* the landing's pixel arrow cursor */
+  cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2012%2016%22%20shape-rendering%3D%22crispEdges%22%3E%3Cpath%20fill%3D%22%231b2130%22%20d%3D%22M0%200h1v1h-1zM0%201h2v1h-2zM0%202h1v1h-1zM2%202h1v1h-1zM0%203h1v1h-1zM3%203h1v1h-1zM0%204h1v1h-1zM4%204h1v1h-1zM0%205h1v1h-1zM5%205h1v1h-1zM0%206h1v1h-1zM6%206h1v1h-1zM0%207h1v1h-1zM7%207h1v1h-1zM0%208h1v1h-1zM8%208h1v1h-1zM0%209h1v1h-1zM9%209h1v1h-1zM0%2010h1v1h-1zM6%2010h5v1h-5zM0%2011h1v1h-1zM3%2011h1v1h-1zM6%2011h1v1h-1zM0%2012h1v1h-1zM2%2012h1v1h-1zM4%2012h1v1h-1zM7%2012h1v1h-1zM0%2013h2v1h-2zM4%2013h1v1h-1zM7%2013h1v1h-1zM0%2014h1v1h-1zM5%2014h1v1h-1zM8%2014h1v1h-1zM5%2015h3v1h-3z%22%2F%3E%3Cpath%20fill%3D%22%23f7f3e8%22%20d%3D%22M1%202h1v1h-1zM1%203h2v1h-2zM1%204h3v1h-3zM1%205h4v1h-4zM1%206h5v1h-5zM1%207h6v1h-6zM1%208h7v1h-7zM1%209h8v1h-8zM1%2010h5v1h-5zM1%2011h2v1h-2zM4%2011h2v1h-2zM1%2012h1v1h-1zM5%2012h2v1h-2zM5%2013h2v1h-2zM6%2014h2v1h-2z%22%2F%3E%3C%2Fsvg%3E") 0 0, auto;
+}
+/* interactive things get the emerald pixel hand */
+a, button, select, label, input[type='range'], input[type='checkbox'], summary,
+.lever, .btn, [role='button'] {
+  cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2012%2016%22%20shape-rendering%3D%22crispEdges%22%3E%3Cpath%20fill%3D%22%231b2130%22%20d%3D%22M0%200h1v1h-1zM0%201h2v1h-2zM0%202h1v1h-1zM2%202h1v1h-1zM0%203h1v1h-1zM3%203h1v1h-1zM0%204h1v1h-1zM4%204h1v1h-1zM0%205h1v1h-1zM5%205h1v1h-1zM0%206h1v1h-1zM6%206h1v1h-1zM0%207h1v1h-1zM7%207h1v1h-1zM0%208h1v1h-1zM8%208h1v1h-1zM0%209h1v1h-1zM9%209h1v1h-1zM0%2010h1v1h-1zM6%2010h5v1h-5zM0%2011h1v1h-1zM3%2011h1v1h-1zM6%2011h1v1h-1zM0%2012h1v1h-1zM2%2012h1v1h-1zM4%2012h1v1h-1zM7%2012h1v1h-1zM0%2013h2v1h-2zM4%2013h1v1h-1zM7%2013h1v1h-1zM0%2014h1v1h-1zM5%2014h1v1h-1zM8%2014h1v1h-1zM5%2015h3v1h-3z%22%2F%3E%3Cpath%20fill%3D%22%234ec97a%22%20d%3D%22M1%202h1v1h-1zM1%203h2v1h-2zM1%204h3v1h-3zM1%205h4v1h-4zM1%206h5v1h-5zM1%207h6v1h-6zM1%208h7v1h-7zM1%209h8v1h-8zM1%2010h5v1h-5zM1%2011h2v1h-2zM4%2011h2v1h-2zM1%2012h1v1h-1zM5%2012h2v1h-2zM5%2013h2v1h-2zM6%2014h2v1h-2z%22%2F%3E%3C%2Fsvg%3E") 0 0, pointer;
+}
+
+h1, h2, h3 { line-height: 1.08; letter-spacing: -0.015em; text-wrap: balance; font-weight: 800; }
+
+::selection { background: var(--color-emerald); color: var(--color-ink); }
+:focus-visible { outline: 3px solid var(--color-paper); outline-offset: 2px; }
+
+/* ---------- component vocabulary ---------- */
+
+/* HUD chip: Silkscreen, the depth-tag system */
+.hud {
+  font-family: var(--font-px);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  opacity: 0.62;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hud::before { content: ''; width: 8px; height: 8px; background: currentColor; flex-shrink: 0; }
+
+/* raised block: card surface */
+.block {
+  background: var(--color-block);
+  background-image: var(--noise);
+  border: 2px solid var(--color-ink);
+  box-shadow: 0 4px 0 var(--color-ink);
+}
+
+/* pressable block: buttons — hover lifts, press cracks */
+.btn {
+  position: relative;
+  border: 2px solid var(--color-ink);
+  box-shadow: 0 4px 0 var(--color-ink);
+  font-weight: 700;
+  transition: transform 0.15s var(--ease-quint), box-shadow 0.15s var(--ease-quint);
+  user-select: none;
+}
+.btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 0 var(--color-ink); }
+.btn:active:not(:disabled) { transform: translateY(4px); box-shadow: 0 0 0 var(--color-ink); }
+.btn::after {
+  content: ''; position: absolute; inset: 0; opacity: 0; pointer-events: none;
+  background: var(--crack) center / 28px 28px; image-rendering: pixelated;
+  transition: opacity 0.05s linear;
+}
+.btn:active:not(:disabled)::after { opacity: 1; }
+.btn:disabled { opacity: 0.35; }
+
+.btn-emerald { background: var(--color-emerald); color: var(--color-ink); }
+.btn-emerald:hover:not(:disabled) { background: oklch(75% 0.17 150); }
+.btn-block { background: var(--color-block-2); color: var(--color-text); }
+.btn-redstone { background: var(--color-redstone); color: var(--color-paper); }
+.btn-gold { background: var(--color-gold); color: var(--color-ink); }
+
+/* form controls: square, bordered */
+.field {
+  background: var(--color-bedrock);
+  border: 2px solid var(--color-line);
+  color: var(--color-text);
+  transition: border-color 0.15s var(--ease-quint);
+}
+.field:focus { border-color: var(--color-emerald); outline: none; }
+.field::placeholder { color: var(--color-text-dim); opacity: 0.75; }
+
+/* lever toggle (redstone off -> emerald on) */
+.lever {
+  position: relative;
+  width: 46px; height: 26px;
+  background: var(--color-bedrock);
+  border: 2px solid var(--color-ink);
+  box-shadow: 0 3px 0 var(--color-ink);
+  transition: background 0.2s var(--ease-quint);
+  flex-shrink: 0;
+}
+.lever::after {
+  content: '';
+  position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px;
+  background: var(--color-redstone);
+  border: 2px solid var(--color-ink);
+  transition: left 0.2s var(--ease-pop), background 0.2s var(--ease-quint);
+}
+.lever[data-on='true'] { background: var(--color-deepslate-2); }
+.lever[data-on='true']::after { left: 22px; background: var(--color-emerald); }
+.lever:active::after { height: 18px; }
+.lever:disabled { opacity: 0.35; }
+
+/* status lamp */
+.lamp { width: 10px; height: 10px; border: 2px solid var(--color-ink); flex-shrink: 0; }
+.lamp-on { background: var(--color-emerald); box-shadow: 0 0 8px oklch(72% 0.17 150 / 0.6); }
+.lamp-off { background: var(--color-stone-dark); }
+.lamp-crash { background: var(--color-redstone); box-shadow: 0 0 8px oklch(58% 0.19 25 / 0.6); }
+.lamp-starting { background: var(--color-gold); box-shadow: 0 0 8px oklch(82% 0.14 90 / 0.6); }
+
+/* xp-bar style range slider */
+input[type='range'].xp {
+  appearance: none;
+  height: 14px;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 8px, oklch(0% 0 0 / 0.25) 8px 9px),
+    var(--color-bedrock);
+  border: 2px solid var(--color-ink);
+}
+input[type='range'].xp::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px; height: 22px;
+  background: var(--color-emerald);
+  border: 2px solid var(--color-ink);
+  box-shadow: 0 2px 0 var(--color-ink);
+}
+
+/* ---------- the Anvil panel (console replica from the landing) ---------- */
+.apanel {
+  border: 3px solid #000;
+  background: #14181f;
+  color: #cfd6db;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  box-shadow: 0 7px 0 oklch(0% 0 0 / 0.4);
+}
+.apanel-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px;
+  background: #0d1015;
+  border-bottom: 2px solid #000;
+  font-size: 12px;
+}
+.apanel-head b { color: var(--color-paper); font-weight: 700; }
+.ph-dot { width: 8px; height: 8px; flex-shrink: 0; background: var(--color-emerald); box-shadow: 0 0 8px var(--color-emerald); }
+.ph-dot-off { background: var(--color-stone-dark); box-shadow: none; }
+.ph-dot-crash { background: var(--color-redstone); box-shadow: 0 0 8px var(--color-redstone); }
+.apanel-tabs {
+  display: flex; gap: 2px;
+  background: #0d1015; padding: 0 8px;
+  border-bottom: 2px solid #000;
+}
+.apanel-tabs .tab {
+  padding: 7px 12px; font-weight: 400; opacity: 0.55; font-size: 12px;
+  background: none; border: none; color: inherit; font-family: inherit;
+}
+.apanel-tabs .tab.on { background: #14181f; opacity: 1; color: var(--color-paper); box-shadow: inset 0 2.5px 0 var(--color-emerald); }
+.apanel-side { border-left: 2px solid #000; padding: 12px; background: #10141a; }
+.ps-row { display: grid; gap: 3px; font-size: 11px; }
+.ps-row span { opacity: 0.55; }
+.ps-row b { color: var(--color-paper); font-size: 13px; font-weight: 700; }
+.ps-spark svg { width: 100%; height: 22px; }
+.ps-spark polyline { fill: none; stroke: var(--color-emerald); stroke-width: 2; }
+.pb {
+  border: 2px solid #000; padding: 6px 10px; font-size: 11px;
+  background: #1c222b; box-shadow: 0 3px 0 #000; color: inherit;
+  font-family: inherit; position: relative;
+  transition: transform 0.12s var(--ease-quint), box-shadow 0.12s var(--ease-quint);
+}
+.pb:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 0 #000; }
+.pb:active:not(:disabled) { transform: translateY(3px); box-shadow: 0 0 0 #000; }
+.pb:disabled { opacity: 0.35; }
+.pb-go { background: var(--color-emerald); color: var(--color-ink); font-weight: 700; }
+.pb-stop { background: var(--color-redstone); color: var(--color-paper); font-weight: 700; }
+
+/* console body: caret blink + line entrance */
+.console {
+  background: #14181f;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.console .cline.new { animation: conin 0.18s var(--ease-quint); }
+@keyframes conin { from { opacity: 0; transform: translateY(6px); } }
+.console-caret::after { content: '▊'; color: var(--color-emerald); animation: caret 1.1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+
+/* scrollbars stay chunky and square */
+.console::-webkit-scrollbar, .scroll-px::-webkit-scrollbar { width: 12px; height: 12px; }
+.console::-webkit-scrollbar-track, .scroll-px::-webkit-scrollbar-track { background: var(--color-bedrock); }
+.console::-webkit-scrollbar-thumb, .scroll-px::-webkit-scrollbar-thumb { background: var(--color-deepslate-2); border: 2px solid var(--color-bedrock); }
+
+/* ---------- strata: teeth edge between materials ---------- */
+.strata { position: relative; }
+.strata::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: -1px; z-index: 2;
+  height: var(--eh, 16px);
+  background: var(--next, var(--color-bg));
+  -webkit-mask-image: var(--tile, var(--mask-a)); mask-image: var(--tile, var(--mask-a));
+  -webkit-mask-size: var(--tilesize, 128px 32px); mask-size: var(--tilesize, 128px 32px);
+  -webkit-mask-repeat: repeat-x; mask-repeat: repeat-x;
+  -webkit-mask-position: bottom; mask-position: bottom;
+  pointer-events: none;
+}
+
+/* ---------- vista band: generated pixel-art panorama header ---------- */
+.vista {
+  position: relative;
+  border: 3px solid var(--color-ink);
+  box-shadow: 0 5px 0 var(--color-ink);
+  overflow: clip;
+  image-rendering: auto;
+}
+.vista img {
+  display: block; width: 100%; height: 118px; object-fit: cover;
+}
+.vista .vista-tag {
+  position: absolute; left: 12px; bottom: 10px;
+  font-family: var(--font-px); font-size: 11px; letter-spacing: 0.08em;
+  color: var(--color-paper);
+  background: oklch(0% 0 0 / 0.62);
+  border: 2px solid #000;
+  padding: 5px 9px;
+  text-shadow: 1px 1px 0 #000;
+}
+@media (max-width: 760px) { .vista img { height: 86px; } }
+
+/* pixel icons */
+.pi { width: 20px; height: 20px; flex: none; }
+.pi-s { width: 14px; height: 14px; }
+.pi-l { width: 28px; height: 28px; }
+
+/* ---------- block-targeting reticle (from the landing) ---------- */
+#tgt {
+  position: fixed; top: 0; left: 0; z-index: 55;
+  pointer-events: none; opacity: 0;
+  border: 3px dashed oklch(100% 0 0 / 0.9);
+  mix-blend-mode: difference;
+  transition: opacity 0.14s linear, transform 0.17s var(--ease-quint),
+    width 0.17s var(--ease-quint), height 0.17s var(--ease-quint);
+}
+#tgt.on { opacity: 1; }
+
+/* pulse for "live" markers */
+@keyframes pulse { 50% { box-shadow: 0 0 0 5px oklch(72% 0.17 150 / 0.25); } }
+.pulse-now { animation: pulse 2s ease-in-out infinite; }
+
+/* ---------- state-change motion (2026-07-18 polish pass) ---------- */
+
+/* lamps IGNITE when they turn on/crash — the class swap replays the pop, so a
+   server coming online gets a visible "torch lit" moment instead of a silent
+   color swap. Steady state is calm; only the transition speaks. */
+@keyframes ignite {
+  0% { transform: scale(0.4); }
+  55% { transform: scale(1.35); }
+  100% { transform: scale(1); }
+}
+.lamp-on, .lamp-crash { animation: ignite 0.32s var(--ease-pop); }
+/* starting = torch flicker (uneven steps read as flame, not a metronome) */
+@keyframes flicker {
+  0%, 100% { opacity: 1; }
+  32% { opacity: 0.55; }
+  47% { opacity: 0.9; }
+  71% { opacity: 0.45; }
+}
+.lamp-starting { animation: flicker 1.3s steps(2, jump-none) infinite; }
+
+/* meter: the ONE progress-bar vocabulary (worlds ops, pregen) — same notched
+   XP-bar track as the range slider, plus a slow sheen while work is running */
+.meter {
+  border: 2px solid var(--color-ink);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 8px, oklch(0% 0 0 / 0.25) 8px 9px),
+    var(--color-bedrock);
+  position: relative;
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  position: relative;
+  transition: width 0.6s var(--ease-quint);
+  background-image: repeating-linear-gradient(90deg, transparent 0 8px, oklch(0% 0 0 / 0.18) 8px 9px);
+}
+.meter-fill.working::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent 20%, oklch(100% 0 0 / 0.22) 50%, transparent 80%);
+  animation: sheen 1.6s linear infinite;
+}
+@keyframes sheen { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* pop-in: status chips (✓ saved, ✗ failed, RESETTING…) land like a dropped item */
+@keyframes popin {
+  0% { opacity: 0; transform: scale(0.6) translateY(3px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.pop-in { animation: popin 0.18s var(--ease-pop); }
+
+/* shake-once: damage flinch for destructive confirms — pulls the eye to the
+   "delete?" question the moment it appears */
+@keyframes flinch {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  50% { transform: translateX(3px); }
+  75% { transform: translateX(-2px); }
+}
+.shake-once { animation: flinch 0.22s var(--ease-quint); display: inline-flex; }
+
+/* rise-in: list rows surface like placed blocks; per-row stagger via --i,
+   capped so deep folders don't turn into a slideshow */
+@keyframes risein {
+  from { opacity: 0; transform: translateY(5px); }
+}
+.rise-in { animation: risein 0.16s var(--ease-quint) backwards; animation-delay: calc(min(var(--i, 0), 12) * 22ms); }
+
+/* route-in: switching strata crossfades the content column (120ms — felt, not
+   watched). The sidebar itself never moves. */
+@keyframes routein {
+  from { opacity: 0; transform: translateY(4px); }
+}
+.route-in { animation: routein 0.14s var(--ease-quint); }
+
+@media (prefers-reduced-motion: reduce) {
+  .btn, .lever, .lever::after, .field, .pb { transition: none; }
+  .console .cline.new { animation: none; }
+  .console-caret::after { animation: none; }
+  .pulse-now { animation: none; }
+  #tgt { display: none; }
+}
+
+/* rendered mod descriptions (Content → details) — quiet prose that fits the
+   pixel theme; images capped, tables scroll, headings step down small */
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 { color: var(--color-text); font-weight: 800; margin: 0.8em 0 0.3em; font-size: 1.05em; }
+.md-body h1 { font-size: 1.15em; }
+.md-body p { margin: 0.45em 0; line-height: 1.55; }
+.md-body a { color: var(--color-emerald); text-decoration: underline; text-underline-offset: 2px; }
+.md-body ul, .md-body ol { margin: 0.45em 0 0.45em 1.2em; }
+.md-body ul { list-style: disc; }
+.md-body ol { list-style: decimal; }
+.md-body li { margin: 0.2em 0; }
+.md-body img { max-width: 100%; height: auto; border: 2px solid var(--color-ink); margin: 0.4em 0; }
+.md-body code { background: var(--color-panel); border: 1px solid var(--color-line); padding: 0 4px; font-size: 0.95em; }
+.md-body pre { background: var(--color-panel); border: 2px solid var(--color-line); padding: 8px; overflow-x: auto; margin: 0.5em 0; }
+.md-body pre code { border: none; background: none; padding: 0; }
+.md-body blockquote { border-left: 3px solid var(--color-line); padding-left: 10px; margin: 0.5em 0; }
+.md-body table { display: block; overflow-x: auto; border-collapse: collapse; margin: 0.5em 0; }
+.md-body th, .md-body td { border: 1px solid var(--color-line); padding: 3px 8px; }
+.md-body hr { border: none; border-top: 2px solid var(--color-line); margin: 0.8em 0; }
+.md-body summary { cursor: pointer; font-weight: 700; }
