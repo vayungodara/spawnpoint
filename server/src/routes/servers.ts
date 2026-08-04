@@ -59,7 +59,12 @@ export default async function serverRoutes(app: FastifyInstance) {
       // hide the panel's own RCON plumbing (HUD/auto-stop polling) — vanilla
       // logs two thread lines per connection and echoes command feedback
       const clean = lines.filter((l) => !/RCON (Listener|Client)|\[Rcon:/.test(l));
-      return { lines: clean.slice(-tail) };
+      // Crafty HTML-escapes log lines for its own web console; the UI renders
+      // plain text, so quotes showed up as &quot;/&#x27; verbatim
+      const unescaped = clean.map((l) => l
+        .replace(/&#x27;/g, "'").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+      return { lines: unescaped.slice(-tail) };
     },
   );
 

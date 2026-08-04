@@ -2,6 +2,8 @@
 
 **The self-hosted Minecraft control panel where a broken pack can never reach your friends.**
 
+![Live dashboard — console, TPS, join address, world slots](docs/screenshots/dashboard.png)
+
 Spawnpoint is a web panel you run on the machine that hosts your Minecraft
 servers. It fronts [Crafty Controller](https://craftycontrol.com/) (which owns
 the server processes) and adds everything around it: one-click mod/plugin
@@ -26,6 +28,13 @@ token) that executes natural-language wishes over RCON and is engineered to
 never claim success it can't verify, AutoModpack-based client sync so friends
 never manage pack files, TPS monitoring, a web file manager, scheduled
 restarts, and a storage cleaner.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Server fleet](docs/screenshots/fleet.png) | ![One-click mod installs](docs/screenshots/content.png) |
+| ![Config without editing files](docs/screenshots/config.png) | ![Web file manager](docs/screenshots/files.png) |
 
 ## Requirements
 
