@@ -11,6 +11,7 @@ import maintenanceRoutes from './routes/maintenanceRoutes.js';
 import chunkyRoutes from './routes/chunkyRoutes.js';
 import fileRoutes from './routes/fileRoutes.js';
 import settingsRoutes, { cookieAuthed } from './routes/settingsRoutes.js';
+import wizardRoutes, { wizardActive, setupCode } from './routes/wizardRoutes.js';
 import { startAutostopWatcher } from './services/autostop.js';
 import { startIngameHud } from './services/ingamehud.js';
 import { startAutobackup } from './services/autobackup.js';
@@ -33,6 +34,10 @@ const app = Fastify({ logger: true });
 app.addHook('onRequest', async (req, reply) => {
   if (!req.url.startsWith('/api/')) return;
   if (req.url.startsWith('/api/auth') || req.url === '/api/health') return;
+  // first-run wizard: reachable pre-PIN by definition; every route in the
+  // family self-guards on wizardActive() (token file absent), so a
+  // configured install exposes nothing here beyond {active:false}
+  if (req.url.startsWith('/api/wizard/')) return;
   if (req.ip === '127.0.0.1' || req.ip === '::1') return;
   if (!cookieAuthed(req.headers.cookie)) {
     return reply.code(401).send({ error: 'PIN required' });
@@ -40,6 +45,7 @@ app.addHook('onRequest', async (req, reply) => {
 });
 
 await app.register(settingsRoutes);
+await app.register(wizardRoutes);
 await app.register(serverRoutes);
 await app.register(configRoutes);
 await app.register(contentRoutes);
@@ -134,3 +140,9 @@ setTimeout(() => {
 startLaneJanitor(() => craftyApi.listServers(), (msg) => app.log.info(msg));
 
 await app.listen({ host: '0.0.0.0', port: settings.port });
+
+// fresh install: surface the setup claim code once, so finishing setup from
+// another device is a copy-paste and not a hunt through the filesystem
+if (wizardActive()) {
+  app.log.info(`spawnpoint: first-run setup is open at http://localhost:${settings.port} — setup code for remote browsers: ${setupCode()}`);
+}

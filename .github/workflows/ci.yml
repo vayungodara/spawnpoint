@@ -31,6 +31,10 @@ jobs:
       - run: node -e "import('./server/dist/config.js').then(m => { if (!m.PATHS) throw new Error('config failed'); console.log('config loads on', process.platform); })"
       # smoke 2: boot the real panel on an empty layout and hit /api/health
       - run: node .github/smoke-boot.mjs
+      # smoke 3: the whole first-run story — wizard active on an empty layout,
+      # Crafty admin login mints + persists the token (stub Crafty), wizard
+      # turns itself off, PIN step returns a cookie that validates
+      - run: node .github/wizard-e2e.mjs
 
   # the repo is public — every push gets a full-history secret scan
   gitleaks:

@@ -11,10 +11,14 @@ import Content from './pages/Content.tsx'
 import Backups from './pages/Backups.tsx'
 import Files from './pages/Files.tsx'
 import Settings from './pages/Settings.tsx'
+import Setup from './pages/Setup.tsx'
 
 const queryClient = new QueryClient()
 
 const router = createBrowserRouter([
+  // first-run wizard lives OUTSIDE Shell: no sidebar, no PIN gate — its own
+  // API self-guards and the page bounces home when setup is already done
+  { path: '/setup', element: <Setup /> },
   {
     element: <Shell />,
     children: [

@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Canonical environment paths — the panel operates on the same files the
 // PowerShell tooling uses, so both stay in sync.
@@ -20,7 +21,15 @@ export const PATHS = {
   settingsFile: join(ROOT, 'Spawnpoint', 'data', 'settings.json'),
   ledgerFile: join(ROOT, 'Spawnpoint', 'data', 'install-ledger.json'),
   downloads: join(ROOT, 'Spawnpoint', 'data', 'downloads'),
-  webDist: join(ROOT, 'Spawnpoint', 'web', 'dist'),
+  // web UI: the canonical layout keeps the repo at ROOT/Spawnpoint, but a
+  // stranger may clone anywhere — fall back to the checkout this very file
+  // runs from (server/dist/config.js -> ../../web/dist), so the panel never
+  // boots healthy-but-UI-less just because of a directory name
+  webDist: (() => {
+    const canonical = join(ROOT, 'Spawnpoint', 'web', 'dist');
+    if (existsSync(canonical)) return canonical;
+    return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'dist');
+  })(),
 };
 
 export interface Settings {
@@ -30,6 +39,9 @@ export interface Settings {
   pin: string | null;
   pinHash: string | null; // sha256(pin+salt); null = PIN gate disabled
   curseforgeApiKey: string | null;
+  /** genie auth for installs without a system-wide Claude login — passed to
+      the CLI as ANTHROPIC_API_KEY at spawn time, never logged */
+  anthropicApiKey: string | null;
   vercelToken: string | null; // lets lanes.ts create <name>.<laneDomain> SRV records
   craftyUrl: string;
   /** PUBLIC LANE CONFIG — all four must be set for lanes to provision; a
@@ -52,6 +64,7 @@ const DEFAULTS: Settings = {
   pin: null,
   pinHash: null,
   curseforgeApiKey: null,
+  anthropicApiKey: null,
   vercelToken: null,
   craftyUrl: 'https://localhost:8443',
   laneDomain: null,

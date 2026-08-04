@@ -205,7 +205,15 @@ export async function finalizeServer(
   //    than 21). Paths must be space-free — Crafty tears the command at spaces.
   const server = await craftyApi.getServer(serverId).catch(() => null);
   let cmd = server?.execution_command ?? '';
-  const java = javaFor(opts.mc, opts.loader);
+  let java = javaFor(opts.mc, opts.loader);
+  if (!java) {
+    // fresh box, empty Tools/: fetch the right Temurin instead of shipping
+    // a server that silently never starts
+    const { ensureJdk, jdkFeatureFor } = await import('./temurin.js');
+    if (await ensureJdk(jdkFeatureFor(opts.mc, opts.loader), (m) => notes.push(m))) {
+      java = javaFor(opts.mc, opts.loader);
+    }
+  }
   if (cmd && java) {
     cmd = /^"?java(\.exe)?"?\s/.test(cmd) ? cmd.replace(/^"?java(\.exe)?"?/, `"${java}"`) : cmd;
   } else if (!java) {

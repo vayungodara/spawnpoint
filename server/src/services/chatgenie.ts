@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import AdmZip from 'adm-zip';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, renameSync, openSync, readSync, closeSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { PATHS } from '../config.js';
+import { PATHS, loadSettings } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import { rconBatch, rconCommand } from '../clients/rcon.js';
 import { serverPhase } from './phase.js';
@@ -288,8 +288,14 @@ function spawnClaude(web: boolean): ChildProcessWithoutNullStreams {
     // Spawnpoint CLAUDE.md (and project skills) into every wish
     cwd: genieCwd(),
     ...KILLABLE_SPAWN_OPTS,
-    // build tier thinks deeply; everyday wishes skip thinking entirely
-    env: { ...process.env, MAX_THINKING_TOKENS: web ? '6000' : '0' },
+    // build tier thinks deeply; everyday wishes skip thinking entirely.
+    // Installs without a system-wide Claude login can put an API key in the
+    // panel settings (wizard step 3); it only ever travels via spawn env.
+    env: {
+      ...process.env,
+      MAX_THINKING_TOKENS: web ? '6000' : '0',
+      ...(loadSettings().anthropicApiKey ? { ANTHROPIC_API_KEY: loadSettings().anthropicApiKey! } : {}),
+    },
   });
   // a claude that dies before draining stdin emits EPIPE on this stream;
   // without a listener that's an uncaughtException that kills the PANEL

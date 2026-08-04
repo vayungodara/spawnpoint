@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { PATHS } from '../config.js';
+import { PATHS, craftyToken } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import { rconCommand } from '../clients/rcon.js';
 
@@ -26,6 +26,9 @@ let consecutiveFails = 0;
 let lastRestartAt = 0;
 
 async function probe(): Promise<boolean> {
+  // pre-wizard install: no token means "not connected yet", not "wedged" —
+  // a doctor must not restart a Crafty the panel was never introduced to
+  if (!craftyToken()) return true;
   try {
     await Promise.race([
       craftyApi.listServers(),

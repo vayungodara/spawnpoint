@@ -97,6 +97,7 @@ export default async function settingsRoutes(app: FastifyInstance) {
     return {
       pinEnabled: !!(s.pinHash || s.pin),
       curseforgeKeySet: !!s.curseforgeApiKey,
+      anthropicKeySet: !!s.anthropicApiKey,
       vercelTokenSet: !!s.vercelToken,
       craftyUrl: s.craftyUrl,
       craftyOk,
@@ -106,7 +107,7 @@ export default async function settingsRoutes(app: FastifyInstance) {
   });
 
   // set to a string to change, null to clear, omit to leave alone
-  app.put<{ Body: { pin?: string | null; curseforgeApiKey?: string | null; vercelToken?: string | null } }>(
+  app.put<{ Body: { pin?: string | null; curseforgeApiKey?: string | null; anthropicApiKey?: string | null; vercelToken?: string | null } }>(
     '/api/settings',
     async (req, reply) => {
       const s = loadSettings();
@@ -122,16 +123,24 @@ export default async function settingsRoutes(app: FastifyInstance) {
         const key = req.body.curseforgeApiKey === null ? null : String(req.body.curseforgeApiKey).trim();
         s.curseforgeApiKey = key || null;
       }
+      if ('anthropicApiKey' in req.body) {
+        const key = req.body.anthropicApiKey === null ? null : String(req.body.anthropicApiKey).trim();
+        s.anthropicApiKey = key || null;
+      }
       if ('vercelToken' in req.body) {
         const t = req.body.vercelToken === null ? null : String(req.body.vercelToken).trim();
         s.vercelToken = t || null;
       }
       saveSettings(s);
-      // fresh PIN -> log this browser in immediately
-      if (s.pin) {
+      // fresh PIN -> log this browser in immediately, with the SAME HMAC
+      // cookie /api/auth would issue. (The old guard checked s.pin — which
+      // the plaintext-never-stored rule had just nulled — and minted the
+      // bare sha256 instead of cookieToken(); the wizard's PIN step made
+      // the dead branch matter.)
+      if (typeof req.body.pin === 'string' && s.pinHash) {
         reply.header(
           'set-cookie',
-          `sp_auth=${pinHash(s.pin)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}`,
+          `sp_auth=${cookieToken(s.pinHash)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}`,
         );
       }
       return { ok: true };

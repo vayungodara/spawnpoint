@@ -49,16 +49,35 @@ restarts, and a storage cleaner.
 ## Quick start
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install.sh | bash
+```
+
+That checks Node 22+, creates the layout, builds, starts the panel on port
+**25570**, and prints the URL. Your first browser visit is a three-step
+wizard: log in with your **Crafty admin account once** (the panel mints its
+own API token from it — you never touch a token), set a PIN, optionally add
+keys. Java itself is zero-touch: the right Temurin JDK downloads
+automatically the first time a server needs one.
+
+**API keys required: none.** Modrinth browsing, dependency healing, boot
+testing, and client sync all work key-free. Optional: a free CurseForge key
+(adds their catalog) and an Anthropic key (enables the in-game genie).
+
+<details>
+<summary>Manual install instead</summary>
+
+```bash
 git clone https://github.com/vayungodara/spawnpoint
 cd spawnpoint
 npm ci
-npm run build -w server && npm run build -w web
+npm run build
 SPAWNPOINT_ROOT=/path/to/your/layout node server/dist/index.js
 ```
 
-The panel listens on port **25570**. `SPAWNPOINT_ROOT` points at the directory
-containing `Crafty/servers`, `Shared/`, and `Spawnpoint/` (see Layout below).
-Put your Crafty API token in `Shared/crafty-token.txt`.
+`SPAWNPOINT_ROOT` points at the directory containing `Crafty/servers`,
+`Shared/`, `Tools/`, and `Spawnpoint/` (see Layout below). The first-run
+wizard appears in the browser either way.
+</details>
 
 ## Architecture
 

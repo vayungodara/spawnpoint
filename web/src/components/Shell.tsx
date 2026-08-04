@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router'
+import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useServers, useSetActive } from '../api'
 import { PixelDefs, Pi, loaderIcon } from './PixelIcons'
@@ -120,10 +120,19 @@ export default function Shell() {
     queryFn: async () => (await (await fetch('/api/auth/check')).json()) as { required: boolean; ok: boolean },
     staleTime: 5 * 60_000,
   })
+  // fresh install (no Crafty token yet) — hand the whole first visit to the
+  // wizard; a configured box answers {active:false} and never routes there
+  const { data: wiz } = useQuery({
+    queryKey: ['wizard'],
+    queryFn: async () => (await (await fetch('/api/wizard/status')).json()) as { active: boolean },
+    staleTime: 60_000,
+  })
   const { data } = useServers()
   const setActive = useSetActive()
   const navigate = useNavigate()
   const active = data?.servers.find((s) => s.active)
+
+  if (wiz?.active) return <Navigate to="/setup" replace />
 
   if (auth && auth.required && !auth.ok) {
     return (
