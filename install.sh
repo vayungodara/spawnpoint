@@ -59,7 +59,7 @@ PORT=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('$ROOT/Spa
 # refuse to start a second panel on a taken port: the old process would answer
 # the health check and the installer would report success for code that never
 # started (and print a pid that is already dead)
-if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+if curl -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"name":"spawnpoint"'; then
   say ""
   say "A panel is already running on port $PORT — the new build is ready but not live."
   say "Restart it to pick this build up, then open http://localhost:$PORT"
@@ -76,13 +76,20 @@ for _ in $(seq 1 30); do
   # liveness first: a crashed child (port taken, bad build) must never be
   # reported as success by someone else's healthy panel
   kill -0 "$PANEL_PID" 2>/dev/null || fail "the panel exited during startup — check $LOG"
-  if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"name":"spawnpoint"'; then
     CODE=$(tr -d '\r\n' < "$ROOT/Spawnpoint/data/setup-code.txt" 2>/dev/null || true)
     say ""
     say "Spawnpoint is running (pid $PANEL_PID)."
     say ""
     say "  Open  http://localhost:$PORT  to finish setup in the browser —"
     say "  the first-run wizard connects Crafty with one admin login."
+    if ! curl -fskS "https://localhost:8443" >/dev/null 2>&1; then
+      say ""
+      say "  Heads up: nothing is answering on https://localhost:8443, so Crafty"
+      say "  Controller does not look installed yet. Spawnpoint manages servers"
+      say "  THROUGH Crafty — install it first (https://craftycontrol.com), then"
+      say "  finish the wizard."
+    fi
     # NOTE: an `if`, not `[ … ] && say …` — under set -e a false test would
     # end the script right here, swallowing the hints below
     if [ -n "$CODE" ]; then say "  Setting up from another device? Setup code: $CODE"; fi

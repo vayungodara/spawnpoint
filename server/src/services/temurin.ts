@@ -1,13 +1,28 @@
-import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { join } from 'node:path';
+import { Transform } from 'node:stream';
 import { PATHS } from '../config.js';
 import { IS_WIN, unzipTo, chownToDirOwner } from './platform.js';
 
 const run = promisify(execFile);
+
+// Temurin JDKs are ~200 MB; anything wildly past that is not what we asked for
+const MAX_ARCHIVE_BYTES = 600 * 1024 * 1024;
+
+/** A directory only counts as a JDK when it actually contains a java binary. */
+function usableJdk(dir: string): boolean {
+  try {
+    if (!statSync(dir).isDirectory()) return false;
+    const java = join(dir, 'bin', IS_WIN ? 'java.exe' : 'java');
+    return statSync(java).isFile();
+  } catch {
+    return false;
+  }
+}
 
 // AUTO-JAVA — javaFor() only ever SCANS Tools/ for jdk-* dirs; on a fresh box
 // that scan finds nothing and server creation dies on the silent "no suitable
@@ -40,33 +55,52 @@ export function ensureJdk(feature: 21 | 25, log: (m: string) => void): Promise<b
 async function ensureJdkInner(feature: 21 | 25, log: (m: string) => void): Promise<boolean> {
   const tools = join(PATHS.root, 'Tools');
   mkdirSync(tools, { recursive: true });
-  if (readdirSync(tools).some((d) => d.startsWith(`jdk-${feature}`))) return true;
+  // a NAME is not a JDK: a leftover jdk-21-broken/ or a stray file would
+  // otherwise suppress the download and leave server creation with no runtime
+  if (readdirSync(tools).some((d) => d.startsWith(`jdk-${feature}`) && usableJdk(join(tools, d)))) return true;
 
   const os = IS_WIN ? 'windows' : process.platform === 'darwin' ? 'mac' : 'linux';
   const arch = process.arch === 'arm64' ? 'aarch64' : 'x64';
   const url = `https://api.adoptium.net/v3/binary/latest/${feature}/ga/${os}/${arch}/jdk/hotspot/normal/eclipse`;
-  const staging = join(tools, '.jdk-staging');
+  // per-process staging: two panels sharing a layout must not delete each
+  // other's half-extracted archive
+  const staging = join(tools, `.jdk-staging-${process.pid}`);
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   const archive = join(staging, IS_WIN ? 'jdk.zip' : 'jdk.tar.gz');
 
   log(`java: no JDK ${feature} in Tools/ — downloading Temurin ${feature} (${os}/${arch}, ~200 MB)…`);
   try {
-    const res = await fetch(url, { redirect: 'follow' });
+    // bounded: a stalled mirror must not wedge the serialized chain forever,
+    // and a runaway response must not fill the disk the worlds live on
+    const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(20 * 60_000) });
     if (!res.ok || !res.body) {
       log(`java: Adoptium answered ${res.status} for JDK ${feature} — install one into Tools/ manually`);
       return false;
     }
+    const declared = parseInt(res.headers.get('content-length') ?? '0', 10);
+    if (declared && declared > MAX_ARCHIVE_BYTES) {
+      log(`java: refusing a ${Math.round(declared / 1e6)} MB JDK archive (limit ${MAX_ARCHIVE_BYTES / 1e6} MB)`);
+      return false;
+    }
     // stream to disk — a 200MB arrayBuffer would sit in panel RAM
-    await pipeline(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream), createWriteStream(archive));
+    let seen = 0;
+    const capped = new Transform({
+      transform(chunk, _enc, cb) {
+        seen += chunk.length;
+        if (seen > MAX_ARCHIVE_BYTES) { cb(new Error('archive exceeded the size limit')); return; }
+        cb(null, chunk);
+      },
+    });
+    await pipeline(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream), capped, createWriteStream(archive));
     if (IS_WIN) {
       await unzipTo(archive, staging);
     } else {
       await run('nice', ['-n', '10', 'tar', '-xzf', archive, '-C', staging]);
     }
-    const rootDir = readdirSync(staging).find((d) => d.startsWith('jdk-'));
+    const rootDir = readdirSync(staging).find((d) => d.startsWith('jdk-') && usableJdk(join(staging, d)));
     if (!rootDir) {
-      log('java: Temurin archive had no jdk-* root dir — aborting');
+      log('java: the downloaded archive contained no usable JDK — aborting');
       return false;
     }
     // atomic move: javaFor prefix-matches any jdk-* the moment it appears,

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { networkInterfaces } from 'node:os';
 
 const PORT = 25573;
 const CRAFTY_PORT = 8949;
@@ -111,6 +112,42 @@ const htmlErr = await r.json();
 check('html response yields a readable error', r.status === 502 && /web page/.test(htmlErr.error ?? ''));
 htmlStub.close();
 
+// REMOTE PATH — the loopback shortcut hides the whole claim-code mechanism,
+// so exercise it over a real non-loopback interface when the runner has one
+const lanIp = Object.values(networkInterfaces()).flat()
+  .find((n) => n && n.family === 'IPv4' && !n.internal)?.address;
+if (!lanIp) {
+  console.log('ok - (skipped) no non-loopback interface on this runner: remote claim checks');
+} else {
+  const remote = `http://${lanIp}:${PORT}`;
+  r = await fetch(`${remote}/api/wizard/crafty-login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...ADMIN, url: `http://127.0.0.1:${CRAFTY_PORT}` }),
+  });
+  check('remote setup without a code is refused', r.status === 403);
+  r = await fetch(`${remote}/api/wizard/crafty-login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...ADMIN, url: `http://127.0.0.1:${CRAFTY_PORT}`, code: 'DEADBEEFDEADBEEFDEAD' }),
+  });
+  check('remote setup with a wrong code is refused', r.status === 403);
+  check('no token written by refused remote attempts', !existsSync(join(root, 'Shared', 'crafty-token.txt')));
+
+  // pre-PIN, the real API must be loopback-only — otherwise a stranger could
+  // set the first PIN and seize the panel
+  const guardedRemote = await fetch(`${remote}/api/settings/summary`);
+  check('pre-PIN: guarded API refuses remote callers', guardedRemote.status === 401);
+  const guardedLocal = await fetch(`${base}/api/settings/summary`);
+  check('pre-PIN: guarded API still answers on loopback', guardedLocal.ok);
+  const seize = await fetch(`${remote}/api/settings`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ pin: '9999' }),
+  });
+  check('pre-PIN: remote cannot set the first PIN', seize.status === 401);
+}
+
 r = await fetch(`${base}/api/wizard/crafty-login`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -124,7 +161,7 @@ check('token file written', existsSync(tokenFile) && readFileSync(tokenFile, 'ut
 const saved = JSON.parse(readFileSync(join(root, 'Spawnpoint', 'data', 'settings.json'), 'utf8'));
 check('custom crafty url persisted', saved.craftyUrl === `http://127.0.0.1:${CRAFTY_PORT}`);
 const codeFile = join(root, 'Spawnpoint', 'data', 'setup-code.txt');
-check('setup claim code cleared after setup', !existsSync(codeFile) || readFileSync(codeFile, 'utf8').trim() === '');
+check('claim code still valid between crafty-login and the PIN step', readFileSync(codeFile, 'utf8').trim().length >= 16);
 
 st = await (await fetch(`${base}/api/wizard/status`)).json();
 check('wizard deactivates itself', st.active === false);
@@ -136,19 +173,38 @@ r = await fetch(`${base}/api/wizard/crafty-login`, {
 });
 check('mutating route refuses once configured (403)', r.status === 403);
 
-// PIN step: setting a fresh PIN must hand back a VALID session cookie
-r = await fetch(`${base}/api/settings`, {
-  method: 'PUT',
+// PIN step: the wizard's finish route sets it and hands back a session
+r = await fetch(`${base}/api/wizard/finish`, {
+  method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ pin: '4321' }),
 });
 const setCookie = r.headers.get('set-cookie') ?? '';
-check('setting a PIN issues a session cookie', /sp_auth=[a-f0-9]{64}/.test(setCookie));
+check('finish sets the PIN and issues a session cookie', r.ok && /sp_auth=[a-f0-9]{64}/.test(setCookie));
 const cookie = /sp_auth=[a-f0-9]{64}/.exec(setCookie)?.[0] ?? '';
 const auth = await (await fetch(`${base}/api/auth/check`, { headers: { cookie } })).json();
 check('that cookie validates', auth.required === true && auth.ok === true);
 const noCookie = await (await fetch(`${base}/api/auth/check`)).json();
 check('no cookie means locked', noCookie.ok === false);
+r = await fetch(`${base}/api/wizard/finish`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ pin: '1111' }),
+});
+check('finish refuses once a PIN exists', r.status === 403);
+check('setup claim code cleared once setup completes', readFileSync(codeFile, 'utf8').trim() === '');
+
+// the GATE ITSELF, on a route that actually matters — /api/auth/check is
+// exempt, so it proves nothing about access control
+if (lanIp) {
+  const remote = `http://${lanIp}:${PORT}`;
+  const noCk = await fetch(`${remote}/api/settings/summary`);
+  check('guarded route refuses a remote caller with no cookie', noCk.status === 401);
+  const withCk = await fetch(`${remote}/api/settings/summary`, { headers: { cookie } });
+  check('guarded route accepts the session cookie remotely', withCk.ok);
+  const badCk = await fetch(`${remote}/api/settings/summary`, { headers: { cookie: `sp_auth=${'0'.repeat(64)}` } });
+  check('guarded route rejects a forged cookie', badCk.status === 401);
+}
 
 done = true;
 child.kill();

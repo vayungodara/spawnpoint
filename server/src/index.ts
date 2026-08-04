@@ -10,7 +10,7 @@ import contentRoutes from './routes/contentRoutes.js';
 import maintenanceRoutes from './routes/maintenanceRoutes.js';
 import chunkyRoutes from './routes/chunkyRoutes.js';
 import fileRoutes from './routes/fileRoutes.js';
-import settingsRoutes, { cookieAuthed } from './routes/settingsRoutes.js';
+import settingsRoutes, { cookieAuthed, pinConfigured } from './routes/settingsRoutes.js';
 import wizardRoutes, { wizardActive, setupCode } from './routes/wizardRoutes.js';
 import { startAutostopWatcher } from './services/autostop.js';
 import { startIngameHud } from './services/ingamehud.js';
@@ -35,10 +35,19 @@ app.addHook('onRequest', async (req, reply) => {
   if (!req.url.startsWith('/api/')) return;
   if (req.url.startsWith('/api/auth') || req.url === '/api/health') return;
   // first-run wizard: reachable pre-PIN by definition; every route in the
-  // family self-guards on wizardActive() (token file absent), so a
-  // configured install exposes nothing here beyond {active:false}
+  // family self-guards on wizardActive() (token file absent) and demands the
+  // setup claim code from non-loopback callers
   if (req.url.startsWith('/api/wizard/')) return;
-  if (req.ip === '127.0.0.1' || req.ip === '::1') return;
+  if (req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1') return;
+  // NO PIN SET = the install is still being set up, and cookieAuthed() says
+  // "open" by design (the gate is opt-in). That must never mean OPEN TO THE
+  // NETWORK: before a PIN exists, a remote caller could set the first PIN
+  // itself and seize the panel, or drive the server API outright. Until the
+  // owner sets a PIN, real API access is loopback-only; the wizard (claim-code
+  // gated) is how a remote browser finishes setup.
+  if (!pinConfigured()) {
+    return reply.code(401).send({ error: 'this panel has no PIN yet — finish setup at /setup, or open it from the machine it runs on' });
+  }
   if (!cookieAuthed(req.headers.cookie)) {
     return reply.code(401).send({ error: 'PIN required' });
   }

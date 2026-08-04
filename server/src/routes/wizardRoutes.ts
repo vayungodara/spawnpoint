@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { Agent, request } from 'undici';
 import { PATHS, loadSettings, saveSettings } from '../config.js';
 import { chownToDirOwner } from '../services/platform.js';
+import { pinHash, cookieToken } from './settingsRoutes.js';
 
 // FIRST-RUN WIZARD — active exactly while Shared/crafty-token.txt is absent.
 // A configured install (the file exists) never sees any of this: /status says
@@ -31,11 +32,43 @@ export function setupCode(): string {
   try {
     const c = readFileSync(CODE_FILE, 'utf8').trim();
     if (c) return c;
-  } catch { /* first call — mint one below */ }
-  const code = randomBytes(4).toString('hex').toUpperCase();
+  } catch { /* missing/unreadable — mint one below */ }
+  // 80 bits: this endpoint can be reachable from a LAN (or a tailnet) while
+  // setup is open, so the code has to survive sustained guessing on its own,
+  // not just because of the throttle below
+  const code = randomBytes(10).toString('hex').toUpperCase();
   mkdirSync(PATHS.data, { recursive: true });
-  writeFileSync(CODE_FILE, `${code}\n`, { mode: 0o600 });
-  return code;
+  // wx = first writer wins: two panel processes sharing a layout must not
+  // print different codes than the one actually stored
+  try {
+    writeFileSync(CODE_FILE, `${code}\n`, { mode: 0o600, flag: 'wx' });
+    return code;
+  } catch {
+    try {
+      const existing = readFileSync(CODE_FILE, 'utf8').trim();
+      if (existing) return existing;
+    } catch { /* fall through */ }
+    writeFileSync(CODE_FILE, `${code}\n`, { mode: 0o600 });
+    return code;
+  }
+}
+
+// wrong-code throttle, same shape as the PIN gate's: 5 free tries then a
+// doubling lockout. Bounded so it cannot be grown into a memory DoS.
+const codeAttempts = new Map<string, { fails: number; lockedUntil: number }>();
+function codeThrottled(ip: string): number {
+  const a = codeAttempts.get(ip);
+  return a && Date.now() < a.lockedUntil ? Math.ceil((a.lockedUntil - Date.now()) / 1000) : 0;
+}
+function codeFailed(ip: string): void {
+  const a = codeAttempts.get(ip) ?? { fails: 0, lockedUntil: 0 };
+  a.fails += 1;
+  if (a.fails >= 5) a.lockedUntil = Date.now() + Math.min(15 * 60_000, 2 ** (a.fails - 5) * 30_000);
+  if (!codeAttempts.has(ip) && codeAttempts.size >= 2048) {
+    const oldest = codeAttempts.keys().next();
+    if (!oldest.done) codeAttempts.delete(oldest.value);
+  }
+  codeAttempts.set(ip, a);
 }
 
 function isLocal(req: FastifyRequest): boolean {
@@ -69,13 +102,25 @@ function isPrivateHost(host: string): boolean {
 // panel then runs happily. Scope is the same one that reaches the API at all:
 // private hosts only, never a public peer.
 const insecureLocalAgent = new Agent({ connect: { rejectUnauthorized: false } });
-function dispatcherFor(url: string): Agent | undefined {
+function isLoopbackHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  return h === 'localhost' || h === '::1' || /^127\./.test(h);
+}
+/** Crafty on THIS machine can't be MITM'd, so its self-signed cert is fine.
+    Anything else on the LAN gets real verification unless the user explicitly
+    accepts the risk — the admin password is in that request body, and a
+    hijacked `.local` name or an ARP-poisoned LAN IP would otherwise hand it to
+    whoever answered. */
+function dispatcherFor(url: string, allowInsecure = false): Agent | undefined {
   try {
-    return isPrivateHost(new URL(url).hostname) ? insecureLocalAgent : undefined;
+    const u = new URL(url);
+    if (u.protocol !== 'https:') return undefined;
+    return isLoopbackHost(u.hostname) || allowInsecure ? insecureLocalAgent : undefined;
   } catch {
     return undefined;
   }
 }
+const CERT_ERR = /certificate|self.signed|SELF_SIGNED|DEPTH_ZERO|UNABLE_TO_VERIFY|ERR_TLS/i;
 
 /** True when a machine-wide Claude Code login exists — the genie can then run
     on the subscription the owner already pays for, with no key to paste. */
@@ -88,20 +133,27 @@ function claudeCliReady(): { installed: boolean; loggedIn: boolean } {
   return { installed, loggedIn };
 }
 
+let probeCache = { at: 0, ok: false };
+
 export default async function wizardRoutes(app: FastifyInstance) {
   app.get('/api/wizard/status', async (req) => {
     if (!wizardActive()) return { active: false };
     const s = loadSettings();
-    let craftyReachable = false;
-    try {
-      // any HTTP answer at all means something is listening there
-      const res = await request(`${s.craftyUrl}/api/v2`, {
-        dispatcher: dispatcherFor(s.craftyUrl),
-        signal: AbortSignal.timeout(3000),
-      });
-      await res.body.dump();
-      craftyReachable = true;
-    } catch { /* nothing listening — the wizard says so instead of guessing */ }
+    // the probe is cached: this route is unauthenticated during setup, and one
+    // outbound connection per poll is an amplifier a stranger should not have
+    let craftyReachable = probeCache.ok;
+    if (Date.now() - probeCache.at > 5000) {
+      craftyReachable = false;
+      try {
+        const res = await request(`${s.craftyUrl}/api/v2`, {
+          dispatcher: dispatcherFor(s.craftyUrl, true),
+          signal: AbortSignal.timeout(3000),
+        });
+        await res.body.dump();
+        craftyReachable = true;
+      } catch { /* nothing listening — the wizard says so instead of guessing */ }
+      probeCache = { at: Date.now(), ok: craftyReachable };
+    }
     const tools = join(PATHS.root, 'Tools');
     const hasJdk = existsSync(tools) && readdirSync(tools).some((d) => d.startsWith('jdk-'));
     return {
@@ -116,15 +168,19 @@ export default async function wizardRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post<{ Body: { username?: string; password?: string; url?: string; code?: string } }>(
+  app.post<{ Body: { username?: string; password?: string; url?: string; code?: string; allowInsecure?: boolean } }>(
     '/api/wizard/crafty-login',
     async (req, reply) => {
       if (!wizardActive()) return reply.code(403).send({ error: 'setup is already complete' });
+      const wait = isLocal(req) ? 0 : codeThrottled(req.ip);
+      if (wait) return reply.code(429).send({ error: `too many wrong setup codes — wait ${wait}s` });
       if (!claimOk(req, String(req.body?.code ?? ''))) {
+        codeFailed(req.ip);
         return reply.code(403).send({
           error: 'setup code required — it was printed by the installer (or run: cat <layout>/Spawnpoint/data/setup-code.txt on the panel machine)',
         });
       }
+      const allowInsecure = req.body?.allowInsecure === true;
       const username = String(req.body?.username ?? '').trim();
       const password = String(req.body?.password ?? '');
       if (!username || !password) return reply.code(400).send({ error: 'username and password required' });
@@ -149,7 +205,7 @@ export default async function wizardRoutes(app: FastifyInstance) {
       try {
         const res = await request(`${url}/api/v2/auth/login`, {
           method: 'POST',
-          dispatcher: dispatcherFor(url),
+          dispatcher: dispatcherFor(url, allowInsecure),
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ username, password }),
           signal: AbortSignal.timeout(10_000),
@@ -169,7 +225,16 @@ export default async function wizardRoutes(app: FastifyInstance) {
           return reply.code(502).send({ error: 'Crafty login did not return a token — check the credentials' });
         }
         token = j.data.token;
-      } catch {
+      } catch (e) {
+        // a cert failure is a DECISION for the user, not a dead end: Crafty's
+        // default cert is self-signed, and the alternative to asking is
+        // silently shipping their admin password to an unverified peer
+        if (CERT_ERR.test(String((e as { cause?: unknown })?.cause ?? e))) {
+          return reply.code(495).send({
+            error: `${url} presented a certificate this panel cannot verify (Crafty's default cert is self-signed). Connect anyway only if you trust this network.`,
+            certUntrusted: true,
+          });
+        }
         return reply.code(502).send({ error: `could not reach Crafty at ${url} — is it running?` });
       }
 
@@ -177,7 +242,7 @@ export default async function wizardRoutes(app: FastifyInstance) {
       let servers = 0;
       try {
         const res = await request(`${url}/api/v2/servers`, {
-          dispatcher: dispatcherFor(url),
+          dispatcher: dispatcherFor(url, allowInsecure),
           headers: { authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(10_000),
         });
@@ -202,12 +267,52 @@ export default async function wizardRoutes(app: FastifyInstance) {
       } catch {
         return reply.code(500).send({ error: 'could not save settings — check write permissions on the data folder' });
       }
+      // the awaits above took seconds; a second setup request could have
+      // completed meanwhile. wx makes the token file first-writer-wins so a
+      // late arrival can never repoint a configured install.
       mkdirSync(dirname(PATHS.craftyTokenFile), { recursive: true });
-      writeFileSync(PATHS.craftyTokenFile, `${token}\n`, { mode: 0o600 });
+      try {
+        writeFileSync(PATHS.craftyTokenFile, `${token}\n`, { mode: 0o600, flag: 'wx' });
+      } catch {
+        return reply.code(409).send({ error: 'setup was already completed by another browser' });
+      }
       await chownToDirOwner(dirname(PATHS.craftyTokenFile));
+      // the claim code stays valid until the PIN step below closes setup —
+      // a remote browser still needs it for /finish
+      return { ok: true, servers };
+    },
+  );
+
+  // FINISH — sets the PIN (and optional keys). This route exists because real
+  // API access is loopback-only until a PIN is configured: a remote browser
+  // finishing setup cannot reach PUT /api/settings yet, and the claim code is
+  // what stands in for the session it does not have. Accepted only while no
+  // PIN exists; afterwards Settings is the only way to change anything.
+  app.post<{ Body: { pin?: string; code?: string; curseforgeApiKey?: string; anthropicApiKey?: string } }>(
+    '/api/wizard/finish',
+    async (req, reply) => {
+      const s = loadSettings();
+      if (s.pinHash || s.pin) return reply.code(403).send({ error: 'this panel already has a PIN — change it in Settings' });
+      const wait = isLocal(req) ? 0 : codeThrottled(req.ip);
+      if (wait) return reply.code(429).send({ error: `too many wrong setup codes — wait ${wait}s` });
+      if (!claimOk(req, String(req.body?.code ?? ''))) {
+        codeFailed(req.ip);
+        return reply.code(403).send({ error: 'setup code required' });
+      }
+      const pin = String(req.body?.pin ?? '').trim();
+      if (!/^\d{4,8}$/.test(pin)) return reply.code(400).send({ error: 'PIN must be 4-8 digits' });
+      s.pin = null;
+      s.pinHash = pinHash(pin);
+      if (req.body?.curseforgeApiKey) s.curseforgeApiKey = String(req.body.curseforgeApiKey).trim() || null;
+      if (req.body?.anthropicApiKey) s.anthropicApiKey = String(req.body.anthropicApiKey).trim() || null;
+      saveSettings(s);
       // setup is over — the claim code has no further purpose
       try { writeFileSync(CODE_FILE, '', { mode: 0o600 }); } catch { /* best effort */ }
-      return { ok: true, servers };
+      reply.header(
+        'set-cookie',
+        `sp_auth=${cookieToken(s.pinHash)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}`,
+      );
+      return { ok: true };
     },
   );
 }

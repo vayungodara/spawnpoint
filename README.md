@@ -48,6 +48,9 @@ restarts, and a storage cleaner.
 
 ## Quick start
 
+Install [Crafty Controller](https://craftycontrol.com/) first — Spawnpoint
+manages your servers *through* it. Then:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install.sh | bash
 ```

@@ -49,6 +49,7 @@ export default function Setup() {
 
   // step 1 — pin
   const [pin, setPin] = useState('')
+  const [pinDone, setPinDone] = useState(false)
 
   // step 2 — optional keys
   const [cfKey, setCfKey] = useState('')
@@ -81,11 +82,16 @@ export default function Setup() {
     setBusy(true)
     setErr('')
     try {
-      const r = await put({ pin })
+      const r = await fetch('/api/wizard/finish', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pin, code: code || undefined }),
+      })
       if (!r.ok) {
         setErr(await r.json().then((j) => j.error).catch(() => null) ?? 'could not save the PIN')
         return
       }
+      setPinDone(true)
       setStep(2)
     } catch {
       setErr('the panel stopped responding — is it still running?')
@@ -99,10 +105,19 @@ export default function Setup() {
     setErr('')
     try {
       if (!skipKeys && (cfKey || aiKey)) {
-        const r = await put({
+        const body = {
           ...(cfKey ? { curseforgeApiKey: cfKey } : {}),
           ...(aiKey ? { anthropicApiKey: aiKey } : {}),
-        })
+        }
+        // with a PIN set we hold a session cookie; without one the API is
+        // loopback-only, so the claim-code route carries the keys instead
+        const r = pinDone
+          ? await put(body)
+          : await fetch('/api/wizard/finish', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ ...body, code: code || undefined }),
+          })
         if (!r.ok) { setErr('could not save the keys — you can add them later in Settings'); return }
       }
       await qc.invalidateQueries()
@@ -208,7 +223,7 @@ export default function Setup() {
               Set PIN
             </button>
             <button onClick={() => setStep(2)} disabled={busy} className="btn w-full py-2 text-xs mt-2 opacity-80">
-              Skip — panel stays open on this network
+              Skip — the panel then answers only on this machine
             </button>
           </>
         )}

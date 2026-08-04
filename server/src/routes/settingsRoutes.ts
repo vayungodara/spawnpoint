@@ -42,11 +42,18 @@ function storedPinHash(): string | null {
   return s.pinHash ?? null;
 }
 
-const cookieToken = (hash: string): string =>
+export const cookieToken = (hash: string): string =>
   createHmac('sha256', sessionSecret()).update(`sp-auth:${hash}`).digest('hex');
 
 const tsEq = (a: string, b: string): boolean =>
   a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+/** Whether this install has a PIN at all. Distinct from cookieAuthed(): "no
+    PIN" means the gate is off for LOCAL use, never that the network may
+    administer the panel. */
+export function pinConfigured(): boolean {
+  return !!storedPinHash();
+}
 
 export function cookieAuthed(cookieHeader: string | undefined): boolean {
   const hash = storedPinHash();
@@ -58,6 +65,18 @@ export function cookieAuthed(cookieHeader: string | undefined): boolean {
 // brute-force throttle: 5 free tries per IP, then doubling lockout (30s → 15min
 // cap). In-memory on purpose — a panel restart forgiving the counter is fine.
 const pinAttempts = new Map<string, { fails: number; lockedUntil: number }>();
+// bounded on purpose: /api/auth sits outside the gate, so an attacker with
+// many source addresses (a /64 of IPv6 is free) could otherwise grow this map
+// until the panel is OOM-killed. Dropping the oldest entries only forgives
+// lockouts, which the doubling backoff re-earns in seconds.
+const MAX_TRACKED_IPS = 4096;
+function rememberAttempt(ip: string, a: { fails: number; lockedUntil: number }): void {
+  if (!pinAttempts.has(ip) && pinAttempts.size >= MAX_TRACKED_IPS) {
+    const oldest = pinAttempts.keys().next();
+    if (!oldest.done) pinAttempts.delete(oldest.value);
+  }
+  pinAttempts.set(ip, a);
+}
 
 export default async function settingsRoutes(app: FastifyInstance) {
   app.get('/api/auth/check', async (req) => ({
@@ -75,7 +94,7 @@ export default async function settingsRoutes(app: FastifyInstance) {
     if (!tsEq(pinHash(String(req.body?.pin ?? '')), hash)) {
       a.fails += 1;
       if (a.fails >= 5) a.lockedUntil = Date.now() + Math.min(15 * 60_000, 2 ** (a.fails - 5) * 30_000);
-      pinAttempts.set(req.ip, a);
+      rememberAttempt(req.ip, a);
       return reply.code(401).send({ error: 'wrong PIN' });
     }
     pinAttempts.delete(req.ip);
