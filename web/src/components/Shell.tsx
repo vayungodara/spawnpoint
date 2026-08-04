@@ -122,7 +122,7 @@ export default function Shell() {
   })
   // fresh install (no Crafty token yet) — hand the whole first visit to the
   // wizard; a configured box answers {active:false} and never routes there
-  const { data: wiz } = useQuery({
+  const { data: wiz, isLoading: wizLoading } = useQuery({
     queryKey: ['wizard'],
     queryFn: async () => (await (await fetch('/api/wizard/status')).json()) as { active: boolean },
     staleTime: 60_000,
@@ -132,6 +132,9 @@ export default function Shell() {
   const navigate = useNavigate()
   const active = data?.servers.find((s) => s.active)
 
+  // hold the first paint until we know: otherwise a fresh install flashes the
+  // panel (with failing queries) for one round-trip before redirecting
+  if (wizLoading) return <div className="min-h-screen" style={{ background: 'var(--color-bedrock)' }} />
   if (wiz?.active) return <Navigate to="/setup" replace />
 
   if (auth && auth.required && !auth.ok) {

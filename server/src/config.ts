@@ -86,7 +86,9 @@ export function loadSettings(): Settings {
 
 export function saveSettings(s: Settings): void {
   mkdirSync(PATHS.data, { recursive: true });
-  writeFileSync(PATHS.settingsFile, JSON.stringify(s, null, 2), 'utf8');
+  // this file holds API keys and tokens — owner-only, like the session secret
+  // and the Crafty token file
+  writeFileSync(PATHS.settingsFile, JSON.stringify(s, null, 2), { encoding: 'utf8', mode: 0o600 });
 }
 
 export function craftyToken(): string | null {

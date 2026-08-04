@@ -82,8 +82,13 @@ export default function Setup() {
     setErr('')
     try {
       const r = await put({ pin })
-      if (!r.ok) { setErr((await r.json()).error ?? 'could not save the PIN'); return }
+      if (!r.ok) {
+        setErr(await r.json().then((j) => j.error).catch(() => null) ?? 'could not save the PIN')
+        return
+      }
       setStep(2)
+    } catch {
+      setErr('the panel stopped responding — is it still running?')
     } finally {
       setBusy(false)
     }
@@ -102,6 +107,8 @@ export default function Setup() {
       }
       await qc.invalidateQueries()
       nav('/', { replace: true })
+    } catch {
+      setErr('the panel stopped responding — is it still running?')
     } finally {
       setBusy(false)
     }
