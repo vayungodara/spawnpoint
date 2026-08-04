@@ -6,43 +6,102 @@ import { join, basename, dirname } from 'node:path';
 import { PATHS } from '../config.js';
 import { serverDir, javaFor } from './servers.js';
 import { detect } from './detect.js';
-import { killTree, IS_WIN } from './platform.js';
-import { symlinkSync } from 'node:fs';
+import { killTree, IS_WIN, sandboxLink, KILLABLE_SPAWN_OPTS } from './platform.js';
+import { FORGE_ARGFILE } from './preflight.js';
 import { spawnSync } from 'node:child_process';
 
-// the client gate needs a virtual display — Linux + xvfb-run. Elsewhere the
-// gate degrades HONESTLY: verdict says why it skipped, the dry-boot preflight
-// still protects the server, and nothing pretends to have tested a client.
-let xvfbState: boolean | null = null;
-function clientGateAvailable(): boolean {
-  if (xvfbState !== null) return xvfbState;
-  xvfbState = !IS_WIN && process.platform === 'linux'
-    && spawnSync('which', ['xvfb-run'], { stdio: 'ignore' }).status === 0;
-  return xvfbState;
+// the client gate needs a DISPLAY. Three ways to get one, checked in order:
+//   'xvfb'   — Linux + xvfb-run: invisible virtual framebuffer.
+//   'window' — macOS/Windows (or a Linux desktop without xvfb): the REAL
+//              client opens as a small window on the desktop for a few
+//              minutes. Full fidelity, zero extra dependencies — a visible
+//              window beats a stubbed-GL headless hack, because stubbed GL
+//              can mask or invent render-init crashes and the verdict lies.
+//   null     — headless box that isn't Linux-with-xvfb: the gate degrades
+//              HONESTLY — the verdict says why it skipped, the dry-boot
+//              preflight still protects the server, and nothing pretends to
+//              have tested a client.
+type GateMode = 'xvfb' | 'window';
+let modeState: GateMode | null | undefined;
+export function gateMode(): GateMode | null {
+  if (modeState !== undefined) return modeState;
+  if (process.platform === 'linux' && spawnSync('which', ['xvfb-run'], { stdio: 'ignore' }).status === 0) {
+    modeState = 'xvfb';
+  } else if (IS_WIN || process.platform === 'darwin' || process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
+    modeState = 'window';
+  } else {
+    modeState = null;
+  }
+  return modeState;
 }
 
 // TIER-2 LAUNCH GATE — AutoModpack is a mirror, not a validator (its own
 // README: users must ensure the modpack works before it distributes it). So
 // after every pack regenerate, this boots the EXACT client set friends will
-// receive — a real Minecraft client under Xvfb with mc-runtime-test driving
-// it into a world — and records PASS/FAIL. A client-side conflict is caught
+// receive — a real Minecraft client (under Xvfb on headless Linux, as a small
+// desktop window elsewhere) with mc-runtime-test driving it into a world —
+// and records PASS/FAIL. A client-side conflict is caught
 // on this box instead of on a friend's screen.
 //
 // Proven live 2026-07-20: main's 43-mod set (sodium+iris+shaders present)
 // boots and joins in ~2min; the harness caught its first real finding the
 // same evening (ImmediatelyFast's font-atlas patch NPEs under Xvfb/Mesa).
 //
-// ENV_SKIP: mods that crash ONLY in this headless environment while being
-// demonstrably fine on real clients (owner plays with them daily). They ship
-// to players but are excluded from gate boots. Keep this list SHORT and
-// documented — every entry is a hole in the gate.
+// ENV_SKIP: mods that crash ONLY in the Xvfb/Mesa software-GL environment
+// while being demonstrably fine on real clients (owner plays with them
+// daily). They ship to players but are excluded from xvfb-mode boots — in
+// window mode the client runs on a real GPU, so the FULL set is tested.
+// Keep this list SHORT and documented — every entry is a hole in the gate.
 const ENV_SKIP = [
   'immediatelyfast', // FontSet.resetTextures NPE under Xvfb/Mesa only — bisected 2026-07-20
 ];
 
 const HMC = join(PATHS.root, 'Tools', 'headlessmc');
 const LAUNCHER = join(HMC, 'headlessmc-launcher-2.10.0.jar');
-const JAVA25 = join(PATHS.root, 'Tools', 'jdk-25.0.3+9', 'bin', 'java');
+
+// the launcher JVM takes the newest JDK under Tools/ (jdk-25 on the home
+// box, java.exe on Windows); which java the GAME runs under is HMC's own
+// affair, chosen at version-install time via `--java`.
+let gateJavaState: string | null | undefined;
+function gateJava(): string | null {
+  if (gateJavaState !== undefined) return gateJavaState;
+  gateJavaState = null;
+  const tools = join(PATHS.root, 'Tools');
+  if (existsSync(tools)) {
+    // numeric-major sort: a legacy jdk-8 must not beat jdk-25 lexically
+    const jdks = readdirSync(tools).filter((x) => x.startsWith('jdk-'))
+      .sort((a, b) => (parseInt(b.slice(4), 10) || 0) - (parseInt(a.slice(4), 10) || 0));
+    for (const d of jdks) {
+      const p = join(tools, d, 'bin', IS_WIN ? 'java.exe' : 'java');
+      if (existsSync(p)) { gateJavaState = p; break; }
+    }
+  }
+  return gateJavaState;
+}
+
+// low-priority wrappers: Linux gets nice+ionice (the bulk-ops law), macOS
+// has nice but no ionice, Windows has neither — and gates only run when zero
+// players are online, so priority matters least exactly where it's missing.
+const NICE = IS_WIN ? [] : ['nice', '-n', '19'];
+const NICE_IO = IS_WIN ? [] : process.platform === 'linux'
+  ? ['nice', '-n', '19', 'ionice', '-c3'] : ['nice', '-n', '19'];
+
+/** Full argv for a gate CLIENT boot, per display mode. extraProps are -D
+    JVM props (gameargs etc.), launcherArgs everything after the launcher jar. */
+function clientArgv(extraProps: string[], launcherArgs: string[]): string[] {
+  const argv = [...NICE_IO];
+  if (gateMode() === 'xvfb') argv.push('xvfb-run', '-a');
+  argv.push(gateJava()!);
+  if (gateMode() === 'xvfb') argv.push('-Dhmc.check.xvfb=true');
+  // LWJGL on macOS must create its window on the process's first thread
+  if (process.platform === 'darwin') argv.push('-XstartOnFirstThread');
+  argv.push(...extraProps, '-jar', LAUNCHER, ...launcherArgs);
+  return argv;
+}
+
+// window mode keeps the visible client small and out of the way; xvfb mode
+// leaves geometry alone (the virtual framebuffer nobody sees)
+const WINDOW_SIZE_ARGS = '--width 640 --height 360';
 // known HMC hang modes — timeout is a FAIL. 15 min: a 70-mod pack with a
 // 183MB physics mod under software GL genuinely needs >10 (live 2026-07-21)
 const RUN_TIMEOUT_MS = 15 * 60_000;
@@ -196,7 +255,8 @@ const execFileP = promisify(execFile);
 // for its whole duration. Live 2026-07-21: "panel isnt loading" while the
 // horrorFabric gate downloaded 1.20.1.
 async function hmcCmd(args: string[]): Promise<void> {
-  await execFileP('nice', ['-n', '19', JAVA25, '-jar', LAUNCHER, '--command', ...args], {
+  const argv = [...NICE, gateJava()!, '-jar', LAUNCHER, '--command', ...args];
+  await execFileP(argv[0], argv.slice(1), {
     cwd: HMC, timeout: 8 * 60_000, maxBuffer: 32 * 1024 * 1024,
   });
 }
@@ -286,7 +346,7 @@ async function runJoinGate(
     const ns = det.loader === 'forge' ? 'minecraftforge' : 'neoforge';
     const fdir = join(sdir, 'libraries', 'net', ns, det.loader === 'forge' ? 'forge' : 'neoforge');
     const ver = existsSync(fdir) ? readdirSync(fdir)[0] : null;
-    const rel = ver ? `libraries/net/${ns}/${det.loader === 'forge' ? 'forge' : 'neoforge'}/${ver}/unix_args.txt` : null;
+    const rel = ver ? `libraries/net/${ns}/${det.loader === 'forge' ? 'forge' : 'neoforge'}/${ver}/${FORGE_ARGFILE}` : null;
     if (rel && existsSync(join(sdir, rel))) launchArgs = [heap, ...fast, `@${rel}`, 'nogui'];
   }
   const java = javaFor(det.mc, det.loader);
@@ -297,11 +357,11 @@ async function runJoinGate(
   mkdirSync(join(srv, 'mods'), { recursive: true });
   for (const item of ['fabric.jar', 'libraries', 'versions', '.fabric']) {
     const src = join(sdir, item);
-    if (existsSync(src)) symlinkSync(src, join(srv, item));
+    if (existsSync(src)) sandboxLink(src, join(srv, item));
   }
   for (const jar of readdirSync(join(sdir, 'mods')).filter((f) => f.endsWith('.jar'))) {
     if (/automodpack/i.test(jar)) continue;
-    symlinkSync(join(sdir, 'mods', jar), join(srv, 'mods', jar));
+    sandboxLink(join(sdir, 'mods', jar), join(srv, 'mods', jar));
   }
   writeFileSync(join(srv, 'eula.txt'), 'eula=true\n', 'utf8');
   writeFileSync(join(srv, 'server.properties'), [
@@ -328,8 +388,9 @@ async function runJoinGate(
     let cliChild: ReturnType<typeof spawn> | null = null;
     let settled = false;
     let dwellTimer: NodeJS.Timeout | null = null;
-    const srvChild = spawn('nice', ['-n', '19', java, ...launchArgs], {
-      cwd: srv, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+    const srvArgv = [...NICE, java, ...launchArgs];
+    const srvChild = spawn(srvArgv[0], srvArgv.slice(1), {
+      cwd: srv, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS,
     });
     const finish = (ok: boolean, detail: string): void => {
       if (settled) return;
@@ -390,10 +451,11 @@ async function runJoinGate(
       const escaped = (det.mc ?? '').replace(/\./g, '\\.');
       const versionRegex = det.loader === 'fabric' ? `fabric-loader-.*-${escaped}` : `${escaped}-forge-.*`;
       log(`launchgate: join test — sandbox server up, quick-playing client into 127.0.0.1:${JOIN_PORT}`);
-      cliChild = spawn('nice', ['-n', '19', 'ionice', '-c3', 'xvfb-run', '-a',
-        JAVA25, '-Dhmc.check.xvfb=true', `-Dhmc.gameargs=--quickPlayMultiplayer 127.0.0.1:${JOIN_PORT}`,
-        '-jar', LAUNCHER, '--command', 'launch', versionRegex, '-regex', '--jvm', '-Xmx4G',
-      ], { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      const gameArgs = `--quickPlayMultiplayer 127.0.0.1:${JOIN_PORT}`
+        + (gateMode() === 'window' ? ` ${WINDOW_SIZE_ARGS}` : '');
+      const cliArgv = clientArgv([`-Dhmc.gameargs=${gameArgs}`],
+        ['--command', 'launch', versionRegex, '-regex', '--jvm', '-Xmx4G']);
+      cliChild = spawn(cliArgv[0], cliArgv.slice(1), { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
       cliChild.on('exit', (code) => {
         if (!joined) inconclusive(`client exited (code ${code}) before ever joining the server`);
       });
@@ -470,8 +532,11 @@ async function runGate(serverId: string, log: (m: string) => void): Promise<Gate
   if ((det.loader !== 'fabric' && det.loader !== 'forge') || !det.mc) {
     return save({ ok: true, skipped: `${det.loader} client gate not supported yet`, detail: 'skipped', at });
   }
-  if (!clientGateAvailable()) {
-    return save({ ok: true, skipped: 'client gate needs Linux with xvfb-run (install xvfb) — server-side dry-boot still active', detail: 'skipped', at });
+  if (!gateMode()) {
+    return save({ ok: true, skipped: 'client gate needs a display — headless Linux: install xvfb; a desktop session runs it as a small visible window. Server-side dry-boot still active', detail: 'skipped', at });
+  }
+  if (!existsSync(LAUNCHER) || !gateJava()) {
+    return save({ ok: true, skipped: 'client gate launcher not installed (Tools/headlessmc + a Tools/ JDK) — server-side dry-boot still active', detail: 'skipped', at });
   }
   const contentPath = join(sdir, 'automodpack', 'host-modpack', 'automodpack-content.json');
   if (!existsSync(contentPath)) return save({ ok: true, skipped: 'no automodpack content', detail: 'skipped', at });
@@ -486,11 +551,14 @@ async function runGate(serverId: string, log: (m: string) => void): Promise<Gate
   mkdirSync(join(rundir, 'mods'), { recursive: true });
   const content = JSON.parse(readFileSync(contentPath, 'utf8')) as { list?: { file: string }[]; files?: { file: string }[] };
   const files = content.list ?? content.files ?? [];
+  // ENV_SKIP entries are Xvfb/Mesa artifacts — a window-mode boot runs on a
+  // real GPU and tests the full set
+  const envSkip = gateMode() === 'xvfb' ? ENV_SKIP : [];
   let mods = 0;
   let skippedEnv = 0;
   for (const f of files) {
     const rel = f.file.replace(/^\//, '');
-    if (ENV_SKIP.some((s) => basename(rel).toLowerCase().includes(s))) { skippedEnv++; continue; }
+    if (envSkip.some((s) => basename(rel).toLowerCase().includes(s))) { skippedEnv++; continue; }
     for (const base of [join(sdir, 'automodpack', 'host-modpack', 'main'), sdir]) {
       const src = join(base, rel);
       if (existsSync(src)) {
@@ -506,21 +574,29 @@ async function runGate(serverId: string, log: (m: string) => void): Promise<Gate
 
   // gate runs are serialized, so mutating the shared HMC gamedir is safe
   const cfg = join(HMC, 'HeadlessMC', 'config.properties');
-  const props = readFileSync(cfg, 'utf8').replace(/^hmc\.gamedir=.*$/m, `hmc.gamedir=${rundir}`);
+  // .properties escaping eats backslashes — Windows paths go in with forward
+  // slashes, which the JVM accepts everywhere
+  const gamedir = IS_WIN ? rundir.replace(/\\/g, '/') : rundir;
+  const props = readFileSync(cfg, 'utf8').replace(/^hmc\.gamedir=.*$/m, `hmc.gamedir=${gamedir}`);
   writeFileSync(cfg, props, 'utf8');
 
+  if (gateMode() === 'window') {
+    log('launchgate: no virtual display on this OS — the verification client opens as a small Minecraft window for a few minutes. Leave it alone; it closes itself when the verdict is in.');
+  }
   log(`launchgate: booting ${det.mc} client with ${mods} mods (${skippedEnv} env-skipped) for ${serverId}`);
   const escaped = det.mc.replace(/\./g, '\\.');
   const versionRegex = det.loader === 'fabric' ? `fabric-loader-.*-${escaped}` : `${escaped}-forge-.*`;
   const sp = await new Promise<GateVerdict>((resolve) => {
-    const child = spawn('nice', ['-n', '19', 'ionice', '-c3', 'xvfb-run', '-a',
-      JAVA25, '-Dhmc.check.xvfb=true', '-jar', LAUNCHER,
-      '--command', 'launch', versionRegex, '-regex', '--jvm', '-Xmx4G',
-    // detached: the child owns a process group, so a timeout kill takes the
-    // WHOLE tree (nice→ionice→xvfb-run→java). child.kill alone only shot the
-    // nice wrapper and the Minecraft client lived on as an orphan, wedging
-    // every later gate run (live 2026-07-21, twice).
-    ], { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const argv = clientArgv(
+      gateMode() === 'window' ? [`-Dhmc.gameargs=${WINDOW_SIZE_ARGS}`] : [],
+      ['--command', 'launch', versionRegex, '-regex', '--jvm', '-Xmx4G'],
+    );
+    // KILLABLE_SPAWN_OPTS: on POSIX the child owns a process group, so a
+    // timeout kill takes the WHOLE tree (nice→ionice→xvfb-run→java).
+    // child.kill alone only shot the nice wrapper and the Minecraft client
+    // lived on as an orphan, wedging every later gate run (live 2026-07-21,
+    // twice). On Windows killTree's taskkill /T does the same job.
+    const child = spawn(argv[0], argv.slice(1), { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
     let out = '';
     child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
     child.stderr.on('data', (d: Buffer) => { out += d.toString(); });

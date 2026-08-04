@@ -101,7 +101,18 @@ remember). Without them, servers are LAN/VPN-only and everything else works.
 
 ## Cross-platform honesty
 
-Linux is the full experience. On macOS/Windows the panel and the server-side
-dry-boot run fine; the headless-client and join gates require Linux +
-`xvfb-run` and **skip with an honest "not verified" verdict** rather than
-pretending to pass.
+The gates need a display, and there are three answers to that:
+
+- **Headless Linux + `xvfb-run`** — the client boots invisibly in a virtual
+  framebuffer.
+- **macOS / Windows / a Linux desktop** — *visible-window mode*: the real
+  verification client opens as a small window on the desktop for a few
+  minutes, announced in the panel log so nobody closes it mid-verdict. Same
+  client, same fidelity, purely cosmetic cost.
+- **A display-less box that isn't Linux** — the client and join gates **skip
+  with an honest "not verified" verdict** rather than pretending to pass.
+  The static scan and server dry-boot run everywhere regardless.
+
+A stubbed-GL "headless anywhere" mode was considered and rejected: stubbed
+rendering can mask or invent render-init crashes, which makes the test lie —
+the same reason the boot gates refuse `-Xverify:none`.
