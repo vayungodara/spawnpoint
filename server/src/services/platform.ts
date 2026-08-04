@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { renameSync, statSync } from 'node:fs';
+import { renameSync, statSync, symlinkSync, linkSync, copyFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 
@@ -132,6 +132,16 @@ export async function chownToDirOwner(destDir: string): Promise<void> {
     }
     // reached filesystem root with everything panel-owned (dev machine) — fine
   } catch { /* never fail the caller over ownership */ }
+}
+
+/** Borrow src into a sandbox at dst without copying. POSIX symlinks; Windows
+    can't symlink without admin/developer-mode, so directories get junctions
+    (always allowed) and files get hardlinks, falling back to a real copy when
+    the sandbox sits on a different volume. */
+export function sandboxLink(src: string, dst: string): void {
+  if (!IS_WIN) { symlinkSync(src, dst); return; }
+  if (statSync(src).isDirectory()) { symlinkSync(src, dst, 'junction'); return; }
+  try { linkSync(src, dst); } catch { copyFileSync(src, dst); }
 }
 
 /** Kill a spawned child AND its whole process tree. On Windows, spawn's own

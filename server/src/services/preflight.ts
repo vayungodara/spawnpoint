@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join, basename } from 'node:path';
 import { PATHS } from '../config.js';
 import { serverDir, javaFor } from './servers.js';
 import { detect } from './detect.js';
-import { IS_WIN } from './platform.js';
+import { IS_WIN, sandboxLink } from './platform.js';
 
 // cross-platform launch: `nice` is a Linux nicety, not a requirement; Forge
 // ships win_args.txt beside unix_args.txt
@@ -97,14 +97,14 @@ async function runPreflightInner(
   // mods regenerate defaults in the sandbox instead of writing to the real one
   for (const item of ['fabric.jar', 'libraries', 'versions', '.fabric', 'server.properties']) {
     const src = join(dir, item);
-    if (existsSync(src)) symlinkSync(src, join(sandbox, item));
+    if (existsSync(src)) sandboxLink(src, join(sandbox, item));
   }
   const skip = new Set((opts.withoutJars ?? []).map((f) => basename(f)));
   for (const jar of readdirSync(join(dir, 'mods')).filter((f) => f.endsWith('.jar'))) {
-    if (!skip.has(jar)) symlinkSync(join(dir, 'mods', jar), join(sandbox, 'mods', jar));
+    if (!skip.has(jar)) sandboxLink(join(dir, 'mods', jar), join(sandbox, 'mods', jar));
   }
   for (const extra of opts.extraJars ?? []) {
-    if (existsSync(extra)) symlinkSync(extra, join(sandbox, 'mods', basename(extra)));
+    if (existsSync(extra)) sandboxLink(extra, join(sandbox, 'mods', basename(extra)));
   }
   writeFileSync(join(sandbox, 'eula.txt'), 'eula=false\n', 'utf8');
 

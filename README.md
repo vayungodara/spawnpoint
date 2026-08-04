@@ -31,9 +31,11 @@ restarts, and a storage cleaner.
 
 - Node.js 22+
 - [Crafty Controller](https://craftycontrol.com/) managing your servers
-- Linux is the full experience; on macOS/Windows the panel and server-side
-  preflight run fine, while the client/join gates need Linux + `xvfb` and
-  will skip with an honest verdict elsewhere.
+- Any OS. On headless Linux the client/join gates run invisibly under `xvfb`;
+  on macOS/Windows (or a Linux desktop) the verification client opens as a
+  small window for a few minutes instead — same real client, same verdict.
+  A box with no display at all skips those two gates with an honest
+  "not verified" verdict; the server-side dry-boot always runs.
 
 ## Quick start
 
