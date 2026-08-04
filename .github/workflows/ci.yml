@@ -1,7 +1,9 @@
-# Cross-platform build proof: the panel must COMPILE and BOOT on every OS a
-# self-hoster might own. The Linux leg is the full experience; mac/windows
-# legs prove the panel + preflight degrade gracefully (the client launch gate
-# needs Linux + xvfb and says so honestly at runtime).
+# Cross-platform proof: the panel must COMPILE and BOOT on every OS a
+# self-hoster might own. All three legs now run the same bar — build, then
+# boot the real server against an empty layout and serve /api/health (the
+# shape of a first-run install). The client/join gates pick their display
+# mode at runtime: xvfb on headless Linux, a small visible window on
+# desktop OSes, an honest skip where no display exists.
 name: ci
 on:
   push:
@@ -25,7 +27,18 @@ jobs:
       - run: npm ci
       - run: npm run build -w server
       - run: npm run build -w web
-      # smoke: the built server must at least load its entrypoint without a
-      # crash on this OS (no Crafty/Java present in CI — a clean import and
-      # config bootstrap is the bar here)
+      # smoke 1: the built server must load its entrypoint cleanly
       - run: node -e "import('./server/dist/config.js').then(m => { if (!m.PATHS) throw new Error('config failed'); console.log('config loads on', process.platform); })"
+      # smoke 2: boot the real panel on an empty layout and hit /api/health
+      - run: node .github/smoke-boot.mjs
+
+  # the repo is public — every push gets a full-history secret scan
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
