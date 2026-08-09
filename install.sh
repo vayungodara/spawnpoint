@@ -82,7 +82,7 @@ for _ in $(seq 1 30); do
     say "Spawnpoint is running (pid $PANEL_PID)."
     say ""
     say "  Open  http://localhost:$PORT  to finish setup in the browser —"
-    say "  the first-run wizard connects Crafty with one admin login."
+    say "  the first-run wizard connects Crafty with a pasted API key."
     if ! curl -fskS "https://localhost:8443" >/dev/null 2>&1; then
       say ""
       say "  Heads up: nothing is answering on https://localhost:8443, so Crafty"

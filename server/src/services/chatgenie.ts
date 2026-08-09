@@ -2435,7 +2435,10 @@ export function startChatGenie(log: (msg: string) => void): void {
   const warmTimer = setInterval(ensureWarm, 60_000); // keepalive drip + recycle + reheat
   warmTimer.unref();
   const timer = setInterval(() => {
-    tick(log).catch((e) => log(`chatgenie: tick failed: ${String(e)}`));
+    tick(log).catch((e) => {
+      // an unconfigured box (no Crafty token yet) is a normal state, not a failure
+      if (!String(e).includes('No Crafty API token')) log(`chatgenie: tick failed: ${String(e)}`);
+    });
   }, POLL_MS);
   timer.unref();
 }
