@@ -2,11 +2,11 @@
 
 **The self-hosted Minecraft control panel where a broken pack can never reach your friends.**
 
-[![Watch the 2-minute launch film](docs/media/launch-film-poster.png)](docs/media/launch-film.mp4)
+[![Watch the 2-minute launch film](docs/media/launch-film-poster.png)](https://github.com/vayungodara/spawnpoint/raw/main/docs/media/launch-film.mp4)
 
-*Click the image for the 2-minute film: a broken jar dragged in, boot-tested,
-and rolled back before anyone crashes — plus the modpack installs, the backups,
-and the in-game genie, all captured live.*
+*Click the image to watch the 2-minute launch film (9 MB mp4). A broken jar gets
+dragged in, boot-tested, and rolled back before anyone crashes. Then modpack
+installs, backups, and the in-game genie, all captured live.*
 
 ![Live dashboard — console, TPS, join address, world slots](docs/screenshots/dashboard.png)
 
@@ -14,18 +14,18 @@ Spawnpoint is a web panel you run on the machine that hosts your Minecraft
 servers. It fronts [Crafty Controller](https://craftycontrol.com/) (which owns
 the server processes) and adds everything around it: one-click mod/plugin
 installs from Modrinth + CurseForge, a config UI, Realms-style world slots,
-backups — and a **verification pipeline** no other panel has:
+backups, and a **verification pipeline** no other panel has:
 
-1. **Dry-boot preflight** — every mod install is boot-tested in a sandbox
+1. **Dry-boot preflight.** Every mod install is boot-tested in a sandbox
    before it counts. Missing dependencies are detected from the loader's own
-   error output and installed automatically; a mod that still can't boot is
+   error output and installed automatically. A mod that still can't boot is
    rolled back, not left to crash the next restart.
-2. **Headless client boot test** — the pack is launched in a real headless
+2. **Headless client boot test.** The pack is launched in a real headless
    Minecraft client, so client-side crashes are caught server-side.
-3. **Multiplayer join gate** — a throwaway clone of your server is booted and
+3. **Multiplayer join gate.** A throwaway clone of your server is booted and
    a real client actually joins it. If the join would kick your friends, you
    find out first.
-4. **Join-kick self-heal** — when a gate identifies the offending mod, it is
+4. **Join-kick self-heal.** When a gate identifies the offending mod, it is
    quarantined, the pack regenerates, and the gate re-runs. You get a notice,
    not a broken evening.
 
@@ -46,9 +46,9 @@ restarts, and a storage cleaner.
 
 - Node.js 22+
 - [Crafty Controller](https://craftycontrol.com/) managing your servers
-- Any OS. On headless Linux the client/join gates run invisibly under `xvfb`;
-  on macOS/Windows (or a Linux desktop) the verification client opens as a
-  small window for a few minutes instead — same real client, same verdict.
+- Any OS. On headless Linux the client/join gates run invisibly under `xvfb`.
+  On macOS/Windows (or a Linux desktop) the verification client opens as a
+  small window for a few minutes instead: same real client, same verdict.
   A box with no display at all skips those two gates with an honest
   "not verified" verdict; the server-side dry-boot always runs.
 
@@ -63,11 +63,11 @@ curl -fsSL https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install
 
 That checks Node 22+, creates the layout, builds, starts the panel on port
 **25570**, and prints the URL. Your first browser visit is a three-step
-wizard: connect Crafty — paste a **Crafty API key**, best from a dedicated
+wizard: connect Crafty by pasting a **Crafty API key** (best from a dedicated
 non-superuser account scoped to the servers this panel should manage, so
-Spawnpoint never holds anything that could unlock your admin account (or log
-in once and it mints a token for you) — set a PIN, optionally add keys. Java
-itself is zero-touch: the right Temurin JDK downloads automatically the
+Spawnpoint never holds anything that could unlock your admin account; or log
+in once and it mints a token for you), set a PIN, and optionally add keys.
+Java itself is zero-touch: the right Temurin JDK downloads automatically the
 first time a server needs one.
 
 **API keys required: none.** Modrinth browsing, dependency healing, boot
@@ -92,8 +92,8 @@ wizard appears in the browser either way.
 
 ## Architecture
 
-The full system design — the four verification gates, their invariants, the
-genie, client sync — is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+The full system design (the four verification gates, their invariants, the
+genie, client sync) is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Layout
 
@@ -106,14 +106,14 @@ genie, client sync — is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Created on first run. Notable optional fields:
 
-- `pinHash` — set a PIN from the Settings page to gate remote access
+- `pinHash`: set a PIN from the Settings page to gate remote access
   (localhost always bypasses; sessions are HMAC-signed cookies)
-- `curseforgeApiKey` — enables the CurseForge half of the content browser
-- `vercelToken` + `laneDomain`/`laneSrvTarget`/`laneRelayIp`/`laneBoxIp` —
-  optional "public lane" provisioning: each server automatically gets a
+- `curseforgeApiKey`: enables the CurseForge half of the content browser
+- `vercelToken` + `laneDomain`/`laneSrvTarget`/`laneRelayIp`/`laneBoxIp`:
+  optional "public lane" provisioning. Each server automatically gets a
   `<name>.<your-domain>` address via a relay droplet + Vercel DNS SRV
   records. Leave unset and servers are LAN/Tailscale-only.
-- `modrinthContact` — contact string appended to the Modrinth User-Agent
+- `modrinthContact`: contact string appended to the Modrinth User-Agent
 
 ## Development
 
@@ -124,7 +124,7 @@ npm run dev:web      # Vite dev server, proxies /api
 
 ## Security notes
 
-- Designed to sit behind Tailscale or a LAN — do not expose the panel port to
+- Designed to sit behind Tailscale or a LAN. Do not expose the panel port to
   the open internet.
 - Remote access is PIN-gated (hashed at rest, per-IP lockout, signed session
   cookies). The genie has a `commandPolicy` setting: `no-admin` blocks
