@@ -184,7 +184,8 @@ export default async function maintenanceRoutes(app: FastifyInstance) {
   );
 
   app.get('/api/ingamehud', async () => loadHud());
-  app.put<{ Body: HudConfig }>('/api/ingamehud', async (req) => saveHud(req.body));
+  // Partial: the dashboard lever sends {enabled} alone; saveHud merges the rest
+  app.put<{ Body: Partial<HudConfig> }>('/api/ingamehud', async (req) => saveHud(req.body ?? {}));
 
   app.put<{ Body: AutostopConfig }>('/api/autostop', async (req) => {
     return saveAutostop(req.body);

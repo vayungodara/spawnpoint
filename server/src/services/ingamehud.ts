@@ -30,21 +30,44 @@ const POLL_MS = 5_000;
 
 export interface HudConfig {
   enabled: boolean;
+  /** Players who always see the bar — the toggle is not their problem.
+      `/trigger hud` is one lost scoreboard entry away from being dead for a
+      player (a world reset, a scoreboard wipe, a mod eating the command) and
+      the failure is silent: the bar simply renders to nobody. A pinned name is
+      re-joined to sp_show on every poll, so membership survives all of that.
+      Names only live in data/ingamehud.json, never in the repo. */
+  pinned: string[];
 }
 
-const DEFAULTS: HudConfig = { enabled: false };
+const DEFAULTS: HudConfig = { enabled: false, pinned: [] };
+
+function cleanPinned(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const n of v) {
+    // a name reaches RCON as a command argument — keep it to what Mojang allows
+    if (typeof n === 'string' && /^[A-Za-z0-9_]{1,16}$/.test(n) && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
 
 export function loadHud(): HudConfig {
   try {
     const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf8').replace(/^﻿/, ''));
-    return { enabled: !!raw.enabled };
+    return { enabled: !!raw.enabled, pinned: cleanPinned(raw.pinned) };
   } catch {
-    return { ...DEFAULTS };
+    return { ...DEFAULTS, pinned: [] };
   }
 }
 
-export function saveHud(cfg: HudConfig): HudConfig {
-  const clean: HudConfig = { enabled: !!cfg.enabled };
+export function saveHud(cfg: Partial<HudConfig>): HudConfig {
+  // the dashboard lever PUTs {enabled} alone — an omitted key must not wipe
+  // the pinned list that is the whole point of the permanent fix
+  const current = loadHud();
+  const clean: HudConfig = {
+    enabled: cfg.enabled === undefined ? current.enabled : !!cfg.enabled,
+    pinned: cfg.pinned === undefined ? current.pinned : cleanPinned(cfg.pinned),
+  };
   mkdirSync(PATHS.data, { recursive: true });
   writeFileSync(CONFIG_FILE, JSON.stringify(clean, null, 2), 'utf8');
   return clean;
@@ -132,8 +155,12 @@ async function snapshot(id: string, execCmd: string, stats: Awaited<ReturnType<t
 
 /** Per-player opt-IN: `/trigger hud` flips your membership in team sp_show.
     The boss bar only targets @a[team=sp_show], so by default nobody sees
-    anything. T, ↑, Enter = almost a keybind. */
-function pumpToggle(cmds: string[], id: string): void {
+    anything. T, ↑, Enter = almost a keybind. Names in `pinned` skip the toggle
+    entirely and are always members. */
+// pinned names already seeded into sp_show this server boot ("<id>:<name>")
+const pinSeeded = new Set<string>();
+
+function pumpToggle(cmds: string[], id: string, pinned: string[], online: string[]): void {
   if (!toggleLive.has(id)) {
     // sweep surfaces from earlier HUD versions (sidebar + opt-out design)
     cmds.push(
@@ -159,6 +186,16 @@ function pumpToggle(cmds: string[], id: string): void {
     // start of the cycle would leave the trigger dead between ticks
     `scoreboard players enable @a hud`,
   );
+  // Seed each pinned player into the team the first time they're seen online
+  // this server boot — after that /trigger hud toggles them freely.
+  // Re-seeding every poll would instantly undo a toggle-off.
+  for (const name of pinned) {
+    const key = `${id}:${name}`;
+    if (!pinSeeded.has(key) && online.includes(name)) {
+      cmds.push(`team join sp_show ${name}`);
+      pinSeeded.add(key);
+    }
+  }
 }
 
 function pumpBossbar(cmds: string[], id: string, s: Snapshot): void {
@@ -204,6 +241,7 @@ async function tick(log: (msg: string) => void): Promise<void> {
     if (!stats.running) {
       // surfaces die with the server; rebuild next boot
       barLive.delete(id); lastBar.delete(id); toggleLive.delete(id);
+      for (const k of pinSeeded) if (k.startsWith(`${id}:`)) pinSeeded.delete(k);
       continue;
     }
     try {
@@ -221,11 +259,14 @@ async function tick(log: (msg: string) => void): Promise<void> {
       const [listOut] = await rconBatch(id, cmds);
       const m = /There are (\d+)/i.exec(listOut);
       if (!m || +m[1] < 1) continue; // empty server — stay silent
+      // "…online: A, B" — names after the colon
+      const online = (listOut.split(/players online:\s*/i)[1] ?? '')
+        .split(',').map((n) => n.trim()).filter(Boolean);
 
       const batch: string[] = [];
       const hadSetup = toggleLive.has(id);
       const hadBar = barLive.has(id);
-      pumpToggle(batch, id);
+      pumpToggle(batch, id, cfg.pinned, online);
       const s = await snapshot(id, srv.execution_command, stats);
       pumpBossbar(batch, id, s);
       await rconBatch(id, batch);
