@@ -57,10 +57,12 @@ curl -fsSL https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install
 
 That checks Node 22+, creates the layout, builds, starts the panel on port
 **25570**, and prints the URL. Your first browser visit is a three-step
-wizard: log in with your **Crafty admin account once** (the panel mints its
-own API token from it — you never touch a token), set a PIN, optionally add
-keys. Java itself is zero-touch: the right Temurin JDK downloads
-automatically the first time a server needs one.
+wizard: connect Crafty — paste a **Crafty API key**, best from a dedicated
+non-superuser account scoped to the servers this panel should manage, so
+Spawnpoint never holds anything that could unlock your admin account (or log
+in once and it mints a token for you) — set a PIN, optionally add keys. Java
+itself is zero-touch: the right Temurin JDK downloads automatically the
+first time a server needs one.
 
 **API keys required: none.** Modrinth browsing, dependency healing, boot
 testing, and client sync all work key-free. Optional: a free CurseForge key

@@ -40,7 +40,10 @@ export default function Setup() {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
-  // step 0 — crafty
+  // step 0 — crafty. API key is the recommended path (the panel then never
+  // holds anything that can unlock the superuser); one-time login is fallback.
+  const [mode, setMode] = useState<'key' | 'login'>('key')
+  const [apiKey, setApiKey] = useState('')
   const [url, setUrl] = useState('')
   const [user, setUser] = useState('')
   const [pass, setPass] = useState('')
@@ -65,7 +68,11 @@ export default function Setup() {
       const r = await fetch('/api/wizard/crafty-login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username: user, password: pass, url: url || undefined, code: code || undefined }),
+        body: JSON.stringify(
+          mode === 'key'
+            ? { token: apiKey.trim(), url: url || undefined, code: code || undefined }
+            : { username: user, password: pass, url: url || undefined, code: code || undefined },
+        ),
       })
       const j = await r.json()
       if (!r.ok) { setErr(j.error ?? `Crafty connect failed (${r.status})`); return }
@@ -143,10 +150,19 @@ export default function Setup() {
 
         {step === 0 && (
           <>
-            <p className="text-sm opacity-85 mb-4">
-              Log in with your <strong>Crafty admin account</strong> once. The panel mints its own
-              API access from it and never stores the password.
-            </p>
+            {mode === 'key' ? (
+              <p className="text-sm opacity-85 mb-4">
+                In Crafty, open your user's <strong>API Keys</strong> page, create a key, and paste it
+                here. Best from a <strong>dedicated non-superuser account</strong> that can only see the
+                servers this panel should manage — the panel then never holds anything that could
+                unlock your admin account.
+              </p>
+            ) : (
+              <p className="text-sm opacity-85 mb-4">
+                Log in with your <strong>Crafty admin account</strong> once. The panel mints its own
+                API access from it and never stores the password.
+              </p>
+            )}
             {wiz?.craftyReachable === false && (
               <p className="font-px text-[10px] text-gold mb-3">
                 NOTHING IS ANSWERING AT {(wiz.craftyUrl ?? '').toUpperCase()} — START CRAFTY FIRST, OR CHANGE THE ADDRESS BELOW
@@ -159,23 +175,45 @@ export default function Setup() {
               className="field w-full px-3 py-2.5 mb-2 text-sm"
               autoComplete="off"
             />
-            <input
-              value={user}
-              onChange={(e) => { setErr(''); setUser(e.target.value) }}
-              placeholder="Crafty admin username"
-              className="field w-full px-3 py-2.5 mb-2 text-sm"
-              autoComplete="username"
-              autoFocus
-            />
-            <input
-              value={pass}
-              onChange={(e) => { setErr(''); setPass(e.target.value) }}
-              onKeyDown={(e) => { if (e.key === 'Enter' && user && pass && !busy) connect() }}
-              type="password"
-              placeholder="Crafty admin password"
-              className="field w-full px-3 py-2.5 text-sm"
-              autoComplete="current-password"
-            />
+            {mode === 'key' ? (
+              <input
+                value={apiKey}
+                onChange={(e) => { setErr(''); setApiKey(e.target.value) }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && apiKey.trim() && !busy) connect() }}
+                type="password"
+                placeholder="Crafty API key"
+                className="field w-full px-3 py-2.5 text-sm font-mono"
+                autoComplete="off"
+                autoFocus
+              />
+            ) : (
+              <>
+                <input
+                  value={user}
+                  onChange={(e) => { setErr(''); setUser(e.target.value) }}
+                  placeholder="Crafty admin username"
+                  className="field w-full px-3 py-2.5 mb-2 text-sm"
+                  autoComplete="username"
+                  autoFocus
+                />
+                <input
+                  value={pass}
+                  onChange={(e) => { setErr(''); setPass(e.target.value) }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && user && pass && !busy) connect() }}
+                  type="password"
+                  placeholder="Crafty admin password"
+                  className="field w-full px-3 py-2.5 text-sm"
+                  autoComplete="current-password"
+                />
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => { setErr(''); setMode(mode === 'key' ? 'login' : 'key') }}
+              className="text-xs opacity-70 hover:opacity-100 underline mt-2 block"
+            >
+              {mode === 'key' ? 'No API key handy? Log in once instead' : 'Have an API key? Paste it instead (recommended)'}
+            </button>
             {wiz?.needsCode && (
               <>
                 <p className="text-xs opacity-70 mt-3 mb-2">
@@ -193,7 +231,11 @@ export default function Setup() {
               </>
             )}
             {err && <div className="font-px text-[10px] text-redstone mt-3">{err.toUpperCase()}</div>}
-            <button onClick={connect} disabled={!user || !pass || busy} className="btn btn-emerald w-full py-2.5 text-sm mt-4">
+            <button
+              onClick={connect}
+              disabled={(mode === 'key' ? !apiKey.trim() : !user || !pass) || busy}
+              className="btn btn-emerald w-full py-2.5 text-sm mt-4"
+            >
               {busy ? 'Connecting…' : 'Connect Crafty'}
             </button>
           </>

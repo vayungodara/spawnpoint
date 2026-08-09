@@ -148,13 +148,29 @@ if (!lanIp) {
   check('pre-PIN: remote cannot set the first PIN', seize.status === 401);
 }
 
+// PASTED API KEY — the recommended path (Crafty team's request): no login
+// call at all, the key is verified against /api/v2/servers directly
 r = await fetch(`${base}/api/wizard/crafty-login`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ ...ADMIN, url: `http://127.0.0.1:${CRAFTY_PORT}` }),
+  body: JSON.stringify({ token: 'not-a-real-key', url: `http://127.0.0.1:${CRAFTY_PORT}` }),
+});
+check('bad pasted API key rejected with 401', r.status === 401);
+check('no token written for a bad key', !existsSync(join(root, 'Shared', 'crafty-token.txt')));
+r = await fetch(`${base}/api/wizard/crafty-login`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ url: `http://127.0.0.1:${CRAFTY_PORT}` }),
+});
+check('neither key nor credentials yields 400', r.status === 400);
+
+r = await fetch(`${base}/api/wizard/crafty-login`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ token: MINTED, url: `http://127.0.0.1:${CRAFTY_PORT}` }),
 });
 const login = await r.json();
-check('crafty login succeeds', r.ok && login.ok === true);
+check('pasted API key accepted', r.ok && login.ok === true);
 check('reports server count from crafty', login.servers === 2);
 const tokenFile = join(root, 'Shared', 'crafty-token.txt');
 check('token file written', existsSync(tokenFile) && readFileSync(tokenFile, 'utf8').trim() === MINTED);

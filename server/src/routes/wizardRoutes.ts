@@ -168,7 +168,7 @@ export default async function wizardRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post<{ Body: { username?: string; password?: string; url?: string; code?: string; allowInsecure?: boolean } }>(
+  app.post<{ Body: { username?: string; password?: string; token?: string; url?: string; code?: string; allowInsecure?: boolean } }>(
     '/api/wizard/crafty-login',
     async (req, reply) => {
       if (!wizardActive()) return reply.code(403).send({ error: 'setup is already complete' });
@@ -183,7 +183,13 @@ export default async function wizardRoutes(app: FastifyInstance) {
       const allowInsecure = req.body?.allowInsecure === true;
       const username = String(req.body?.username ?? '').trim();
       const password = String(req.body?.password ?? '');
-      if (!username || !password) return reply.code(400).send({ error: 'username and password required' });
+      // Preferred path (Crafty team's request): a pasted API key, ideally from
+      // a dedicated limited account — the panel then never sees or stores
+      // anything that can unlock the superuser. Login-and-mint is the fallback.
+      const pastedToken = String(req.body?.token ?? '').trim();
+      if (!pastedToken && (!username || !password)) {
+        return reply.code(400).send({ error: 'paste a Crafty API key, or give username and password' });
+      }
       const url = (String(req.body?.url ?? '').trim() || loadSettings().craftyUrl).replace(/\/+$/, '');
       let host: string;
       try {
@@ -201,8 +207,11 @@ export default async function wizardRoutes(app: FastifyInstance) {
 
       // 1. log into Crafty exactly like its own web UI does. The credentials
       //    are used for this one request and never stored or logged.
+      //    (skipped entirely when the user pasted an API key)
       let token: string;
-      try {
+      if (pastedToken) {
+        token = pastedToken;
+      } else try {
         const res = await request(`${url}/api/v2/auth/login`, {
           method: 'POST',
           dispatcher: dispatcherFor(url, allowInsecure),
@@ -248,7 +257,11 @@ export default async function wizardRoutes(app: FastifyInstance) {
         });
         const j = JSON.parse(await res.body.text()) as { status?: string; data?: unknown[] };
         if (res.statusCode >= 400 || j.status !== 'ok') {
-          return reply.code(502).send({ error: 'Crafty issued a token the API then refused — check the account' });
+          return reply.code(pastedToken ? 401 : 502).send({
+            error: pastedToken
+              ? 'Crafty refused that API key — check it was copied whole and the account can see your servers'
+              : 'Crafty issued a token the API then refused — check the account',
+          });
         }
         servers = Array.isArray(j.data) ? j.data.length : 0;
       } catch {
