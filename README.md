@@ -2,6 +2,12 @@
 
 **The self-hosted Minecraft control panel where a broken pack can never reach your friends.**
 
+[![Watch the 2-minute launch film](docs/media/launch-film-poster.png)](docs/media/launch-film.mp4)
+
+*Click the image for the 2-minute film: a broken jar dragged in, boot-tested,
+and rolled back before anyone crashes — plus the modpack installs, the backups,
+and the in-game genie, all captured live.*
+
 ![Live dashboard — console, TPS, join address, world slots](docs/screenshots/dashboard.png)
 
 Spawnpoint is a web panel you run on the machine that hosts your Minecraft
