@@ -287,7 +287,10 @@ export function startIngameHud(log: (msg: string) => void): void {
     if (hudBusy) return;
     hudBusy = true;
     tick(log)
-      .catch((e) => log(`ingamehud: tick failed: ${String(e)}`))
+      .catch((e) => {
+        // an unconfigured box (no Crafty token yet) is a normal state, not a failure
+        if (!String(e).includes('No Crafty API token')) log(`ingamehud: tick failed: ${String(e)}`);
+      })
       .finally(() => { hudBusy = false; });
   }, POLL_MS);
   timer.unref();

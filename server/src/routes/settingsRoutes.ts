@@ -114,6 +114,7 @@ export default async function settingsRoutes(app: FastifyInstance) {
       craftyOk = true;
     } catch { /* crafty down or bad token */ }
     return {
+      root: PATHS.root,
       pinEnabled: !!(s.pinHash || s.pin),
       curseforgeKeySet: !!s.curseforgeApiKey,
       anthropicKeySet: !!s.anthropicApiKey,

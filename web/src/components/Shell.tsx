@@ -128,6 +128,15 @@ export default function Shell() {
     staleTime: 60_000,
   })
   const { data } = useServers()
+  const { data: layoutRoot } = useQuery({
+    queryKey: ['layout-root'],
+    queryFn: async () => {
+      const r = await fetch('/api/settings/summary')
+      if (!r.ok) return ''
+      return ((await r.json()).root ?? '') as string
+    },
+    staleTime: Infinity,
+  })
   const setActive = useSetActive()
   const navigate = useNavigate()
   const active = data?.servers.find((s) => s.active)
@@ -244,7 +253,8 @@ export default function Shell() {
         </nav>
 
         <div className="px-5 py-4 border-t-2 border-ink hidden md:block" style={{ background: '#16191f' }}>
-          <div className="hud">/SRV/MINECRAFT</div>
+          {/* the real layout root, not a hardcoded path — every install shows its own */}
+          <div className="hud truncate" title={layoutRoot}>{(layoutRoot || 'SPAWNPOINT').toUpperCase()}</div>
         </div>
       </aside>
 

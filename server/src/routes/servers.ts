@@ -38,7 +38,17 @@ async function applyWhenDown(id: string, timeoutMs = 90_000): Promise<number> {
 }
 
 export default async function serverRoutes(app: FastifyInstance) {
-  app.get('/api/servers', async () => ({ servers: await listServers(), active: getActiveUuid() }));
+  app.get('/api/servers', async (req, reply) => {
+    try {
+      return { servers: await listServers(), active: getActiveUuid() };
+    } catch (e) {
+      // pre-setup there is no Crafty token yet — that's a state, not a 500
+      if (String(e).includes('No Crafty API token')) {
+        return reply.code(503).send({ error: 'Crafty is not connected yet — finish setup in the browser' });
+      }
+      throw e;
+    }
+  });
 
   app.post<{ Body: { id: string } }>('/api/servers/active', async (req) => {
     setActiveUuid(req.body.id);
