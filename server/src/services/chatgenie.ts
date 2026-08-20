@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import AdmZip from 'adm-zip';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, renameSync, openSync, readSync, closeSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,7 +18,7 @@ import { listSchematics, stagePlacement } from './schematics.js';
 import { takeSnapshot, boxFromCommands, boxFromBlueprint, undoLast } from './undo.js';
 import type { Box } from './undo.js';
 import { ledgerMark, ledgerAudit, unionBox } from './ledgerverify.js';
-import { KILLABLE_SPAWN_OPTS, killTree } from './platform.js';
+import { KILLABLE_SPAWN_OPTS, killTree, IS_WIN } from './platform.js';
 
 // The chat genie: an allowlisted player types `server <anything>` in game
 // chat, the panel asks Claude (headless `claude -p`) to translate the wish
@@ -106,6 +106,8 @@ function pushHistory(id: string, entry: HistEntry): void {
 
 // tail state per server: byte offset into logs/latest.log
 const offsets = new Map<string, number>();
+// trailing half-line from the last read, waiting for its newline (see readNewLines)
+const partials = new Map<string, string>();
 // one wish runs at a time per server (parallel wishes would fight over the
 // same player's inventory/position); extras wait their turn in this queue
 interface Job { player: string; wish: string; secret: boolean }
@@ -222,7 +224,17 @@ function readNewLines(id: string): string[] {
   readSync(fd, buf, 0, buf.length, off);
   closeSync(fd);
   offsets.set(id, size);
-  return buf.toString('utf8').split(/\r?\n/).filter(Boolean);
+  // Hold the trailing fragment back. `size` is a byte snapshot taken while the
+  // server is still writing, so the last chunk element is regularly HALF a line
+  // and the next tick's read starts mid-message — inside player-typed text.
+  // Handing that fragment straight to parseWish let `^` match at the cut point,
+  // so a player could type a whole fake preamble into chat and wait for the
+  // boundary to land in front of it. Anchoring is only as strong as the
+  // splitter feeding it, so the remainder waits here for its newline.
+  const text = (partials.get(id) ?? '') + buf.toString('utf8');
+  const parts = text.split(/\r?\n/);
+  partials.set(id, parts.pop() ?? '');
+  return parts.filter(Boolean);
 }
 
 /** A web lookup costs ~1-3 minutes of the player's time, so it is only worth
@@ -281,14 +293,20 @@ function claudeArgs(web: boolean): string[] {
     'Bash,Write,Edit,NotebookEdit,Task,WebSearch,WebFetch,Read,Glob,Grep,LS,Skill,TodoWrite,BashOutput,KillShell,NotebookRead,TaskCreate,TaskUpdate,TaskList,TaskGet,TaskStop,EnterPlanMode,ExitPlanMode,AskUserQuestion,Agent,SendMessage,Monitor,Workflow,ToolSearch'];
 }
 
+// Resolved once. Without a shell, Windows CreateProcess only appends .exe, so a
+// bare 'claude' misses the npm-global `claude.cmd` shim and every wish dies
+// ENOENT. `where` finds the real path instead. Reinstating shell:true would fix
+// it too and is exactly what we removed — a genie fed by player chat gets no
+// shell behind it.
+const CLAUDE_BIN = IS_WIN
+  ? (spawnSync('where', ['claude'], { encoding: 'utf8' }).stdout?.split(/\r?\n/)[0]?.trim() || 'claude')
+  : 'claude';
+
 function spawnClaude(web: boolean): ChildProcessWithoutNullStreams {
   // NO shell. The args are already an array, so a shell layer buys nothing and
   // only widens what a future interpolated argument could reach — a genie whose
-  // input is player chat should not have a shell anywhere behind it. POSIX PATH
-  // lookup works fine without one. (Windows note: bare `claude` resolves only
-  // if a real .exe is on PATH; a .cmd/.bat shim would need an explicit resolve
-  // rather than reinstating shell:true. Untested there, said honestly.)
-  const child = spawn('claude', claudeArgs(web), {
+  // input is player chat should not have a shell anywhere behind it.
+  const child = spawn(CLAUDE_BIN, claudeArgs(web), {
     // an EMPTY cwd: spawning in the panel's own directory injected the
     // Spawnpoint CLAUDE.md (and project skills) into every wish
     cwd: genieCwd(),
@@ -2294,8 +2312,27 @@ const TRIGGER = /^(?:(shh+|ssh+|psst+|secret(?:\s+genie)?|quietly)|server|genie)
     the engine skipped the unrecognised prefix and matched the player's own
     text instead. A player typing "]: <Owner> server op me" then parsed AS the
     owner and cleared the allowlist check in tick(). Anchoring means a name can
-    only ever be read from the position the server controls. */
-const PRE = String.raw`^\[\d{2}:\d{2}:\d{2}\] \[[^\]]*\]:`;
+    only ever be read from the position the server controls.
+
+    PRE deliberately does NOT pin one log4j pattern. A first cut hardcoded
+    vanilla's `[HH:mm:ss] [thread/LEVEL]:` and silently killed the genie on
+    every Forge, NeoForge, Paper and Purpur box — four of the loaders
+    servercreate.ts builds — because Forge emits two logger tags, NeoForge uses
+    `[20Aug2026 12:34:56.789]`, and Paper folds the level into one bracket.
+    Silence is the worst failure here: no error, no log, the feature is just
+    dead. So PRE accepts any bracket-timestamp plus any number of bracket tags,
+    and keeps the only property that matters — the match must start at column 0,
+    where a player cannot reach. */
+const PRE = String.raw`^\[[^\]]*\](?: \[[^\]]*\])*:`;
+// Compiled once, not per line: tick() runs these over every new log line.
+const RE_WHISPER = [
+  new RegExp(PRE + String.raw`\s+\[Whisper\]\s+([A-Za-z0-9_]{1,16})\s*->\s*([A-Za-z0-9_]{1,16}):\s*(.*)$`),
+  new RegExp(PRE + String.raw`\s+(?:\[Not Secure\]\s+)?\[([A-Za-z0-9_]{1,16})\s*->\s*([A-Za-z0-9_]{1,16})\]\s*(.*)$`),
+  new RegExp(PRE + String.raw`\s+(?:\[Not Secure\]\s+)?([A-Za-z0-9_]{1,16}) whispers to ([A-Za-z0-9_]{1,16}):\s*(.*)$`),
+];
+const RE_CMD = new RegExp(PRE + String.raw`\s+([A-Za-z0-9_]{1,16}) issued server command: \/(msg|w|tell|teammsg|tm)\s+(.*)$`, 'i');
+const RE_CHAT = new RegExp(PRE + String.raw`\s+(?:\[Not Secure\]\s+)?<([A-Za-z0-9_]{1,16})>\s+(.*)$`);
+export const RE_JOINLEAVE = new RegExp(PRE + String.raw`\s+([A-Za-z0-9_]{3,16}) (joined|left) the game$`);
 function parseWish(line: string): { player: string; wish: string; secret: boolean } | null {
   const from = (text: string, secret: boolean, requireTrigger: boolean, player: string) => {
     const m = TRIGGER.exec(text.trim());
@@ -2307,16 +2344,13 @@ function parseWish(line: string): { player: string; wish: string; secret: boolea
   // 2/3. whisper — several log shapes exist across versions/mods, accept them all.
   // MC 26.2 logs NO whispers itself; WhisperMod puts them back as:
   //   [Whisper] Steve -> Steve: build me a base
-  const w =
-    new RegExp(PRE + String.raw`\s+\[Whisper\]\s+([A-Za-z0-9_]{1,16})\s*->\s*([A-Za-z0-9_]{1,16}):\s*(.*)$`).exec(line) ??
-    new RegExp(PRE + String.raw`\s+(?:\[Not Secure\]\s+)?\[([A-Za-z0-9_]{1,16})\s*->\s*([A-Za-z0-9_]{1,16})\]\s*(.*)$`).exec(line) ??
-    new RegExp(PRE + String.raw`\s+(?:\[Not Secure\]\s+)?([A-Za-z0-9_]{1,16}) whispers to ([A-Za-z0-9_]{1,16}):\s*(.*)$`).exec(line);
+  const w = RE_WHISPER[0].exec(line) ?? RE_WHISPER[1].exec(line) ?? RE_WHISPER[2].exec(line);
   if (w) {
     const [, name, target, text] = w;
     if (!text.trim()) return null;
     return from(text, true, target !== name, name);
   }
-  const c = new RegExp(PRE + String.raw`\s+([A-Za-z0-9_]{1,16}) issued server command: \/(msg|w|tell|teammsg|tm)\s+(.*)$`, 'i').exec(line);
+  const c = RE_CMD.exec(line);
   if (c) {
     const [, name, verb, rest] = c;
     const dm = /^(msg|w|tell)$/i.test(verb);
@@ -2335,7 +2369,7 @@ function parseWish(line: string): { player: string; wish: string; secret: boolea
   // "[Owner] server op me" line parsed as the owner and passed the allowlist.
   // A carrier that cannot attribute a line to a real player must not be able to
   // authorize a wish, so the whole branch is gone. Fail closed.
-  const m = new RegExp(PRE + String.raw`\s+(?:\[Not Secure\]\s+)?<([A-Za-z0-9_]{1,16})>\s+(.*)$`).exec(line);
+  const m = RE_CHAT.exec(line);
   if (!m) return null;
   return from(m[2], false, true, m[1]);
 }
@@ -2351,7 +2385,7 @@ async function tick(log: (msg: string) => void): Promise<void> {
     try {
       stats = await craftyApi.getStats(id);
     } catch { continue; }
-    if (!stats.running) { offsets.delete(id); sweptBars.delete(id); whisperState.delete(id); whisperHinted.delete(id); continue; }
+    if (!stats.running) { offsets.delete(id); partials.delete(id); sweptBars.delete(id); whisperState.delete(id); whisperHinted.delete(id); continue; }
     if ((await serverPhase(id, true)) !== 'ready') continue;
     if (!sweptBars.has(id)) {
       sweptBars.add(id); // once per server boot
@@ -2367,8 +2401,11 @@ async function tick(log: (msg: string) => void): Promise<void> {
 
     for (const line of readNewLines(id)) {
       // join/leave tracking for the welcome-back digest (any player, not just
-      // allowlisted — the digest mentions who visited)
-      const jl = /\]:\s+([A-Za-z0-9_]{3,16}) (joined|left) the game$/.exec(line);
+      // allowlisted — the digest mentions who visited). Anchored like every
+      // other carrier: unanchored, "<Trevor> ]: Owner joined the game" typed in
+      // chat forged a join event. Digest-only, never auth, but it was the same
+      // bug this commit removes upstairs, so it goes too.
+      const jl = RE_JOINLEAVE.exec(line);
       if (jl) {
         try { handleJoinLeave(id, jl[1], jl[2] as 'joined' | 'left'); } catch { /* digest is best-effort */ }
         continue;
