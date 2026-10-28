@@ -13,6 +13,8 @@ import { markRunning } from '../services/bootrestore.js';
 import { applyPending, listPending } from '../services/pendingmods.js';
 import { derivedRcon } from '../services/ports.js';
 import { deleteServer } from '../services/serverdelete.js';
+import { maintenanceOf, busyReason, clearInterrupted, beginMaintenance, endMaintenance } from '../services/maintenance.js';
+import { restartServer, startServer } from '../services/promote.js';
 
 /** Wait for the JVM to actually let go of its jars, then apply what the player
  *  queued. Crafty reports "stopped" the moment the process exits, but Windows can
@@ -57,7 +59,14 @@ export default async function serverRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>('/api/servers/:id/stats', async (req) => {
     const stats = await craftyApi.getStats(req.params.id);
     const phase = await serverPhase(req.params.id, !!stats.running);
-    return { ...stats, phase };
+    return { ...stats, phase, maintenance: maintenanceOf(req.params.id) };
+  });
+
+  // an operation a panel restart cut short keeps the server fenced until the owner has looked
+  app.post<{ Params: { id: string } }>('/api/servers/:id/maintenance/clear', async (req, reply) => {
+    const m = maintenanceOf(req.params.id);
+    if (m && !clearInterrupted(req.params.id)) return reply.code(409).send({ error: `${m.op} is still running` });
+    return { ok: true };
   });
 
   app.get<{ Params: { id: string }; Querystring: { tail?: string } }>(
@@ -68,12 +77,7 @@ export default async function serverRoutes(app: FastifyInstance) {
       // hide the panel's own RCON plumbing (HUD/auto-stop polling) — vanilla
       // logs two thread lines per connection and echoes command feedback
       const clean = lines.filter((l) => !/RCON (Listener|Client)|\[Rcon:/.test(l));
-      // Crafty HTML-escapes log lines for its own web console; the UI renders
-      // plain text, so quotes showed up as &quot;/&#x27; verbatim
-      const unescaped = clean.map((l) => l
-        .replace(/&#x27;/g, "'").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
-        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
-      return { lines: unescaped.slice(-tail) };
+      return { lines: clean.slice(-tail) };
     },
   );
 
@@ -93,7 +97,9 @@ export default async function serverRoutes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string }; Body: { action: 'start' | 'stop' | 'restart' } }>(
     '/api/servers/:id/action',
-    async (req) => {
+    async (req, reply) => {
+      const busy = busyReason(req.params.id);
+      if (busy) return reply.code(409).send({ error: busy });
       // Mod changes the player made while the server was running were queued
       // (Windows locks loaded jars). The server is down NOW, so apply them
       // before it comes back up — a disable requested mid-game takes effect on
@@ -148,23 +154,39 @@ export default async function serverRoutes(app: FastifyInstance) {
       // that stops and starts in one motion, and the jars are only free in the
       // gap between — which we never get to see. Drive it ourselves: stop, wait
       // for the process to actually let go, apply, then start.
+      // Queued changes go first; a mod change waiting for a restart is retested
+      // against them (liveChanged) and goes in on a later restart.
       if (req.body.action === 'restart' && pending > 0) {
-        await craftyApi.action(id, 'stop_server');
+        const refused = beginMaintenance(id, 'restart');
+        if (refused) return reply.code(409).send({ error: refused });
         void (async () => {
           try {
+            await craftyApi.action(id, 'stop_server');
             const applied = await applyWhenDown(id);
             app.log.info(`restart: applied ${applied} queued mod change(s) while the server was down`);
           } catch (e) {
             app.log.error(`restart: could not apply queued mod changes: ${String(e)}`);
           } finally {
             await craftyApi.action(id, 'start_server').catch(() => {});
+            endMaintenance(id, 'restart');
           }
         })();
         return { ok: true, appliedPending: pending };
       }
 
-      const map = { start: 'start_server', stop: 'stop_server', restart: 'restart_server' } as const;
-      await craftyApi.action(id, map[req.body.action]);
+      // starts and restarts put a waiting mod change in and check its boot;
+      // both refuse if another operation took the server meanwhile
+      if (req.body.action === 'stop') {
+        await craftyApi.action(id, 'stop_server');
+      } else {
+        try {
+          const { promoting } = await (req.body.action === 'start' ? startServer : restartServer)(id, (m) => app.log.info(m));
+          markRunning(id, true);
+          if (promoting) return { ok: true, promoting };
+        } catch (e) {
+          return reply.code(409).send({ error: (e as Error).message });
+        }
+      }
       // record the intent NOW — boot-restore must never resurrect a server the
       // owner stopped seconds before an update-reboot
       markRunning(id, req.body.action !== 'stop');

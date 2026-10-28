@@ -204,8 +204,9 @@ export interface SwitchResult { ok: boolean; error?: string; fresh?: boolean; re
 export async function switchSlot(id: string, n: number, opts: { start?: boolean; seed?: string } = {}): Promise<SwitchResult> {
   if (n < 1 || n > SLOT_COUNT) return { ok: false, error: 'bad slot number' };
   if (inFlight.has(id)) return { ok: false, error: 'a world operation is already running — give it a few minutes' };
+  const busy = beginMaintenance(id, 'world switch'); // scheduler/autostop must not touch the server mid-switch
+  if (busy) return { ok: false, error: busy };
   inFlight.add(id);
-  beginMaintenance(id); // scheduler/autostop must not touch the server mid-switch
   setPhase(id, 'switch', 'starting…', 5);
   try {
     const r = await doSwitch(id, n, opts);
@@ -220,7 +221,7 @@ export async function switchSlot(id: string, n: number, opts: { start?: boolean;
     throw e;
   } finally {
     inFlight.delete(id);
-    endMaintenance(id);
+    endMaintenance(id, 'world switch');
   }
 }
 
@@ -299,8 +300,9 @@ async function doSwitch(id: string, n: number, opts: { start?: boolean; seed?: s
 export async function resetSlot(id: string, n: number, seed?: string): Promise<{ ok: boolean; error?: string }> {
   if (n < 1 || n > SLOT_COUNT) return { ok: false, error: 'bad slot number' };
   if (inFlight.has(id)) return { ok: false, error: 'a world operation is already running — give it a few minutes' };
+  const busy = beginMaintenance(id, 'world reset');
+  if (busy) return { ok: false, error: busy };
   inFlight.add(id);
-  beginMaintenance(id);
   setPhase(id, 'reset', 'starting…', 5);
   try {
     const r = await doReset(id, n, seed);
@@ -313,7 +315,7 @@ export async function resetSlot(id: string, n: number, seed?: string): Promise<{
     throw e;
   } finally {
     inFlight.delete(id);
-    endMaintenance(id);
+    endMaintenance(id, 'world reset');
   }
 }
 

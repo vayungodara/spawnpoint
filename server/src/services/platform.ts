@@ -1,7 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { renameSync, statSync, symlinkSync, linkSync, copyFileSync, unlinkSync, mkdirSync, writeFileSync } from 'node:fs';
+import { renameSync, statSync, symlinkSync, linkSync, copyFileSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { freemem } from 'node:os';
 import { cp, rm } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 
@@ -19,6 +20,43 @@ export function writeFileAtomic(path: string, data: string | Buffer): void {
   const part = `${path}.${randomBytes(4).toString('hex')}.part`;
   writeFileSync(part, data);
   renameSync(part, path);
+}
+
+/** Memory the OS can hand out now. On Linux that is MemAvailable, which
+    counts reclaimable cache; os.freemem() may not. */
+function availableGb(): number {
+  if (process.platform === 'linux') {
+    try {
+      const kb = /MemAvailable:\s+(\d+) kB/.exec(readFileSync('/proc/meminfo', 'utf8'))?.[1];
+      if (kb) return Number(kb) / 1024 / 1024;
+    } catch { /* fall back */ }
+  }
+  return freemem() / 1024 ** 3;
+}
+
+/** memory promised to test JVMs that are running (they may not have taken it yet) */
+let reservedGb = 0;
+
+/** Run a test JVM once the OS can spare `needGb` beyond what other running
+    tests were promised, and keep it promised until `fn` settles: a test short
+    of memory gets the live server or the panel OOM-killed (seen on a 4 GB
+    box). After 10 minutes without room, returns why instead of running. */
+export async function withMemory<T>(needGb: number, what: string, onStatus: (d: string) => void, fn: () => Promise<T>): Promise<T | string> {
+  const deadline = Date.now() + 10 * 60_000;
+  for (;;) {
+    const free = availableGb() - reservedGb;
+    if (free >= needGb) break;
+    const why = `${what} needs about ${needGb} GB of free memory and ${Math.max(0, free).toFixed(1)} GB is free`;
+    if (Date.now() > deadline) return why;
+    onStatus(`waiting for memory: ${why}`);
+    await new Promise((r) => setTimeout(r, 30_000));
+  }
+  reservedGb += needGb;
+  try {
+    return await fn();
+  } finally {
+    reservedGb -= needGb;
+  }
 }
 
 /** True when something LISTENS on a local TCP port. */

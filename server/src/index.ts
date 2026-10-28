@@ -24,6 +24,7 @@ import { startChunkyWatcher } from './services/chunky.js';
 import { startBootRestore } from './services/bootrestore.js';
 import { startCraftyDoctor } from './services/craftydoctor.js';
 import { resumeCandidates, txnBusy } from './services/packtxn.js';
+import { resumePromotions } from './services/promote.js';
 import { listJobs } from './services/servercreate.js';
 import { isServerId } from './services/servers.js';
 import { craftyApi } from './clients/crafty.js';
@@ -123,6 +124,7 @@ startChunkyWatcher(log);
 startBootRestore(log);
 startCraftyDoctor(log);
 resumeCandidates(log);
+resumePromotions(log);
 // pre-fill the joinability cache so a panel restart doesn't flash running servers as "starting"
 setTimeout(() => {
   void import('./services/phase.js').then(({ warmPhaseCache }) =>

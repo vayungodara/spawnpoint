@@ -166,9 +166,13 @@ export default async function maintenanceRoutes(app: FastifyInstance) {
   app.put<{ Body: Partial<GenieConfig> }>('/api/chatgenie', async (req) => saveGenie(req.body ?? {}));
 
 
-  app.post<{ Params: { id: string } }>('/api/servers/:id/sweep-crash', async (req) =>
-    sweepCrashedClientMods(req.params.id),
-  );
+  app.post<{ Params: { id: string } }>('/api/servers/:id/sweep-crash', async (req, reply) => {
+    try {
+      return sweepCrashedClientMods(req.params.id);
+    } catch (e) {
+      return reply.code(409).send({ error: (e as Error).message });
+    }
+  });
 
   app.get('/api/ingamehud', async () => loadHud());
   // Partial: the dashboard lever sends {enabled} alone; saveHud merges the rest

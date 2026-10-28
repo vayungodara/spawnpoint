@@ -1,3 +1,4 @@
+import { readFileSync, statSync } from 'node:fs';
 import { craftyApi } from '../clients/crafty.js';
 import { rconCommand } from '../clients/rcon.js';
 
@@ -46,6 +47,29 @@ async function logHeuristic(id: string): Promise<boolean> {
   } catch {
     return true; // logs unavailable — don't block the UI on it
   }
+}
+
+/** Strict: the boot started at `since` (ms) finished. RCON answering proves
+    it (the old JVM is gone); without RCON, the server's own latest.log, which
+    each boot rewrites, must be newer than `since` and contain Done. Missing
+    evidence is not ready. For gates; the UI uses serverPhase. */
+export async function bootedSince(id: string, latestLog: string, since: number): Promise<boolean> {
+  try {
+    await withTimeout(rconCommand(id, 'list'), 2000);
+    return true;
+  } catch (e) {
+    if (!/not enabled/i.test(String(e))) return false; // listener not up yet
+  }
+  try {
+    return statSync(latestLog).mtimeMs >= since && DONE_RE.test(readFileSync(latestLog, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/** The server went down (or is being restarted): its next boot must prove readiness again. */
+export function forgetReady(id: string): void {
+  readyCache.delete(id);
 }
 
 export async function serverPhase(id: string, running: boolean): Promise<Phase> {

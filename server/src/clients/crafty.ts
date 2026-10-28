@@ -118,7 +118,10 @@ export const craftyApi = {
     entry.p.catch(() => { if (statsCache.get(id) === entry) statsCache.delete(id); });
     return entry.p;
   },
-  getLogs: (id: string) => crafty<string[]>('GET', `/api/v2/servers/${id}/logs`),
+  /** Console lines as plain text (Crafty HTML-escapes them for its own web console). */
+  getLogs: async (id: string) => (await crafty<string[]>('GET', `/api/v2/servers/${id}/logs`)).map((l) => l
+    .replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')),
   action: (
     id: string,
     action: 'start_server' | 'stop_server' | 'restart_server' | 'kill_server' | 'accept_eula',

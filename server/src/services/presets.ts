@@ -50,7 +50,8 @@ export async function applyModePreset(
   const { stopAndWait, isRunningSafe, beginMaintenance, endMaintenance } = await import('./maintenance.js');
   // hold the maintenance lock: a scheduled/auto start booting the server
   // mid-patch would rewrite level.dat from memory and silently revert it
-  beginMaintenance(uuid);
+  const busy = beginMaintenance(uuid, 'game mode change');
+  if (busy) return { restarted: false, error: busy };
   try {
     const wasRunning = await isRunningSafe(uuid);
     if (wasRunning) {
@@ -76,7 +77,7 @@ export async function applyModePreset(
     }
     return { restarted: wasRunning };
   } finally {
-    endMaintenance(uuid);
+    endMaintenance(uuid, 'game mode change');
   }
 }
 

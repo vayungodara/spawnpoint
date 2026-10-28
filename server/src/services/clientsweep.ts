@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { serverDir } from './servers.js';
+import { assertModsWritable, liveChanged } from './packtxn.js';
 
 // CurseForge modpack manifests don't tag client-only mods, so packs install
 // them onto the server and the first boot dies in FML mod-loading. The crash
@@ -15,6 +16,7 @@ export interface SweepResult {
 }
 
 export function sweepCrashedClientMods(uuid: string): SweepResult {
+  assertModsWritable(uuid);
   const dir = serverDir(uuid);
   const crashDir = join(dir, 'crash-reports');
   const none: SweepResult = { disabled: [], alreadyDisabled: [], report: null, reportAgeMin: null };
@@ -50,5 +52,6 @@ export function sweepCrashedClientMods(uuid: string): SweepResult {
     renameSync(path, `${path}.disabled`);
     result.disabled.push(jar);
   }
+  if (result.disabled.length) liveChanged(uuid); // a test that saw these jars is stale
   return result;
 }

@@ -10,7 +10,7 @@ import * as curseforge from '../clients/curseforge.js';
 import type { ContentType, Version } from '../clients/modrinth.js';
 import { queueChange, listPending, applyPending, type PendingAction } from './pendingmods.js';
 import { ledgerEntries, updateLedger, type LedgerEntry } from './ledger.js';
-import { stage, stagedFiles, stagingPath, invalidate, assertNoRecovery, type Candidate, type StagedFile } from './packtxn.js';
+import { stage, stagedFiles, stagingPath, invalidate, assertModsWritable, assertCanStage, type Candidate, type StagedFile } from './packtxn.js';
 import { scanJars } from './jardeps.js';
 
 // The install engine: picks the right build for the server's MC version and
@@ -136,7 +136,7 @@ async function commit(serverUuid: string, det: Detection, type: ContentType, pla
   if (staged.length) {
     // a running test must not pass on bytes about to be replaced, even if a
     // write below fails before stage() registers the batch
-    assertNoRecovery(serverUuid);
+    assertCanStage(serverUuid);
     invalidate(serverUuid);
     const known = new Set(stagedFiles(serverUuid).map((f) => f.file));
     const written: string[] = [];
@@ -626,7 +626,7 @@ export function toggleInstalled(
   serverUuid: string,
   file: string,
 ): { enabled: boolean; pending?: PendingAction } {
-  assertNoRecovery(serverUuid);
+  assertModsWritable(serverUuid);
   const dir = jarDir(serverUuid);
   const clean = basename(file); // no path traversal
   if (existsSync(join(clientShelfDir(serverUuid), clean))) {
@@ -670,7 +670,7 @@ export function assertNotRequired(serverUuid: string, file: string): void {
 }
 
 export function deleteInstalled(serverUuid: string, file: string): { pending?: PendingAction } {
-  assertNoRecovery(serverUuid);
+  assertModsWritable(serverUuid);
   const dir = jarDir(serverUuid);
   const clean = basename(file);
   assertNotRequired(serverUuid, clean);

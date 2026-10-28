@@ -46,7 +46,8 @@ export async function deleteServer(
     return { ok: false, error: 'server is running (or unverifiable) — stop it first' };
   }
 
-  beginMaintenance(id);
+  const busy = beginMaintenance(id, 'server delete');
+  if (busy) return { ok: false, error: busy };
   const problems: string[] = [];
   try {
     // final safety copy of the live world (dormant slots live inside the server
@@ -79,6 +80,6 @@ export async function deleteServer(
 
     return { ok: true, backedUp, problems: problems.length ? problems : undefined };
   } finally {
-    endMaintenance(id);
+    endMaintenance(id, 'server delete');
   }
 }

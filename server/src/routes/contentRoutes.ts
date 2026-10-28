@@ -14,9 +14,20 @@ import {
 import { detect } from '../services/detect.js';
 import { serverDir } from '../services/servers.js';
 import { publishPack, stageClientAsset, buildStarterPack, buildStarterPackCF } from '../services/automodpack.js';
-import { candidate, approve, discard, retest, liveChanged, lastChange, undoLast, recentRejections, clearRejections } from '../services/packtxn.js';
+import { candidate, approve, discard, retest, liveChanged, lastChange, undoLast, recentRejections, clearRejections, assertCanStage } from '../services/packtxn.js';
+import { promotion, lastSeen, choose, cancelUndo } from '../services/promote.js';
 import { craftyApi } from '../clients/crafty.js';
 import { join } from 'node:path';
+
+/** A change waiting for a restart, with the players it waits on. */
+function promotionView(id: string) {
+  const p = promotion(id);
+  const seen = lastSeen(id);
+  return p && {
+    action: p.action, txn: p.txn, choice: p.choice ?? null, restarting: !!p.stage,
+    stopped: seen === 'stopped', unknown: seen === 'unknown', players: typeof seen === 'number' ? seen : null,
+  };
+}
 
 export default async function contentRoutes(app: FastifyInstance) {
   const log = (m: string): void => app.log.info(m);
@@ -109,12 +120,14 @@ export default async function contentRoutes(app: FastifyInstance) {
   app.post<{
     Params: { id: string };
     Body: { projectId: string; versionId?: string; type: ContentType; source?: string };
-  }>('/api/servers/:id/install', async (req) => {
+  }>('/api/servers/:id/install', async (req, reply) => {
     const id = req.params.id;
     const { projectId, versionId, type } = req.body;
     if (type === 'modpack') {
       return { error: 'a modpack becomes its own server: create a new server from it instead' };
     }
+    // a refusal (a change is going in, an undo waits) is the owner's to read, not a crash
+    try { assertCanStage(id); } catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
     const r = req.body.source === 'curseforge'
       ? await installCurseforge(id, { modId: projectId, fileId: versionId, type }, log)
       : await install(id, { projectId, versionId, type }, log);
@@ -126,12 +139,31 @@ export default async function contentRoutes(app: FastifyInstance) {
   });
 
   // the mod change waiting for (or done with) its boot test
-  app.get<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req) => ({ candidate: candidate(req.params.id) }));
+  app.get<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req) => ({ candidate: candidate(req.params.id), promotion: promotionView(req.params.id) }));
   app.post<{ Params: { id: string } }>('/api/servers/:id/candidate/apply', async (req) => ({ candidate: await approve(req.params.id, log) }));
   app.get<{ Params: { id: string } }>('/api/servers/:id/last-change', async (req) => ({ change: lastChange(req.params.id) }));
   app.post<{ Params: { id: string } }>('/api/servers/:id/last-change/undo', async (req, reply) => {
     try {
-      return { change: await undoLast(req.params.id, log) };
+      const { waiting, ...change } = await undoLast(req.params.id, log);
+      return { change, waiting: !!waiting, promotion: promotionView(req.params.id) };
+    } catch (e) {
+      return reply.code(409).send({ error: String((e as Error).message ?? e) });
+    }
+  });
+  // a change waiting for the server to restart: the owner picks when
+  app.post<{ Params: { id: string }; Body: { choice: 'now' | 'when-empty' } }>('/api/servers/:id/promotion', async (req, reply) => {
+    if (req.body?.choice !== 'now' && req.body?.choice !== 'when-empty') return reply.code(400).send({ error: 'choice must be "now" or "when-empty"' });
+    try {
+      choose(req.params.id, req.body.choice, log);
+      return { promotion: promotionView(req.params.id) };
+    } catch (e) {
+      return reply.code(409).send({ error: String((e as Error).message ?? e) });
+    }
+  });
+  app.delete<{ Params: { id: string } }>('/api/servers/:id/promotion', async (req, reply) => {
+    try {
+      cancelUndo(req.params.id);
+      return { promotion: promotionView(req.params.id) };
     } catch (e) {
       return reply.code(409).send({ error: String((e as Error).message ?? e) });
     }
@@ -140,8 +172,12 @@ export default async function contentRoutes(app: FastifyInstance) {
     retest(req.params.id, log);
     return { candidate: candidate(req.params.id) };
   });
-  app.delete<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req) => {
-    discard(req.params.id);
+  app.delete<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req, reply) => {
+    try {
+      discard(req.params.id);
+    } catch (e) {
+      return reply.code(409).send({ error: String((e as Error).message ?? e) });
+    }
     return { candidate: candidate(req.params.id) };
   });
 
@@ -219,6 +255,7 @@ export default async function contentRoutes(app: FastifyInstance) {
     detection: detect(serverDir(req.params.id), req.params.id),
     rejections: recentRejections(req.params.id),
     candidate: candidate(req.params.id),
+    promotion: promotionView(req.params.id),
   }));
 
   // the owner has read the rejection banner

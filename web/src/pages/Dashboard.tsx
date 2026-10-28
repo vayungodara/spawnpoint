@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
-import { useServers, useStats, useLogs, useServerAction, useSendCommand, useAutostop, useSetAutostop } from '../api'
+import { useServers, useStats, useLogs, useServerAction, useSendCommand, useAutostop, useSetAutostop, type Stats } from '../api'
 import { Pi } from '../components/PixelIcons'
 import bandControl from '../assets/band-control.webp'
 
@@ -945,6 +945,31 @@ function DangerZoneRow({ serverId, name, running }: { serverId: string; name: st
   )
 }
 
+/** A server another operation owns, or one a panel restart left mid-operation. */
+function MaintenanceBanner({ id, m }: { id: string; m: NonNullable<Stats['maintenance']> }) {
+  const qc = useQueryClient()
+  const clear = useMutation({
+    mutationFn: () => fetch(`/api/servers/${id}/maintenance/clear`, { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['stats', id] }),
+  })
+  if (!m.interrupted) {
+    return (
+      <div className="block border-sky! px-4 py-2.5 text-sm" role="status">
+        <span className="hud !opacity-100 mr-2">BUSY</span>
+        {m.op === 'mod update' ? 'Restarting the server to load a mod change.' : `${m.op[0].toUpperCase()}${m.op.slice(1)} in progress.`} Start and stop are paused until it finishes.
+      </div>
+    )
+  }
+  return (
+    <div className="block border-gold! px-4 py-3 text-sm space-y-2">
+      <div>
+        A <b>{m.op}</b> {m.note ? <>stopped part-way: {m.note}.</> : 'was cut short when the panel restarted.'} Start and stop stay paused until you have checked the server's files.
+      </div>
+      <button onClick={() => clear.mutate()} disabled={clear.isPending} className="btn px-4 py-2 text-sm">I've checked it, allow starts again</button>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const { data: serversData, error: serversError } = useServers()
   const active = serversData?.servers.find((s) => s.active)
@@ -1127,6 +1152,8 @@ export default function Dashboard() {
       </div>
 
       {notice && <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{notice}</div>}
+
+      {stats?.maintenance && <MaintenanceBanner id={active.id} m={stats.maintenance} />}
 
       <button onClick={copyJoin} className="btn btn-block w-full sm:w-auto px-5 py-3 text-left flex items-center gap-4" title="Click to copy">
         <span className="hud !opacity-100 text-emerald shrink-0">JOIN AT</span>

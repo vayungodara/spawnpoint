@@ -3,7 +3,6 @@ import { readProperties, patchProperties } from '../services/properties.js';
 import { listPlayers, upsertPlayer, removePlayer } from '../services/players.js';
 import { applyModePreset, setOnlineMode, getJvmHeap, setJvmHeap } from '../services/presets.js';
 import { restartFlags } from '../services/restartFlags.js';
-import { craftyApi } from '../clients/crafty.js';
 import { rconCommand } from '../clients/rcon.js';
 import { portAudit, reportServer, suggestGamePort } from '../services/ports.js';
 
@@ -88,8 +87,14 @@ export default async function configRoutes(app: FastifyInstance) {
     },
   );
 
-  app.post<{ Params: { id: string } }>('/api/servers/:id/apply-restart', async (req) => {
-    await craftyApi.action(req.params.id, 'restart_server');
+  app.post<{ Params: { id: string } }>('/api/servers/:id/apply-restart', async (req, reply) => {
+    // a mod change waiting for a restart goes in with this one
+    const { restartServer } = await import('../services/promote.js');
+    try {
+      await restartServer(req.params.id, (m) => app.log.info(m));
+    } catch (e) {
+      return reply.code(409).send({ error: (e as Error).message });
+    }
     restartFlags.clear(req.params.id);
     return { ok: true };
   });

@@ -7,7 +7,8 @@ import { serverDir } from './servers.js';
 import { install } from './installer.js';
 import { clientShelfDir } from './servers.js';
 import { updateLedger } from './ledger.js';
-import { settled, assertNoRecovery } from './packtxn.js';
+import { settled, assertModsWritable } from './packtxn.js';
+import { isUnderMaintenance } from './maintenance.js';
 
 // DEPENDENCY DOCTOR — a failed boot from missing mod dependencies should be
 // fixed in the background, not shown to the owner (his words: "fixed
@@ -74,7 +75,7 @@ function parseConflictMods(log: string): string[] {
 
 async function treat(id: string, log: (m: string) => void): Promise<boolean> {
   // an unfinished apply or undo is reversed on the next start; leave mods/ alone until then
-  try { assertNoRecovery(id); } catch { return false; }
+  try { assertModsWritable(id); } catch { return false; }
   const dir = serverDir(id);
   const logFile = join(dir, 'logs', 'latest.log');
   if (!existsSync(logFile)) return false;
@@ -102,7 +103,7 @@ async function treat(id: string, log: (m: string) => void): Promise<boolean> {
 
   /** move a jar to the client shelf (AutoModpack still ships it to clients) */
   const shelfJar = (jar: string): void => {
-    assertNoRecovery(id); // re-checked here: the lookups before this awaited
+    assertModsWritable(id); // re-checked here: the lookups before this awaited
     mkdirSync(clientShelfDir(id), { recursive: true });
     renameSync(join(dir, 'mods', jar), join(clientShelfDir(id), jar));
     updateLedger(id, (entries) => entries.map((e) => (e.file === jar ? { ...e, clientOnly: true } : e)));
@@ -184,7 +185,9 @@ async function treat(id: string, log: (m: string) => void): Promise<boolean> {
   log(`depdoctor: fixed the boot of server ${id} (${fixed.join(', ')}), restarting`);
   const { publishPack } = await import('./automodpack.js');
   await publishPack(id, log);
-  await craftyApi.action(id, 'start_server').catch(() => {});
+  // through the panel's start: refused if a mod change took the server meanwhile
+  const { startServer } = await import('./promote.js');
+  await startServer(id, log).catch((e) => log(`depdoctor: not starting ${id}: ${String((e as Error).message ?? e)}`));
   return true;
 }
 
@@ -200,6 +203,7 @@ export function startDepDoctor(log: (msg: string) => void): void {
         continue;
       }
       if (stats.running) continue; // doctor only examines servers that DIED
+      if (isUnderMaintenance(id)) continue; // a restart or operation in progress handles its own failures
       const logFile = join(serverDir(id), 'logs', 'latest.log');
       // only fresh corpses: a crash log older than 10 min is history, not a patient
       if (!existsSync(logFile) || Date.now() - statSync(logFile).mtimeMs > 10 * 60_000) continue;

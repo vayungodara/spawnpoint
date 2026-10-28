@@ -41,17 +41,45 @@ tested:
    with the files your friends would receive, then joins a throwaway server
    with the same mods and a fresh world. This uses
    [HeadlessMC](https://github.com/headlesshq/headlessmc) and supports Fabric
-   and Forge on Minecraft 1.20 and newer.
+   and Forge on Minecraft 1.20 and newer. On Fabric, the join also runs
+   AutoModpack's own handshake and checks that the client ends up with
+   exactly the tested files.
 
-A candidate that passes moves into place. One that fails is deleted and
-nothing live changes, but only after the same test passes on the current
-pack without it and the failure repeats; otherwise Spawnpoint does not
-blame the change. A change that could not be fully tested (the pack already
-fails, the test is unreliable, no JDK yet, an unsupported loader) waits for
-you: apply anyway, test again, or discard.
+A candidate that fails is deleted and nothing live changes, but only after
+the same test passes on the current pack without it and the failure
+repeats; otherwise Spawnpoint does not blame the change. A change that
+could not be fully tested (the pack already fails, the test is unreliable,
+no JDK yet, not enough free memory, an unsupported loader) waits for you:
+apply anyway, test again, or discard.
+
+A candidate that passes goes live. Server mods only change while the
+server is stopped, so if the server is running the change waits for a
+restart:
+
+- Nobody online: Spawnpoint restarts the server on its own. It only does
+  this when RCON confirms the server is empty.
+- Players online: they get a chat warning, and you pick *Restart now*
+  (30 second countdown) or *When everyone has left*.
+- Server stopped: the change goes in when you start the server from the
+  panel (Start, Restart or a scheduled start).
+
+If the server then fails to start, or AutoModpack's pack for friends is
+not exactly the tested files (or was not rebuilt), the change is undone,
+the server starts without it, and the change is marked failed with the
+reason. *Undo
+last change* follows the same restart rules. If the panel itself restarts
+in the middle, it picks up where it stopped. If a change cannot be rolled
+back cleanly, the server stays stopped and locked until you check it and
+clear the lock on the dashboard.
 
 Removing or disabling a mod is not boot-tested; it is refused while another
 installed mod depends on it.
+
+Tests wait until the machine has enough free memory for them, so they do
+not starve the live server: about 1 GB for the server test, 1 to 4.5 GB for
+the client test and 2 to 8 GB for the join, depending on the number of
+mods. After 10 minutes a test gives up and the change waits for you. On a
+4 GB machine with the server running, expect the join test to wait.
 
 The client test needs a display. On a headless Linux machine, install `xvfb`
 (`sudo apt install xvfb`) so the client renders on a virtual screen. Without

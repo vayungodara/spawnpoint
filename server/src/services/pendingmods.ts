@@ -4,7 +4,7 @@ import { PATHS } from '../config.js';
 import { serverDir } from './servers.js';
 import { detect } from './detect.js';
 import { isPluginLoader } from '../clients/modrinth.js';
-import { liveChanged, assertNoRecovery } from './packtxn.js';
+import { liveChanged, assertModsWritable } from './packtxn.js';
 
 // WHY THIS EXISTS
 // ---------------
@@ -76,7 +76,7 @@ export function applyPending(uuid: string): { applied: PendingChange[]; stillLoc
   const queued = q[uuid] ?? [];
   if (queued.length === 0) return { applied: [], stillLocked: [] };
   // an unfinished apply or undo comes first; these wait for the next attempt
-  try { assertNoRecovery(uuid); } catch { return { applied: [], stillLocked: queued }; }
+  try { assertModsWritable(uuid); } catch { return { applied: [], stillLocked: queued }; }
 
   const dir = jarDir(uuid);
   const applied: PendingChange[] = [];

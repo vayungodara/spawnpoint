@@ -133,12 +133,17 @@ async function run(t: SchedTask, log: (m: string) => void): Promise<void> {
         await rconCommand(t.serverId, `tellraw @a [{"text":"⏰ restarting in 10 seconds — you can rejoin right after","color":"red"}]`).catch(() => {});
         await new Promise((r) => setTimeout(r, 10_000));
       }
-      await craftyApi.action(t.serverId, 'restart_server');
+      // a mod change waiting for a restart goes in with this one; refused
+      // when another operation took the server during the countdown
+      const { restartServer } = await import('./promote.js');
+      await restartServer(t.serverId, log);
       return;
     }
-    case 'start':
-      await craftyApi.action(t.serverId, 'start_server');
+    case 'start': {
+      const { startServer } = await import('./promote.js');
+      await startServer(t.serverId, log);
       return;
+    }
     case 'stop': {
       // NEVER stop a server we cannot PROVE is empty. The old code only ran
       // the player check when the server was RCON-ready and otherwise FELL

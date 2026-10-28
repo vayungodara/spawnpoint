@@ -60,14 +60,19 @@ candidate is tested:
    HeadlessMC boots the matching Minecraft version and loader version with
    the files a player would receive, then quick-plays into a throwaway copy
    of the server on port 25999. A crash, a failed join or a kick fails the
-   test.
+   test. On Fabric AutoModpack servers the join also runs AutoModpack's handshake
+   against the throwaway server (trusting only its certificate) and compares
+   the files the client ends up with against the tested set by path, size
+   and SHA-1. No handshake evidence means `unverified`, never `passed`.
 
 Each test returns `passed`, `failed` or `unverified`:
 
 - All passed: the candidate is applied. Replaced files move to
   `data/revisions/<id>/<txn>/` (five kept), staged files move into `mods/`
   or the client shelf, the install ledger is updated, and only then is the
-  AutoModpack pack regenerated.
+  AutoModpack pack regenerated. A candidate that touches `mods/` while the
+  server runs becomes `ready` instead and waits for a restart (see
+  Promotion).
 - Failed: before blaming the change, the same test runs on the live set
   without it. If the live set passes, the candidate is deleted and recorded
   in the rejection history. If the live set fails too, the change was not
@@ -80,7 +85,54 @@ Removing or disabling a jar is not boot-tested; instead it is refused when
 another installed mod declares it as a dependency.
 
 Client tests wait while anyone is online on any server, and run one at a
-time under `nice`.
+time under `nice`. Every test JVM first waits (up to 10 minutes, then
+`unverified`) until `MemAvailable` minus the memory promised to other
+running tests covers it (`withMemory` in `platform.ts`): 1 GB for the
+server test; 1, 2 or 4.5 GB for the client test and 2, 3.5 or 8 GB for the
+join, by mod count (up to 50, up to 150, more). On a 4 GB machine a client
+test next to the live server and a server copy otherwise gets the panel
+OOM-killed.
+
+## Promotion (`promote.ts`)
+
+Server mods only change while the server is stopped. A `ready` candidate, or
+an undo while the server runs, gets a promotion record in
+`data/promotions/<id>.json`, polled every 15 seconds only while one exists.
+A `ready` candidate keeps the SHA-1 of every tested client file, and any
+live mod change (delete, toggle, file manager) sends it back to testing.
+
+- Running, RCON `list` says empty twice in a row: restart now. Without an
+  RCON answer the count is unknown and the panel never restarts on its own.
+- Running, players online: one chat warning, then the owner's choice. `now`
+  counts down 30 seconds; `when-empty` waits for the server to empty.
+- Stopped: the change goes in on the next start from the panel (Start,
+  Restart, scheduled start or restart, config restart). These all go
+  through `startServer` / `restartServer`; a server started outside the
+  panel runs the old mods and gets the change on its next restart.
+
+The record carries a stage, so a panel restart resumes it: `countdown`
+(released, the stop never happened), `stopping` (stop, then apply or undo
+that exact transaction), `applied` (start, wait up to 10 minutes for this
+boot to prove it is up, then compare AutoModpack's manifest from this
+start with the stored hashes). Proof of the boot is strict: RCON answers,
+or without RCON the server's `logs/latest.log` is newer than the start and
+contains `Done`; unavailable logs never count. If the server does not come
+up, or a tested change's pack differs from the stored hashes (or no fresh
+manifest appears within a minute of the boot), exactly that
+transaction is undone, the server is started again, and the candidate is
+rejected with the reason (the loader's last `- Mod '…'` line, or the
+differing files). While a stage is set, installs, discards, undos, undo
+cancels, crash sweeps and file writes on that server are refused.
+
+Maintenance is one fence per server in `data/maintenance.json`
+(`{op, since, pid, note}`). `beginMaintenance` refuses while another
+operation holds it; `endMaintenance` only ends the caller's own. Starts
+and restarts from the dashboard, the scheduler, config changes and the
+dependency doctor go through `startServer` / `restartServer`, which refuse
+a fenced server; the background watchers skip fenced servers. An entry
+from an earlier panel process, or one with a `note` (an apply or undo that
+could not be rolled back), is `interrupted`: starts, stops and other
+operations return 409 until the owner clears it on the dashboard.
 
 ### Display modes for the client test
 

@@ -4,7 +4,7 @@ import { join, basename } from 'node:path';
 import { PATHS } from '../config.js';
 import { serverDir, javaFor } from './servers.js';
 import { detect, type Detection } from './detect.js';
-import { IS_WIN, sandboxLink, linkOrCopy } from './platform.js';
+import { IS_WIN, sandboxLink, linkOrCopy, withMemory } from './platform.js';
 
 // SERVER BOOT TEST. The loader is the only honest judge of whether a mod set
 // boots, so the panel does not model compatibility: it boots the real thing.
@@ -68,8 +68,17 @@ let chain: Promise<unknown> = Promise.resolve();
 
 /** Boot this server's loader with exactly `jars` (absolute paths) as its
     mods folder. Serialized globally. */
-export function dryBoot(serverId: string, jars: string[]): Promise<Verdict> {
-  const run = chain.then(() => dryBootInner(serverId, jars), () => dryBootInner(serverId, jars));
+export function dryBoot(serverId: string, jars: string[], onStatus: (d: string) => void = () => {}): Promise<Verdict> {
+  const test = async (): Promise<Verdict> => {
+    // a mods-only boot stays well under 1 GB; the live server keeps its share
+    let waited = false;
+    const v = await withMemory(1, 'the server test', (d) => { waited = true; onStatus(d); }, () => {
+      if (waited) onStatus('boot-testing the server with this change');
+      return dryBootInner(serverId, jars);
+    });
+    return typeof v === 'string' ? { result: 'unverified', detail: v } : v;
+  };
+  const run = chain.then(test, test);
   chain = run.catch(() => {});
   return run;
 }

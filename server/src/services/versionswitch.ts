@@ -5,9 +5,8 @@ import { PATHS } from '../config.js';
 import { serverDir, pinJavaFor } from './servers.js';
 import { craftyApi } from '../clients/crafty.js';
 import { detect } from './detect.js';
-import { assertNoRecovery, exclusive, liveChanged } from './packtxn.js';
-import { serverPhase } from './phase.js';
-import { stopAndWait, isRunningSafe, createBackup, beginMaintenance, endMaintenance } from './maintenance.js';
+import { assertModsWritable, exclusive, liveChanged } from './packtxn.js';
+import { stopAndWait, isRunningSafe, createBackup, beginMaintenance, endMaintenance, waitForReady } from './maintenance.js';
 import * as modrinth from '../clients/modrinth.js';
 
 // Change a server's Minecraft version in place — the thing you would otherwise
@@ -197,12 +196,13 @@ export async function apply(
   opts: { acceptDowngrade?: boolean; disableIncompatible?: boolean } = {},
 ): Promise<SwitchResult> {
   if (inFlight.has(id)) return { ok: false, error: 'a version switch is already running' };
+  const busy = beginMaintenance(id, 'version switch');
+  if (busy) return { ok: false, error: busy };
   inFlight.add(id);
-  beginMaintenance(id);
   try {
     // holds the live-folder lock, so no mod apply or undo runs during the switch
     return await exclusive(id, async () => {
-      assertNoRecovery(id);
+      assertModsWritable(id);
       // mods/ may have changed even if this fails part-way: anything tested against the old ones is stale
       try { return await doApply(id, targetMc, opts); } finally { liveChanged(id); }
     });
@@ -210,7 +210,7 @@ export async function apply(
     return { ok: false, error: String((e as Error).message ?? e).slice(0, 300) };
   } finally {
     inFlight.delete(id);
-    endMaintenance(id);
+    endMaintenance(id, 'version switch');
   }
 }
 const inFlight = new Set<string>();
@@ -321,23 +321,10 @@ async function doApply(id: string, targetMc: string, opts: { acceptDowngrade?: b
   }
 }
 
-async function waitForReady(id: string, timeoutSec: number): Promise<boolean> {
-  const until = Date.now() + timeoutSec * 1000;
-  while (Date.now() < until) {
-    await new Promise((r) => setTimeout(r, 5000));
-    try {
-      const stats = await craftyApi.getStats(id);
-      if (!stats.running && !stats.waiting_start && Date.now() > until - timeoutSec * 1000 + 30_000) return false; // died
-      if ((await serverPhase(id, true)) === 'ready') return true;
-    } catch { /* keep waiting */ }
-  }
-  return false;
-}
-
 /** Put mods/ and the loader jar back the way they were before the switch. */
 export function rollback(id: string): Promise<boolean> {
   return exclusive(id, async () => {
-    assertNoRecovery(id);
+    assertModsWritable(id);
     try { return await restoreSnapshot(id); } finally { liveChanged(id); }
   });
 }

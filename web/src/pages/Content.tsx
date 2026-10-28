@@ -48,12 +48,25 @@ interface ExpandInfo {
 }
 interface Verdict { result: 'passed' | 'failed' | 'unverified'; detail: string; excerpt?: string[]; seconds?: number }
 interface Candidate {
-  status: 'collecting' | 'testing' | 'needs-approval' | 'activating' | 'applied' | 'rejected'
+  status: 'collecting' | 'testing' | 'needs-approval' | 'ready' | 'activating' | 'applied' | 'rejected'
   detail: string
   files: { file: string; to: 'mods' | 'shelf'; entry?: { title: string } }[]
   server?: Verdict
   client?: Verdict
+  approved?: boolean
   updatedAt: string
+}
+/** A change waiting for the server to restart before it goes live. */
+interface Promotion {
+  action: 'apply' | 'undo'
+  txn: string
+  choice: 'now' | 'when-empty' | null
+  restarting: boolean
+  /** the server is stopped: the change goes in when it is started from the panel */
+  stopped: boolean
+  /** RCON does not answer, so nobody can say who is online */
+  unknown: boolean
+  players: number | null
 }
 interface InstallResult {
   installed?: { file: string; title: string; version: string; clientOnly?: boolean }[] | number
@@ -195,16 +208,22 @@ export default function Content() {
 
   const installedQuery = useQuery({
     queryKey: ['installed', active?.id],
-    queryFn: () => api<{ items: InstalledItem[]; rejections?: { at: string; jars: string[]; reason: string[] }[]; candidate: Candidate | null }>(`/api/servers/${active?.id}/installed`),
+    queryFn: () => api<{ items: InstalledItem[]; rejections?: { at: string; jars: string[]; reason: string[] }[]; candidate: Candidate | null; promotion: Promotion | null }>(`/api/servers/${active?.id}/installed`),
     enabled: !!active,
-    // poll while a change is being tested
-    refetchInterval: (q) => (['collecting', 'testing'].includes(q.state.data?.candidate?.status ?? '') ? 3000 : false),
+    // poll while a change is being tested or waits for a restart
+    refetchInterval: (q) => (['collecting', 'testing'].includes(q.state.data?.candidate?.status ?? '') ? 3000 : q.state.data?.promotion ? 5000 : false),
   })
   const candidate = installedQuery.data?.candidate ?? null
+  const promotion = installedQuery.data?.promotion ?? null
   const decide = useMutation({
-    mutationFn: (action: CandidateAction) =>
-      api(`/api/servers/${active?.id}/candidate${action === 'discard' ? '' : `/${action}`}`, { method: action === 'discard' ? 'DELETE' : 'POST' }),
+    mutationFn: (action: CandidateAction) => {
+      const base = `/api/servers/${active?.id}`
+      if (action === 'now' || action === 'when-empty') return api(`${base}/promotion`, { method: 'POST', body: JSON.stringify({ choice: action }) })
+      if (action === 'cancel-undo') return api(`${base}/promotion`, { method: 'DELETE' })
+      return api(`${base}/candidate${action === 'discard' ? '' : `/${action}`}`, { method: action === 'discard' ? 'DELETE' : 'POST' })
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['installed', active?.id] }),
+    onError: (e) => failMsg(e),
   })
   const pendingCount = (installedQuery.data?.items ?? []).filter((i) => i.pending).length
   const rejections = installedQuery.data?.rejections ?? []
@@ -279,7 +298,7 @@ export default function Content() {
       setTimeout(() => setInstallMsg(null), 8000)
     },
     onError: (e) => {
-      setInstallMsg(`✗ ${String(e)}`)
+      setInstallMsg(`✗ ${String(e).replace(/^Error: \d+: /, '')}`)
       setTimeout(() => setInstallMsg(null), 8000)
     },
   })
@@ -344,9 +363,11 @@ export default function Content() {
     enabled: !!active && view === 'installed',
   })
   const undo = useMutation({
-    mutationFn: () => api(`/api/servers/${active?.id}/last-change/undo`, { method: 'POST', body: '{}' }),
-    onSuccess: () => {
-      setInstallMsg('✓ Undone: the mods from before that change are back. Restart the server to load them.')
+    mutationFn: () => api<{ waiting: boolean }>(`/api/servers/${active?.id}/last-change/undo`, { method: 'POST', body: '{}' }),
+    onSuccess: (r) => {
+      setInstallMsg(r.waiting
+        ? '✓ The undo waits for the server to restart; see above.'
+        : '✓ Undone: the mods from before that change are back. They load when the server starts.')
       qc.invalidateQueries({ queryKey: ['installed', active?.id] })
       qc.invalidateQueries({ queryKey: ['last-change', active?.id] })
       setTimeout(() => setInstallMsg(null), 10000)
@@ -443,7 +464,8 @@ export default function Content() {
         <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{installMsg}</div>
       )}
 
-      {active && candidate && <CandidateBanner c={candidate} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
+      {active && promotion?.action === 'undo' && <UndoWaitingBanner p={promotion} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
+      {active && candidate && <CandidateBanner c={candidate} p={promotion?.action === 'apply' ? promotion : null} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
 
       {active && rejections.length > 0 && (
         <div className="block border-gold! px-4 py-2.5 text-sm">
@@ -1125,7 +1147,7 @@ function ConfigsView({ serverId }: { serverId: string }) {
   )
 }
 
-type CandidateAction = 'apply' | 'retest' | 'discard'
+type CandidateAction = 'apply' | 'retest' | 'discard' | 'now' | 'when-empty' | 'cancel-undo'
 
 const RESULT = { passed: '✓ passed', failed: '✗ failed', unverified: '? not tested' } as const
 
@@ -1144,11 +1166,72 @@ function Verdicts({ c }: { c: Candidate }) {
   )
 }
 
+/** When a change that waits for a restart will go live, and the owner's choices. */
+function RestartChoice({ p, busy, onDecide }: { p: Promotion; busy: boolean; onDecide: (action: CandidateAction) => void }) {
+  if (p.restarting) return <div><span className="hud !opacity-100 mr-2">RESTARTING</span>The server is restarting to load it.</div>
+  const drop = p.action === 'apply'
+    ? <button onClick={() => onDecide('discard')} disabled={busy} className="btn px-4 py-2 text-sm">Discard</button>
+    : <button onClick={() => onDecide('cancel-undo')} disabled={busy} className="btn px-4 py-2 text-sm">Cancel undo</button>
+  if (p.stopped) {
+    return (
+      <>
+        <div>The server is stopped. Start it from this panel and the change goes in first.</div>
+        <div className="flex gap-3 flex-wrap">{drop}</div>
+      </>
+    )
+  }
+  if (p.unknown) {
+    return (
+      <>
+        <div>The panel cannot tell who is online (RCON does not answer), so it will not restart on its own. Restart the server from the dashboard to load it.</div>
+        <div className="flex gap-3 flex-wrap">{drop}</div>
+      </>
+    )
+  }
+  const n = p.players ?? 0
+  const status = p.players === null ? 'Checking who is online…'
+    : n === 0 ? 'Nobody is online, so the server restarts in a moment.'
+    : p.choice === 'when-empty' ? `${n} player${n === 1 ? ' is' : 's are'} online. The server restarts once everyone has left.`
+    : p.choice === 'now' ? 'Restarting after a 30-second warning in chat.'
+    : `${n} player${n === 1 ? ' is' : 's are'} online and ${n === 1 ? 'was' : 'were'} told in chat. Restart now, or wait until everyone has left?`
+  return (
+    <>
+      <div>{status}</div>
+      {n > 0 && p.choice !== 'now' && (
+        <div className="flex gap-3 flex-wrap">
+          <button onClick={() => onDecide('now')} disabled={busy} className="btn btn-emerald px-4 py-2 text-sm">Restart now (30 s warning)</button>
+          {p.choice !== 'when-empty' && <button onClick={() => onDecide('when-empty')} disabled={busy} className="btn px-4 py-2 text-sm">When everyone has left</button>}
+          {drop}
+        </div>
+      )}
+    </>
+  )
+}
+
+/** An undo of the last change, waiting for the server to restart. */
+function UndoWaitingBanner({ p, busy, onDecide }: { p: Promotion; busy: boolean; onDecide: (action: CandidateAction) => void }) {
+  return (
+    <div className="block border-sky! px-4 py-3 text-sm space-y-2" role="status">
+      <div><b>Undo of the last mod change</b> goes in when the server restarts, so friends never get a pack the server is not running.</div>
+      <RestartChoice p={p} busy={busy} onDecide={onDecide} />
+    </div>
+  )
+}
+
 /** The mod change waiting for its tests, or the result of the last one. */
-function CandidateBanner({ c, busy, onDecide }: { c: Candidate; busy: boolean; onDecide: (action: CandidateAction) => void }) {
+function CandidateBanner({ c, p, busy, onDecide }: { c: Candidate; p: Promotion | null; busy: boolean; onDecide: (action: CandidateAction) => void }) {
   const names = c.files.map((f) => f.entry?.title ?? f.file).join(', ')
   const recent = Date.now() - new Date(c.updatedAt).getTime() < 10 * 60_000
   if (c.status === 'rejected' || ((c.status === 'applied') && !recent)) return null
+  if (c.status === 'ready') {
+    return (
+      <div className="block border-emerald! px-4 py-3 text-sm space-y-2">
+        <div><b>✓ {names}</b> {c.approved ? 'is approved' : 'passed its tests'}. It goes live the next time the server starts, so friends get it together with the server.</div>
+        <Verdicts c={c} />
+        {p && <RestartChoice p={p} busy={busy} onDecide={onDecide} />}
+      </div>
+    )
+  }
   if (c.status === 'applied') {
     return (
       <div className="block border-emerald! px-4 py-2.5 text-sm space-y-1">

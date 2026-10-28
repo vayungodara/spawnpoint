@@ -5,7 +5,7 @@ import { join, resolve, sep, dirname, basename, relative } from 'node:path';
 import { chownSync, statSync as statS } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { serverDir } from '../services/servers.js';
-import { liveChanged, assertNoRecovery, stage, stagingPath } from '../services/packtxn.js';
+import { liveChanged, assertModsWritable, assertCanStage, stage, stagingPath } from '../services/packtxn.js';
 import { assertNotRequired } from '../services/installer.js';
 
 // WEB FILE MANAGER — browse/edit/upload/download any file under a server's
@@ -61,13 +61,17 @@ export default async function fileRoutes(app: FastifyInstance) {
   app.addHook('preHandler', async (req, reply) => {
     const id = (req.params as { id?: string }).id;
     if (!id || req.method === 'GET') return;
-    try { assertNoRecovery(id); } catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+    try { assertModsWritable(id); } catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
   });
-  // any write through the file manager changes what a mod test saw
-  app.addHook('onResponse', async (req, reply) => {
-    const id = (req.params as { id?: string }).id;
-    if (id && req.method !== 'GET' && reply.statusCode < 300) liveChanged(id);
-  });
+  /** Any write through the file manager changes what a mod test saw. The
+      check, the write and the invalidation run in one synchronous step, so a
+      restart for a mod change cannot claim a verdict on the old files between. */
+  const mutate = <T>(id: string, write: () => T): T => {
+    assertModsWritable(id);
+    const r = write();
+    liveChanged(id);
+    return r;
+  };
   /** removing or renaming a jar in mods/ must not orphan a mod that needs it */
   const guardJar = (id: string, path: string): void => {
     if (dirname(path) === join(realpathSync(serverDir(id)), 'mods') && path.endsWith('.jar')) assertNotRequired(id, basename(path));
@@ -119,7 +123,7 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (req, reply) => {
       try {
         const p = confine(req.params.id, req.body.path);
-        writeFileSync(p, req.body.content ?? '', 'utf8');
+        mutate(req.params.id, () => writeFileSync(p, req.body.content ?? '', 'utf8'));
         chownFile(p); // root-vs-crafty ownership class — every panel write into server dirs
         return { ok: true };
       } catch (e) {
@@ -161,13 +165,17 @@ export default async function fileRoutes(app: FastifyInstance) {
           const part = `${dest}.${randomBytes(4).toString('hex')}.part`;
           await pipeline(req.body as NodeJS.ReadableStream, createWriteStream(part));
           // from here to stage() is synchronous, so nothing can slip in between
-          try { assertNoRecovery(req.params.id); } catch (e) { rmSync(part, { force: true }); throw e; }
+          try { assertCanStage(req.params.id); } catch (e) { rmSync(part, { force: true }); throw e; }
           renameSync(part, dest);
           const replaces = existsSync(p) ? name : undefined;
           return { ok: true, candidate: stage(req.params.id, [{ file: name, to: 'mods', replaces }], (m) => app.log.info(m)) };
         }
         mkdirSync(dirname(p), { recursive: true });
-        await pipeline(req.body as NodeJS.ReadableStream, createWriteStream(p));
+        // streamed to a private part file; a mod change may have started going
+        // live meanwhile, so check again, then land it and invalidate in one step
+        const part = `${p}.${randomBytes(4).toString('hex')}.part`;
+        await pipeline(req.body as NodeJS.ReadableStream, createWriteStream(part));
+        try { mutate(req.params.id, () => renameSync(part, p)); } catch (e) { rmSync(part, { force: true }); throw e; }
         chownFile(p);
         // a dropped .mrpack / CF pack zip is an intent, not just a file — tell
         // the UI what it is so it can offer install / new-server right away
@@ -246,7 +254,7 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (req, reply) => {
       try {
         const p = confine(req.params.id, req.body.path);
-        mkdirSync(p, { recursive: true });
+        mutate(req.params.id, () => mkdirSync(p, { recursive: true }));
         chownFile(p);
         return { ok: true };
       } catch (e) {
@@ -262,7 +270,7 @@ export default async function fileRoutes(app: FastifyInstance) {
         const from = confine(req.params.id, req.body.from);
         const to = confine(req.params.id, req.body.to);
         if (from !== to) guardJar(req.params.id, from);
-        renameSync(from, to);
+        mutate(req.params.id, () => renameSync(from, to));
         return { ok: true };
       } catch (e) {
         return reply.code(400).send({ error: String((e as Error).message ?? e).slice(0, 200) });
@@ -289,7 +297,7 @@ export default async function fileRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: 'use the Worlds card to manage worlds — it backs up first' });
         }
         guardJar(req.params.id, p);
-        rmSync(p, { recursive: true, force: true });
+        mutate(req.params.id, () => rmSync(p, { recursive: true, force: true }));
         return { ok: true };
       } catch (e) {
         return reply.code(400).send({ error: String((e as Error).message ?? e).slice(0, 200) });

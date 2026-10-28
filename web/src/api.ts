@@ -28,12 +28,21 @@ export interface Stats {
   desc: string
   world_size: string
   phase?: 'stopped' | 'starting' | 'ready'
+  /** an operation that owns the server; `interrupted` when it stopped part-way
+      (a panel restart, or `note` says why) and waits for the owner */
+  maintenance?: { op: string; since: string; interrupted: boolean; note?: string } | null
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = init?.body ? { 'content-type': 'application/json' } : undefined
   const r = await fetch(path, { headers, ...init })
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
+  if (!r.ok) {
+    // the server's own sentence ({ error } or Fastify's { message }), not its JSON
+    const text = await r.text()
+    let why = text
+    try { const j = JSON.parse(text) as { error?: string; message?: string }; why = j.error ?? j.message ?? text } catch { /* plain text */ }
+    throw new Error(`${r.status}: ${why}`)
+  }
   return r.json() as Promise<T>
 }
 

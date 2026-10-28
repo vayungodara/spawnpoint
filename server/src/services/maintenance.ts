@@ -1,10 +1,11 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, unlinkSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { PATHS } from '../config.js';
 import { serverDir } from './servers.js';
 import { craftyApi } from '../clients/crafty.js';
 import { readProperties } from './properties.js';
-import { moveDir, portListening, stageAndZipWorld, unzipTo } from './platform.js';
+import { serverPhase, forgetReady, bootedSince } from './phase.js';
+import { moveDir, portListening, stageAndZipWorld, unzipTo, writeFileAtomic } from './platform.js';
 
 async function pause(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -37,10 +38,65 @@ async function fullyStopped(uuid: string): Promise<boolean> {
 // NOT start or stop it in that window — a scheduled start once booted a server
 // while its level.dat patch was still pending, and the running server rewrote
 // the file from memory on shutdown, silently undoing the change.
-const underMaintenance = new Set<string>();
-export function beginMaintenance(uuid: string): void { underMaintenance.add(uuid); }
-export function endMaintenance(uuid: string): void { underMaintenance.delete(uuid); }
+// The set is kept on disk: an entry left by an earlier panel process means
+// that operation was cut short, and the server stays fenced until the owner
+// has looked at it and cleared it (or the operation resumes itself).
+// One operation holds a server at a time: beginMaintenance refuses while
+// another holds it, and endMaintenance only ends the caller's own fence.
+export interface Maintenance {
+  op: string;
+  since: string;
+  pid: number;
+  /** why the operation stopped part-way and left the server for the owner */
+  note?: string;
+}
+const MAINTENANCE_FILE = join(PATHS.data, 'maintenance.json');
+const underMaintenance: Map<string, Maintenance> = (() => {
+  try { return new Map(Object.entries(JSON.parse(readFileSync(MAINTENANCE_FILE, 'utf8')) as Record<string, Maintenance>)); } catch { return new Map(); }
+})();
+const saveMaintenance = (): void => writeFileAtomic(MAINTENANCE_FILE, JSON.stringify(Object.fromEntries(underMaintenance), null, 1));
+
+/** Fence a server for `op`. Returns why not when another operation holds it. */
+export function beginMaintenance(uuid: string, op: string): string | null {
+  const busy = busyReason(uuid);
+  if (busy) return busy;
+  underMaintenance.set(uuid, { op, since: new Date().toISOString(), pid: process.pid });
+  saveMaintenance();
+  return null;
+}
+/** End `op`'s fence. A fence another operation holds stays. */
+export function endMaintenance(uuid: string, op: string): void {
+  if (underMaintenance.get(uuid)?.op === op && underMaintenance.delete(uuid)) saveMaintenance();
+}
+/** `op` could not finish safely: keep the server fenced until the owner has looked. */
+export function strandMaintenance(uuid: string, op: string, note: string): void {
+  const m = underMaintenance.get(uuid);
+  if (m?.op !== op) return;
+  underMaintenance.set(uuid, { ...m, note });
+  saveMaintenance();
+}
+/** The owner checked a server an operation left part-way. False while it still runs. */
+export function clearInterrupted(uuid: string): boolean {
+  if (!maintenanceOf(uuid)?.interrupted) return false;
+  underMaintenance.delete(uuid);
+  saveMaintenance();
+  return true;
+}
 export function isUnderMaintenance(uuid: string): boolean { return underMaintenance.has(uuid); }
+/** The operation a server is fenced for; `interrupted` when it stopped part-way
+    (a panel restart cut it short, or it gave up) and waits for the owner. */
+export function maintenanceOf(uuid: string): (Maintenance & { interrupted: boolean }) | null {
+  const m = underMaintenance.get(uuid);
+  return m ? { ...m, interrupted: m.pid !== process.pid || !!m.note } : null;
+}
+/** Why the server cannot be started, stopped or changed right now, or null. */
+export function busyReason(uuid: string): string | null {
+  const m = maintenanceOf(uuid);
+  if (!m) return null;
+  return m.interrupted
+    ? `a ${m.op} ${m.note ? `stopped part-way (${m.note})` : 'was cut short by a panel restart'}; check the server, then clear the warning on the dashboard`
+    : `the server is busy (${m.op}); try again in a minute`;
+}
 
 /** Is the server running? FAIL-SAFE: a Crafty API error answers "yes".
     Every destructive path (world reset, restore, player wipe, level.dat patch)
@@ -56,12 +112,33 @@ export async function isRunningSafe(uuid: string): Promise<boolean> {
   }
 }
 
+/** After a start: true once players can join, false if the server died or
+    did not come up within the timeout. With `since` (when the start was
+    sent), only proof from that boot counts (see bootedSince). */
+export async function waitForReady(uuid: string, timeoutSec: number, since?: number): Promise<boolean> {
+  forgetReady(uuid); // "ready" from before the restart says nothing about this boot
+  const started = Date.now();
+  const latestLog = join(serverDir(uuid), 'logs', 'latest.log');
+  while (Date.now() - started < timeoutSec * 1000) {
+    await pause(5000);
+    try {
+      const stats = await craftyApi.getStats(uuid);
+      // Crafty can report stopped for a few seconds before the process shows up
+      if (!stats.running && !stats.waiting_start && Date.now() - started > 30_000) return false;
+      if (!stats.running) continue;
+      if (since === undefined ? (await serverPhase(uuid, true)) === 'ready' : await bootedSince(uuid, latestLog, since)) return true;
+    } catch { /* keep waiting */ }
+  }
+  return false;
+}
+
 /** Stop a server and WAIT until the java process is genuinely gone. */
 export async function stopAndWait(uuid: string, timeoutSec = 90): Promise<boolean> {
   await craftyApi.action(uuid, 'stop_server').catch(() => {});
   for (let i = 0; i < timeoutSec / 3; i++) {
     await pause(3000);
     if (await fullyStopped(uuid)) {
+      forgetReady(uuid);
       await pause(4000); // final file-flush grace period
       return true;
     }
@@ -82,24 +159,29 @@ export async function resetPlayers(uuid: string): Promise<ResetResult> {
   const world = join(serverDir(uuid), 'world');
   if (!existsSync(world))
     return { ok: false, wiped: [], restarted: false, error: 'no world exists yet — start the server once to generate it first' };
-
-  const wasRunning = await isRunningSafe(uuid);
-  if (wasRunning) {
-    const stopped = await stopAndWait(uuid);
-    if (!stopped) return { ok: false, wiped: [], restarted: false, error: 'server would not stop — try again' };
-  }
-
-  const wiped: string[] = [];
-  for (const d of ['playerdata', 'advancements', 'stats', 'players']) {
-    const p = join(world, d);
-    if (existsSync(p)) {
-      rmSync(p, { recursive: true, force: true });
-      wiped.push(d);
+  const busy = beginMaintenance(uuid, 'player reset');
+  if (busy) return { ok: false, wiped: [], restarted: false, error: busy };
+  try {
+    const wasRunning = await isRunningSafe(uuid);
+    if (wasRunning) {
+      const stopped = await stopAndWait(uuid);
+      if (!stopped) return { ok: false, wiped: [], restarted: false, error: 'server would not stop — try again' };
     }
-  }
 
-  if (wasRunning) await craftyApi.action(uuid, 'start_server').catch(() => {});
-  return { ok: true, wiped, restarted: wasRunning };
+    const wiped: string[] = [];
+    for (const d of ['playerdata', 'advancements', 'stats', 'players']) {
+      const p = join(world, d);
+      if (existsSync(p)) {
+        rmSync(p, { recursive: true, force: true });
+        wiped.push(d);
+      }
+    }
+
+    if (wasRunning) await craftyApi.action(uuid, 'start_server').catch(() => {});
+    return { ok: true, wiped, restarted: wasRunning };
+  } finally {
+    endMaintenance(uuid, 'player reset');
+  }
 }
 
 // ---------------- backups ----------------
@@ -236,8 +318,9 @@ export async function restoreBackup(uuid: string, file: string): Promise<{ ok: b
   }
 
   if (restoring.has(uuid)) return { ok: false, error: 'a restore is already running for this server' };
+  const busy = beginMaintenance(uuid, 'backup restore');
+  if (busy) return { ok: false, error: busy };
   restoring.add(uuid);
-  beginMaintenance(uuid);
   try {
     const wasRunning = await isRunningSafe(uuid);
     if (wasRunning) {
@@ -277,7 +360,7 @@ export async function restoreBackup(uuid: string, file: string): Promise<{ ok: b
     return { ok: true };
   } finally {
     restoring.delete(uuid);
-    endMaintenance(uuid);
+    endMaintenance(uuid, 'backup restore');
   }
 }
 

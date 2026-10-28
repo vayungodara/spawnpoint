@@ -1,4 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join, basename, dirname } from 'node:path';
 import { PATHS } from '../config.js';
 import { serverDir, clientShelfDir } from './servers.js';
@@ -8,6 +10,8 @@ import { dryBoot, type Verdict } from './preflight.js';
 import { scanJars, isServerOnly } from './jardeps.js';
 import { autoModpackActive, extrasDir, publishPack } from './automodpack.js';
 import { clientGate, type ClientSet } from './launchgate.js';
+import { isRunningSafe, busyReason } from './maintenance.js';
+import { promotion, requestPromotion, restarting } from './promote.js';
 
 // PACK TRANSACTIONS. A mod change never touches a live folder until it has
 // passed its tests. Installs download into one candidate per server
@@ -16,6 +20,8 @@ import { clientGate, type ClientSet } from './launchgate.js';
 // servers, with a real client. Only a candidate that passed moves into mods/
 // and the client shelf; the files it replaces move to data/revisions/<id>/.
 // A failed candidate is deleted, so every existing file stays as it was.
+// mods/ only changes while the server is stopped: a passed candidate for a
+// running server becomes 'ready' and promote.ts restarts it in.
 
 export interface StagedFile {
   file: string;
@@ -26,7 +32,7 @@ export interface StagedFile {
   entry?: LedgerEntry;
 }
 
-export type CandidateStatus = 'collecting' | 'testing' | 'needs-approval' | 'activating' | 'applied' | 'rejected';
+export type CandidateStatus = 'collecting' | 'testing' | 'needs-approval' | 'ready' | 'activating' | 'applied' | 'rejected';
 
 export interface Candidate {
   txn: string;
@@ -37,6 +43,11 @@ export interface Candidate {
   client?: Verdict;
   /** while activating: the journal that lets a crash or failure be undone */
   journal?: Journal;
+  /** applied on the owner's say-so without a full test */
+  approved?: boolean;
+  /** while 'ready' on an AutoModpack server: SHA-1 of every tested client
+      file by pack path, to check the pack friends get after the restart */
+  pack?: Record<string, string>;
   updatedAt: string;
 }
 
@@ -53,8 +64,9 @@ const QUIET_MS = 12_000;
 const KEEP_REVISIONS = 5;
 const root = (id: string): string => join(PATHS.data, 'candidates', id);
 const filesDir = (id: string): string => join(root(id), 'files');
+/** Open candidates take more files; a 'ready' one is tested again with them. */
 const isOpen = (c: Candidate | null): c is Candidate =>
-  !!c && (c.status === 'collecting' || c.status === 'testing' || c.status === 'needs-approval');
+  !!c && (c.status === 'collecting' || c.status === 'testing' || c.status === 'needs-approval' || c.status === 'ready');
 /** Delete this candidate's staged files (never the whole folder: an install may be mid-download into it). */
 const dropFiles = (id: string, c: Candidate): void => {
   for (const f of c.files) rmSync(join(filesDir(id), f.file), { force: true });
@@ -96,7 +108,7 @@ export function txnBusy(): boolean {
 
 /** Add downloaded files to this server's candidate and (re)start its quiet timer. */
 export function stage(id: string, files: StagedFile[], log: (m: string) => void): Candidate {
-  assertNoRecovery(id);
+  assertCanStage(id);
   const prev = candidate(id);
   const c: Candidate = isOpen(prev) ? prev : { txn: new Date().toISOString().replace(/[:.]/g, '-'), status: 'collecting', detail: '', files: [], updatedAt: '' };
   for (const f of files) {
@@ -108,6 +120,9 @@ export function stage(id: string, files: StagedFile[], log: (m: string) => void)
     c.files = c.files.filter((x) => x.file !== f.file && !(f.entry && x.entry?.projectId === f.entry.projectId)).concat(f);
   }
   generation.set(id, (generation.get(id) ?? 0) + 1);
+  // an approval or a tested pack was for the files before this batch
+  c.approved = undefined;
+  c.pack = undefined;
   if (c.status !== 'testing') {
     c.status = 'collecting';
     c.detail = 'waiting a few seconds for more changes, then boot-testing';
@@ -128,23 +143,36 @@ export async function approve(id: string, log: (m: string) => void): Promise<Can
   return activate(id, c, log, true);
 }
 
-/** Test a candidate waiting for approval again, after the owner fixed what
-    kept a test from running. */
+/** Test a waiting candidate again: the owner fixed what kept a test from
+    running, or the live mods it was tested against changed. A 'ready' one
+    loses its place in the restart queue until it passes again. */
 export function retest(id: string, log: (m: string) => void): void {
   const c = candidate(id);
-  if (c?.status !== 'needs-approval') return;
-  save(id, { ...c, status: 'collecting', detail: 'testing again in a few seconds' });
+  if (c?.status !== 'needs-approval' && c?.status !== 'ready') return;
+  if (restarting(id)) return; // it is going in right now; mods are locked until then
+  save(id, { ...c, status: 'collecting', detail: 'testing again in a few seconds', pack: undefined, approved: undefined });
   arm(id, log);
 }
 
-/** Refuse to write while an apply or undo is unfinished: its journal must
-    roll back against the files it recorded. */
-export function assertNoRecovery(id: string): void {
+/** An apply or undo stopped part-way: its journal must roll back against
+    the files it recorded before anything else writes. */
+function recoveryPending(id: string): boolean {
   const dir = revisionsDir(id);
-  const undoing = existsSync(dir) && readdirSync(dir).some((txn) => readManifest(join(dir, txn))?.undoing);
-  if (candidate(id)?.status === 'activating' || undoing) {
-    throw new Error('the last mod change is still being applied or undone; try again in a moment, or restart the panel to finish it');
-  }
+  return candidate(id)?.status === 'activating' || (existsSync(dir) && readdirSync(dir).some((txn) => readManifest(join(dir, txn))?.undoing));
+}
+
+/** Refuse to touch this server's mods while a change is half-applied or the
+    panel is restarting the server to load one. */
+export function assertModsWritable(id: string): void {
+  if (recoveryPending(id)) throw new Error('the last mod change is still being applied or undone; try again in a moment, or restart the panel to finish it');
+  if (restarting(id)) throw new Error('the server is restarting to load a mod change; try again in a minute');
+}
+
+/** Refuse a new install before its first byte is written: a refused batch
+    must not replace bytes a waiting change was tested with. */
+export function assertCanStage(id: string): void {
+  assertModsWritable(id);
+  if (promotion(id)?.action === 'undo') throw new Error('an undo is waiting for the server to restart; restart it or cancel the undo first');
 }
 
 /** Staged bytes are about to change: a running test must not pass on the old ones. */
@@ -153,7 +181,8 @@ export function invalidate(id: string): void {
 }
 
 /** The live mods changed (a delete or toggle): any verdict on an open
-    candidate is stale. A running test starts over; a waiting one is retested. */
+    candidate is stale. A running test starts over; a waiting or ready one is
+    retested. */
 export function liveChanged(id: string, log: (m: string) => void = panelLog): void {
   generation.set(id, (generation.get(id) ?? 0) + 1);
   retest(id, log);
@@ -161,6 +190,7 @@ export function liveChanged(id: string, log: (m: string) => void = panelLog): vo
 
 /** Throw away an open candidate. Live files were never touched. */
 export function discard(id: string): void {
+  if (restarting(id)) throw new Error('the server is restarting to load this change; it can be undone once it is up');
   clearTimeout(timers.get(id));
   timers.delete(id);
   const c = candidate(id);
@@ -267,7 +297,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       status('boot-testing the server with this change');
       // every verdict below is only acted on if nothing changed meanwhile
       const stale = (): boolean => (generation.get(id) ?? 0) !== gen;
-      const server = await dryBoot(id, set.serverJars);
+      const server = await dryBoot(id, set.serverJars, status);
       if (server.result === 'failed') {
         if (stale()) continue;
         // the loader names missing mod ids: install them and test again
@@ -461,6 +491,11 @@ export function exclusive<T>(id: string, fn: () => Promise<T>): Promise<T> {
 function activate(id: string, c: Candidate, log: (m: string) => void, approved = false): Promise<Candidate> {
   const gen = generation.get(id) ?? 0;
   return exclusive(id, async () => {
+    // the running server keeps its old jars, and AutoModpack would serve
+    // friends files it does not run: a change to mods/ waits for a restart
+    const touches = touchesServer(id, c);
+    const wait = touches && await isRunningSafe(id);
+    const pack = wait && autoModpackActive(id) ? await packHashes(candidateSet(id, c).client) : undefined;
     // a second approval queued behind the first finds it already applied
     const now = candidate(id);
     if (now?.txn !== c.txn || now.status !== c.status) return now!;
@@ -468,6 +503,12 @@ function activate(id: string, c: Candidate, log: (m: string) => void, approved =
     if ((generation.get(id) ?? 0) !== gen) {
       arm(id, log);
       return save(id, { ...candidate(id)!, status: 'collecting', detail: 'the change grew while it waited; testing again' });
+    }
+    approved ||= !!c.approved;
+    if (wait) {
+      const ready = save(id, { ...c, approved, pack, status: 'ready', detail: 'tested; goes live when the server restarts' });
+      requestPromotion(id, 'apply', c.txn, log);
+      return ready;
     }
     const modsDir = join(serverDir(id), 'mods');
     const shelfDir = clientShelfDir(id);
@@ -505,11 +546,56 @@ function activate(id: string, c: Candidate, log: (m: string) => void, approved =
       return candidate(id)!;
     }
     const verdict = approved ? 'applied on your approval without a full test' : 'tested and applied';
-    const applied = save(id, { ...c, journal: undefined, status: 'applied', detail: `${verdict}; restart the server to load ${c.files.length === 1 ? 'it' : 'them'}` });
+    const when = touches ? `${c.files.length === 1 ? 'it loads' : 'they load'} when the server starts` : 'friends get it on their next join';
+    const applied = save(id, { ...c, approved, journal: undefined, status: 'applied', detail: `${verdict}; ${when}` });
     log(`packtxn: applied ${c.files.map((f) => f.file).join(', ')} on ${id}`);
     await afterCommit(id, log);
     return applied;
   });
+}
+
+/** Does this change move anything into or out of the server's own mods/? */
+function touchesServer(id: string, c: Pick<Candidate, 'files'>): boolean {
+  const mods = join(serverDir(id), 'mods');
+  return c.files.some((f) => f.to === 'mods' || [f.replaces, f.file].some((x) => x && existsSync(join(mods, x))));
+}
+
+/** SHA-1 of each client file by its path in AutoModpack's pack. AutoModpack
+    never lists its own jar: friends get it from the starter pack. */
+async function packHashes(files: ClientSet['files']): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const f of files) {
+    if (/^mods\/automodpack[^/]*\.jar$/i.test(f.rel)) continue;
+    out[`/${f.rel}`] = createHash('sha1').update(await readFile(f.src)).digest('hex');
+  }
+  return out;
+}
+
+/** Apply ready candidate `txn` now (the promotion stopped the server for it).
+    Anything else (already applied, retested, discarded) is left as it is. */
+export function applyReady(id: string, txn: string, log: (m: string) => void): Promise<Candidate | null> {
+  const c = candidate(id);
+  return c?.status === 'ready' && c.txn === txn ? activate(id, c, log) : Promise.resolve(c);
+}
+
+/** How far change `txn` got: live, mid-undo, or undone (null: no such change). */
+export function changeState(id: string, txn: string): 'live' | 'undoing' | 'undone' | null {
+  const m = readManifest(join(revisionsDir(id), txn));
+  return !m ? null : m.undoing ? 'undoing' : m.undone ? 'undone' : 'live';
+}
+
+/** The promotion reports how the restart went. */
+export function noteLive(id: string, txn: string, status: 'ready' | 'applied', detail: string): void {
+  const c = candidate(id);
+  if (c?.txn === txn) save(id, { ...c, status, detail });
+}
+
+/** The live server would not start with an applied change, so it was undone. */
+export function liveBootFailed(id: string, txn: string, detail: string): void {
+  const c = candidate(id);
+  if (c?.txn !== txn || (c.status === 'rejected' && c.detail === detail)) return; // already recorded
+  save(id, { ...c, status: 'rejected', detail });
+  recordRejection(id, c.files.map((f) => f.file), [detail]);
 }
 
 interface RevisionManifest {
@@ -545,17 +631,32 @@ export function lastChange(id: string): RevisionManifest | null {
 
 /** Undo the newest applied mod change: its files leave, the files it
     replaced come back. This restores the pack that was live before it, so
-    it is not tested again. */
-export function undoLast(id: string, log: (m: string) => void): Promise<RevisionManifest> {
+    it is not tested again. With `txn`, only that change is undone (a replay
+    of a finished undo returns it unchanged). */
+export function undoLast(id: string, log: (m: string) => void, txn?: string): Promise<RevisionManifest & { waiting?: boolean }> {
   return exclusive(id, async () => {
-    assertNoRecovery(id);
+    const running = await isRunningSafe(id);
+    if (recoveryPending(id)) throw new Error('the last mod change is still being applied or undone; try again in a moment, or restart the panel to finish it');
+    // the owner's undo waits its turn; a promotion's own rollback names its txn
+    const busy = !txn && (restarting(id) ? 'the server is restarting to load a mod change; try again in a minute' : busyReason(id));
+    if (busy) throw new Error(busy);
     if (stagedFiles(id).length) throw new Error('a mod change is waiting or being tested; finish or discard it first');
     const m = lastChange(id);
+    if (txn && m?.txn !== txn) {
+      const done = readManifest(join(revisionsDir(id), txn));
+      if (done?.undone) return done;
+      throw new Error('that mod change is no longer the last one, so it was not undone');
+    }
     if (!m) throw new Error('there is no mod change to undo');
     const dirOf = (to: 'mods' | 'shelf'): string => (to === 'mods' ? join(serverDir(id), 'mods') : clientShelfDir(id));
     const rev = join(revisionsDir(id), m.txn);
     const gone = m.added.filter((f) => !existsSync(join(dirOf(f.to), f.file)));
     if (gone.length) throw new Error(`${gone.map((f) => f.file).join(', ')} changed since; undo by hand from data/revisions/${id}/${m.txn}`);
+    // like an apply, an undo that touches mods/ waits for a restart
+    if (running && [...m.added, ...m.replaced].some((f) => f.to === 'mods')) {
+      requestPromotion(id, 'undo', m.txn, log);
+      return { ...m, waiting: true };
+    }
     const moves: [string, string][] = [
       ...m.added.map((f): [string, string] => [join(dirOf(f.to), f.file), join(rev, 'undone', f.file)]),
       ...m.replaced.map((f): [string, string] => [join(rev, f.file), join(dirOf(f.to), f.file)]),
@@ -583,9 +684,9 @@ export function undoLast(id: string, log: (m: string) => void): Promise<Revision
   });
 }
 
-/** Housekeeping once a change is final. Its failure is logged; it never
-    reopens the change. */
-async function afterCommit(id: string, log: (m: string) => void): Promise<void> {
+/** Housekeeping once a change is final (safe to repeat). Its failure is
+    logged; it never reopens the change. */
+export async function afterCommit(id: string, log: (m: string) => void): Promise<void> {
   try {
     pruneRevisions(id);
     await chownToDirOwner(join(serverDir(id), 'mods'));

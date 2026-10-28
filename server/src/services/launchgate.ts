@@ -1,12 +1,12 @@
-import { existsSync, mkdirSync, rmSync, copyFileSync, writeFileSync, readdirSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, copyFileSync, writeFileSync, readdirSync, renameSync, readFileSync, cpSync, constants } from 'node:fs';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { join, basename, dirname } from 'node:path';
+import { join, basename, dirname, relative, isAbsolute } from 'node:path';
 import { PATHS } from '../config.js';
 import { serverDir, javaFor } from './servers.js';
 import { detect, loaderVersion, type Detection } from './detect.js';
-import { killTree, IS_WIN, KILLABLE_SPAWN_OPTS, linkOrCopy } from './platform.js';
+import { killTree, IS_WIN, KILLABLE_SPAWN_OPTS, linkOrCopy, withMemory } from './platform.js';
 import { loaderLaunchArgs, linkLoader, excerptOf, type Verdict } from './preflight.js';
 
 // CLIENT BOOT TEST. AutoModpack mirrors whatever the server has; it does not
@@ -214,6 +214,17 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   const skipped = (name: string): boolean => gateMode() === 'xvfb' && ENV_SKIP.some((s) => name.toLowerCase().includes(s));
   const untestable = set.changed.filter(skipped);
   if (untestable.length) return { result: 'unverified', detail: `${untestable.join(', ')} cannot run on the virtual display, so the client test cannot cover it` };
+  // AutoModpack's handshake needs the client to hold the exact pack, so it is
+  // skipped when a mod has to be left out for the virtual display; the join
+  // then runs without AutoModpack, and the live pack is checked after the restart
+  const amJar = det.loader === 'fabric' && set.serverJars.find((p) => /^automodpack.*\.jar$/i.test(basename(p)));
+  const handshakeOff = !!amJar && set.files.some((f) => skipped(basename(f.rel)));
+  const amOnForge = det.loader !== 'fabric' && set.serverJars.some((p) => /^automodpack.*\.jar$/i.test(basename(p)));
+  const tested: AutoModpackFile[] | null = amJar && !handshakeOff ? [] : null;
+  if (tested && !set.files.some((f) => f.rel.startsWith('mods/') && /^automodpack.*\.jar$/i.test(basename(f.rel))
+    && readFileSync(f.src).equals(readFileSync(amJar as string)))) {
+    return { result: 'unverified', detail: 'AutoModpack handshake needs the server\'s own AutoModpack jar in the tested client set' };
+  }
   rmSync(rundir, { recursive: true, force: true });
   mkdirSync(join(rundir, 'mods'), { recursive: true });
   let mods = 0;
@@ -222,19 +233,34 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
     if (skipped(basename(f.rel))) { left.push(basename(f.rel)); continue; }
     const dst = join(rundir, f.rel);
     mkdirSync(dirname(dst), { recursive: true });
-    // jars never change, so a link is safe; configs a mod rewrites must not write through to the live pack
-    if (f.rel.endsWith('.jar')) linkOrCopy(f.src, dst);
-    else copyFileSync(f.src, dst);
+    // AutoModpack can overwrite jars during an update. Clone/copy its inputs
+    // rather than letting the updater write through a hardlink into the live pack.
+    if (f.rel.endsWith('.jar') && !tested) linkOrCopy(f.src, dst);
+    else copyFileSync(f.src, dst, constants.COPYFILE_FICLONE);
+    // Snapshot the bytes actually booted, not the manifest the server will generate later.
+    // AutoModpack itself is a bootstrap mod and is deliberately absent from its served list.
+    if (tested && !(f.rel.startsWith('mods/') && /^automodpack.*\.jar$/i.test(basename(f.rel)))) {
+      const bytes = readFileSync(dst);
+      tested.push({ file: `/${f.rel.replace(/\\/g, '/')}`, sha1: createHash('sha1').update(bytes).digest('hex'),
+        size: String(bytes.length), type: f.rel.startsWith('mods/') ? 'mod' : 'other', editable: false, forceCopy: false });
+      // Keep pristine pack inputs: singleplayer can rewrite loose config files.
+      const packFile = join(rundir, 'automodpack', 'modpacks', 'spawnpoint-join-test', f.rel);
+      mkdirSync(dirname(packFile), { recursive: true });
+      if (f.rel.endsWith('.jar')) linkOrCopy(dst, packFile);
+      else copyFileSync(dst, packFile);
+    }
     if (f.rel.startsWith('mods/')) mods++;
   }
   copyFileSync(testJar, join(rundir, 'mods', basename(testJar)));
 
-  onStatus(`booting a ${det.mc} client with ${mods} mods (takes a few minutes)`);
-  log(`launchgate: booting ${det.mc} client with ${mods} mods for ${serverId} (${gateMode()} mode)`);
+  // measured: a 20-mod client and a server copy each settle near 0.75 GB
+  const needGb = mods > 150 ? { client: 4.5, join: 8 } : mods > 50 ? { client: 2, join: 3.5 } : { client: 1, join: 2 };
   const heap = mods > 150 ? '-Xmx4G' : '-Xmx2G';
   const started = Date.now();
 
-  const sp = await new Promise<Verdict>((resolve) => {
+  const sp = await withMemory(needGb.client, 'the client test', onStatus, () => new Promise<Verdict>((resolve) => {
+    onStatus(`booting a ${det.mc} client with ${mods} mods (takes a few minutes)`);
+    log(`launchgate: booting ${det.mc} client with ${mods} mods for ${serverId} (${gateMode()} mode)`);
     const argv = clientArgv('', version, heap);
     const child = spawn(argv[0], argv.slice(1), { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
     let out = '';
@@ -274,36 +300,97 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
         excerpt: excerptOf(out),
       });
     });
-  });
+  }));
+  if (typeof sp === 'string') return { result: 'unverified', detail: sp };
   if (sp.result !== 'passed') return sp;
 
   await waitForQuiet(onStatus);
-  onStatus('joining a throwaway copy of the server');
-  const join_ = await joinTest(serverId, det, version, set.serverJars, rundir, log)
-    .catch((e): Verdict => ({ result: 'unverified', detail: `the join test errored: ${String(e).slice(0, 140)}` }));
+  // the join runs a client and a copy of the server at once
+  const join_ = await withMemory(needGb.join, 'the join test', onStatus, () => {
+    onStatus('joining a throwaway copy of the server');
+    return joinTest(serverId, det, version, set, rundir, tested, log)
+      .catch((e): Verdict => ({ result: 'unverified', detail: `the join test errored: ${String(e).slice(0, 140)}` }));
+  });
+  if (typeof join_ === 'string') return { result: 'unverified', detail: `${sp.detail}, but the join could not be tested: ${join_}` };
   if (join_.result !== 'passed') return { ...join_, detail: `${sp.detail}, but ${join_.detail}` };
-  const stubbed = gateMode() === 'headless' ? ' (graphics stubbed: install xvfb to test rendering too)'
-    : left.length ? ` (${left.join(', ')} left out: it cannot run on the virtual display)` : '';
-  return { result: 'passed', detail: `${sp.detail}, then ${join_.detail}${stubbed}`, seconds: Math.round((Date.now() - started) / 1000) };
+  const notes = [
+    gateMode() === 'headless' && 'graphics stubbed: install xvfb to test rendering too',
+    gateMode() !== 'headless' && left.length && `${left.join(', ')} left out: it cannot run on the virtual display${handshakeOff ? ', so AutoModpack\'s handshake was not run' : ''}`,
+    amOnForge && 'AutoModpack\'s handshake is only checked on Fabric',
+  ].filter(Boolean);
+  return { result: 'passed', detail: `${sp.detail}, then ${join_.detail}${notes.length ? ` (${notes.join('; ')})` : ''}`, seconds: Math.round((Date.now() - started) / 1000) };
 }
 
 // The join test boots a throwaway server (the candidate's jars, a fresh flat
 // world, offline mode, a side port) and quick-plays the client into it. The
 // verdict comes from the server's log: "joined the game" plus a quiet dwell
-// passes; "lost connection: Internal Exception" fails. AutoModpack is left
-// out on both sides: the sandbox would host a pack with a new fingerprint
-// and kick the test client as unsynced.
+// passes; "lost connection: Internal Exception" fails. Fabric AutoModpack 4.x
+// also needs an exact served-file match and the real login sync acknowledgement.
+// Trust only the copy's logged fingerprint; never copy the live server's keys.
 const JOIN_PORT = 25999;
 const JOIN_DWELL_MS = 25_000;
+
+interface AutoModpackFile {
+  file: string;
+  sha1: string;
+  size: string;
+  type: string;
+  editable: boolean;
+  forceCopy: boolean;
+}
+
+/** Reproduce publishPack's shelf overlay, keeping hand-placed extras and the
+    server's own sync/exclusion rules. Do not manufacture the host pack from
+    the tested list: that would hide files AutoModpack serves but we never booted. */
+function prepareAutoModpack(serverId: string, srv: string, set: ClientSet): void {
+  const live = serverDir(serverId);
+  const am = join(live, 'automodpack');
+  const cfgPath = join(am, 'automodpack-server.json');
+  const cfg = existsSync(cfgPath) ? JSON.parse(readFileSync(cfgPath, 'utf8')) : {};
+  if (cfg.DO_NOT_CHANGE_IT !== undefined && cfg.DO_NOT_CHANGE_IT !== 2) throw new Error('AutoModpack needs a version 2 server config');
+  if (cfg.modpackHost === false) throw new Error('AutoModpack hosting is disabled');
+  // Copy the roots of synced globs (not worlds, libraries or credentials).
+  // A broad root glob cannot be safely reproduced without copying the whole server.
+  for (const pattern of cfg.syncedFiles ?? ['/mods/*.jar', '/kubejs/**', '!/kubejs/server_scripts/**', '/emotes/*']) {
+    if (typeof pattern !== 'string') throw new Error('invalid AutoModpack syncedFiles');
+    if (pattern.startsWith('!')) continue;
+    const root = pattern.replace(/^\//, '').split('/')[0];
+    if (!root || /[\\*?[\]{}]/.test(root) || root.startsWith('.') || pattern.split('/').includes('..') || /^(automodpack|world.*|libraries|versions|logs|backups)$/i.test(root)) {
+      throw new Error(`cannot safely copy AutoModpack sync rule ${pattern}`);
+    }
+    if (root !== 'mods' && existsSync(join(live, root))) cpSync(join(live, root), join(srv, root), { recursive: true });
+  }
+  const extras = join(srv, 'automodpack', 'host-modpack', 'main');
+  if (existsSync(join(am, 'host-modpack', 'main'))) cpSync(join(am, 'host-modpack', 'main'), extras, { recursive: true });
+  mkdirSync(join(extras, 'mods'), { recursive: true });
+  const record = join(am, '.spawnpoint-bridged.json');
+  const bridged: string[] = existsSync(record) ? JSON.parse(readFileSync(record, 'utf8')) : [];
+  for (const jar of bridged) rmSync(join(extras, 'mods', basename(jar)), { force: true });
+  // Candidate shelf files can live in staging, not yet in data/clientmods/.
+  for (const f of set.files) {
+    const rel = relative(join(am, 'host-modpack', 'main'), f.src);
+    const fromExtras = !isAbsolute(rel) && !rel.startsWith('..');
+    if (f.rel.startsWith('mods/') && !set.serverJars.includes(f.src) && !fromExtras) copyFileSync(f.src, join(extras, 'mods', basename(f.rel)));
+  }
+  mkdirSync(join(srv, 'automodpack'), { recursive: true });
+  writeFileSync(join(srv, 'automodpack', 'automodpack-server.json'), JSON.stringify({ ...cfg,
+    // Regenerate as publishPack will, but host only on the copy's game port.
+    modpackName: 'spawnpoint-join-test', generateModpackOnStart: true, selfUpdater: false,
+    bindAddress: '127.0.0.1', bindPort: -1, addressToSend: '127.0.0.1', portToSend: -1,
+    disableInternalTLS: false, updateIpsOnEveryStart: false,
+  }, null, 2), 'utf8');
+}
 
 async function joinTest(
   serverId: string,
   det: Detection & { mc: string; loader: 'fabric' | 'forge' },
   version: string,
-  serverJars: string[],
+  set: ClientSet,
   rundir: string,
+  tested: AutoModpackFile[] | null,
   log: (m: string) => void,
 ): Promise<Verdict> {
+  const { serverJars } = set;
   const [maj, min] = det.mc.split('.').map((n) => parseInt(n, 10));
   if (maj === 1 && min < 20) return { result: 'unverified', detail: 'the join could not be tested (clients before 1.20 have no quick-play)' };
   const big = serverJars.length > 200;
@@ -317,7 +404,14 @@ async function joinTest(
   rmSync(srv, { recursive: true, force: true });
   mkdirSync(join(srv, 'mods'), { recursive: true });
   linkLoader(serverDir(serverId), srv);
-  for (const jar of serverJars) if (!/automodpack/i.test(basename(jar))) linkOrCopy(jar, join(srv, 'mods', basename(jar)));
+  for (const jar of serverJars) if (tested || !/automodpack/i.test(basename(jar))) linkOrCopy(jar, join(srv, 'mods', basename(jar)));
+  if (tested) {
+    try { prepareAutoModpack(serverId, srv, set); }
+    catch (e) {
+      rmSync(srv, { recursive: true, force: true });
+      return { result: 'unverified', detail: `AutoModpack handshake could not be prepared: ${String(e)}` };
+    }
+  }
   writeFileSync(join(srv, 'eula.txt'), 'eula=true\n', 'utf8');
   writeFileSync(join(srv, 'server.properties'), [
     `server-port=${JOIN_PORT}`, 'enable-rcon=false', 'online-mode=false', 'white-list=false',
@@ -328,14 +422,16 @@ async function joinTest(
   // of colliding with the real server's voice port
   mkdirSync(join(srv, 'config', 'voicechat'), { recursive: true });
   writeFileSync(join(srv, 'config', 'voicechat', 'voicechat-server.properties'), 'port=-1\n', 'utf8');
-  // the singleplayer driver would force its own flow; AutoModpack would demand a sync
+  // The singleplayer driver would force its own flow. Keep AutoModpack on Fabric.
   for (const jar of readdirSync(join(rundir, 'mods'))) {
-    if (/mc-runtime-test|automodpack/i.test(jar)) rmSync(join(rundir, 'mods', jar), { force: true });
+    if (/mc-runtime-test/i.test(jar) || (!tested && /automodpack/i.test(jar))) rmSync(join(rundir, 'mods', jar), { force: true });
   }
 
   const started = Date.now();
   return await new Promise<Verdict>((resolve) => {
     let srvOut = '';
+    let cliOut = '';
+    let differences: string[] = [];
     let cli: ReturnType<typeof spawn> | null = null;
     let settled = false;
     let joined = false;
@@ -350,14 +446,22 @@ async function joinTest(
       clearInterval(upPoll);
       try { if (cli?.pid) killTree(cli.pid); } catch { /* gone */ }
       try { if (srvChild.pid) killTree(srvChild.pid); } catch { /* gone */ }
-      try { writeFileSync(join(PATHS.data, 'launchgate', serverId, 'join.log'), srvOut.slice(-30_000), 'utf8'); } catch { /* diagnostics */ }
+      const work = join(PATHS.data, 'launchgate', serverId);
+      try {
+        writeFileSync(join(work, 'join.log'), srvOut.slice(-30_000), 'utf8');
+        writeFileSync(join(work, 'join-client.log'), cliOut.slice(-40_000), 'utf8');
+      } catch { /* diagnostics */ }
       setTimeout(() => rmSync(srv, { recursive: true, force: true }), 2000);
-      resolve(v);
+      resolve({ ...v, seconds: Math.round((Date.now() - started) / 1000) });
     };
     // A client that never even tried to connect proves nothing either way:
     // the join is untested. Real join failures leave evidence on the server
     // (a kick line, an encoder exception, a crash) and fail the test.
     const inconclusive = (why: string): void => {
+      if (tested && !/has installed whole modpack/.test(srvOut)) {
+        finish({ result: 'unverified', detail: `AutoModpack handshake was not verified (${why})`, excerpt: excerptOf(cliOut || srvOut) });
+        return;
+      }
       if (/Done \(/.test(srvOut) && !/lost connection|logged in|joined the game/i.test(srvOut)) {
         finish({ result: 'unverified', detail: `the join could not be tested (${why})` });
       } else finish({ result: 'failed', detail: why });
@@ -369,6 +473,17 @@ async function joinTest(
       return m ? m[1].slice(0, 160) : null;
     };
     const onLine = (): void => {
+      if (settled) return;
+      if (tested) {
+        if (/Modpack .* requires update!|Found file marked for deletion|Install\/Update modpack to join|has not installed modpack/.test(cliOut + srvOut)) {
+          finish({ result: 'failed', detail: `AutoModpack requires a download/update${differences.length ? `: ${differences.join(', ')}` : ' (see join-client.log)'}`, excerpt: differences });
+          return;
+        }
+        if (/Error while getting server modpack content|Error while handling data packet|Received untrusted certificate|Host server error|Failed to generate modpack|Error while initializing modpack updater/.test(cliOut + srvOut)) {
+          finish({ result: 'unverified', detail: 'AutoModpack handshake errored (see join-client.log and join.log)', excerpt: excerptOf(cliOut || srvOut) });
+          return;
+        }
+      }
       const kick = joined ? kicked() : null;
       if (kick) { finish({ result: 'failed', detail: `a player was kicked on join: ${kick}` }); return; }
       if (!joined && /joined the game/.test(srvOut)) {
@@ -376,7 +491,13 @@ async function joinTest(
         log(`launchgate: join test client joined ${serverId}'s copy, dwelling ${JOIN_DWELL_MS / 1000}s`);
         dwell = setTimeout(() => {
           const k = kicked();
-          finish(k ? { result: 'failed', detail: `a player was kicked after joining: ${k}` } : { result: 'passed', detail: 'joined a copy of the server and stayed connected' });
+          const handshake = cliOut.indexOf('Modpack address:');
+          if (tested && (handshake < 0 || !/Modpack .* is up to date!/.test(cliOut.slice(handshake)) || !/has installed whole modpack/.test(srvOut))) {
+            finish({ result: 'unverified', detail: 'the player joined, but AutoModpack did not verify its client handshake' });
+          } else if (tested && differences.length) {
+            finish({ result: 'failed', detail: `AutoModpack serves different files: ${differences.join(', ')}`, excerpt: differences });
+          } else finish(k ? { result: 'failed', detail: `a player was kicked after joining: ${k}` }
+            : { result: 'passed', detail: `joined a copy of the server and stayed connected${tested ? '; AutoModpack verified the exact tested pack' : ''}` });
         }, JOIN_DWELL_MS);
       }
     };
@@ -385,12 +506,60 @@ async function joinTest(
     srvChild.on('exit', (code) => finish({ result: 'failed', detail: `the server copy exited (code ${code}) ${joined ? 'with the player connected' : 'before the client joined'}` }));
     const upPoll = setInterval(() => {
       if (settled || cli) return;
-      if (!/Done \(/.test(srvOut)) {
-        if (Date.now() - started > serverUpMs) finish({ result: 'unverified', detail: 'the join could not be tested (the server copy did not finish starting in time)' });
+      // AutoModpack starts its TLS host AFTER Minecraft's Done line.
+      const fingerprint = /Certificate fingerprint: ([a-f0-9]{64})/.exec(srvOut)?.[1];
+      if (!/Done \(/.test(srvOut) || (tested && !fingerprint)) {
+        if (Date.now() - started > serverUpMs) finish({ result: 'unverified', detail: `the join could not be tested (${tested ? 'the server copy or AutoModpack host' : 'the server copy'} did not finish starting in time)` });
         return;
+      }
+      if (tested) {
+        try {
+          // Read the freshly generated host list, never an old live manifest.
+          const manifest = JSON.parse(readFileSync(join(srv, 'automodpack', 'host-modpack', 'automodpack-content.json'), 'utf8'));
+          if (!manifest.automodpackVersion?.startsWith('4.') || !fingerprint || !Array.isArray(manifest.list)) throw new Error('no AutoModpack 4.x manifest or TLS fingerprint');
+          const expected = new Map(tested.map((f) => [f.file, f]));
+          const served = new Map<string, AutoModpackFile>();
+          for (const f of manifest.list as AutoModpackFile[]) {
+            if (!f.file?.startsWith('/') || f.file.includes('\\') || f.file.split('/').includes('..') || !/^[a-f0-9]{40}$/.test(f.sha1)) throw new Error('invalid AutoModpack file list');
+            served.set(f.file, f);
+          }
+          differences = [...new Set([...expected.keys(), ...served.keys()])].sort().flatMap((path) => {
+            const a = expected.get(path), b = served.get(path);
+            return !a ? [`${path} (server only)`] : !b ? [`${path} (tested only)`] : a.sha1 !== b.sha1 || a.size !== String(b.size) ? [`${path} (different bytes)`] : [];
+          });
+          const pack = join(rundir, 'automodpack', 'modpacks', 'spawnpoint-join-test');
+          mkdirSync(pack, { recursive: true });
+          const localFiles = [...expected.values()].map((f) => ({ ...f, ...served.get(f.file), sha1: f.sha1, size: f.size }));
+          for (const f of localFiles) {
+            if (f.file.startsWith('/mods/') && !f.forceCopy) rmSync(join(rundir, f.file.slice(1)), { force: true });
+          }
+          // Seed the tested hashes, NOT the served hashes. No saved secret means
+          // prelaunch loads this local pack; login must fetch and verify the host.
+          writeFileSync(join(pack, 'automodpack-content.json'), JSON.stringify({ ...manifest, list: localFiles, nonModpackFilesToDelete: [] }), 'utf8');
+          // A fresh game dir's welcome screen blocks quick-play. Do not override
+          // options supplied by the pack; only set the harness's own defaults.
+          const options = join(rundir, 'options.txt');
+          if (!expected.has('/options.txt') && !existsSync(options)) writeFileSync(options, 'onboardAccessibility:false\n', 'utf8');
+          const address = `127.0.0.1:${JOIN_PORT}`;
+          writeFileSync(join(rundir, 'automodpack', 'automodpack-client.json'), JSON.stringify({ DO_NOT_CHANGE_IT: 2,
+            selectedModpack: 'spawnpoint-join-test', installedModpacks: { 'spawnpoint-join-test': { hostAddress: address, serverAddress: address, requiresMagic: true } },
+            updateSelectedModpackOnLaunch: true, selfUpdater: false,
+          }), 'utf8');
+          const privateDir = join(rundir, 'automodpack', '.private');
+          mkdirSync(privateDir, { recursive: true });
+          writeFileSync(join(privateDir, 'automodpack-known-hosts.json'), JSON.stringify({ hosts: { '127.0.0.1': fingerprint } }), 'utf8');
+          copyFileSync(join(srv, 'automodpack', 'host-modpack', 'automodpack-content.json'), join(PATHS.data, 'launchgate', serverId, 'join-pack.json'));
+          log(`launchgate: AutoModpack host has ${served.size} files; ${differences.length} differ from the tested pack${differences.length ? `: ${differences.join(', ')}` : ''}`);
+        } catch (e) {
+          finish({ result: 'unverified', detail: `AutoModpack handshake could not be prepared: ${String(e)}` });
+          return;
+        }
       }
       const argv = clientArgv(`--quickPlayMultiplayer 127.0.0.1:${JOIN_PORT}`, version, big ? '-Xmx4G' : '-Xmx2G');
       cli = spawn(argv[0], argv.slice(1), { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
+      cli.on('error', (e) => finish({ result: 'unverified', detail: `the join client could not start: ${e.message}` }));
+      cli.stdout!.on('data', (d: Buffer) => { cliOut += d.toString(); onLine(); });
+      cli.stderr!.on('data', (d: Buffer) => { cliOut += d.toString(); onLine(); });
       cli.on('exit', (code) => {
         if (!joined) inconclusive(`the client exited (code ${code}) before joining`);
         else finish({ result: 'failed', detail: `the client exited (code ${code}) after joining` });
@@ -398,4 +567,3 @@ async function joinTest(
     }, 2000);
   });
 }
-
