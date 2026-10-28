@@ -4,7 +4,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { useServers } from '../api'
-import bandMines from '../assets/band-mines.png'
+import bandMines from '../assets/band-mines.webp'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   // only claim a JSON body when there actually is one (Fastify 400s otherwise)
@@ -46,12 +46,21 @@ interface ExpandInfo {
   description: string
   versions: { id: string; name: string; date: string; mc: string[]; downloadable: boolean }[]
 }
+interface Verdict { result: 'passed' | 'failed' | 'unverified'; detail: string; excerpt?: string[]; seconds?: number }
+interface Candidate {
+  status: 'collecting' | 'testing' | 'needs-approval' | 'activating' | 'applied' | 'rejected'
+  detail: string
+  files: { file: string; to: 'mods' | 'shelf'; entry?: { title: string } }[]
+  server?: Verdict
+  client?: Verdict
+  updatedAt: string
+}
 interface InstallResult {
   installed?: { file: string; title: string; version: string; clientOnly?: boolean }[] | number
   skipped?: { projectId: string; reason: string }[]
   warnings?: string[]
-  needsConfirm?: boolean
-  reason?: string
+  candidate?: Candidate
+  untested?: string
   name?: string
   skippedClientOnly?: number
   manualDownloads?: { title: string; url: string }[]
@@ -186,8 +195,16 @@ export default function Content() {
 
   const installedQuery = useQuery({
     queryKey: ['installed', active?.id],
-    queryFn: () => api<{ items: InstalledItem[]; rejections?: { at: string; jars: string[]; reason: string[] }[] }>(`/api/servers/${active?.id}/installed`),
+    queryFn: () => api<{ items: InstalledItem[]; rejections?: { at: string; jars: string[]; reason: string[] }[]; candidate: Candidate | null }>(`/api/servers/${active?.id}/installed`),
     enabled: !!active,
+    // poll while a change is being tested
+    refetchInterval: (q) => (['collecting', 'testing'].includes(q.state.data?.candidate?.status ?? '') ? 3000 : false),
+  })
+  const candidate = installedQuery.data?.candidate ?? null
+  const decide = useMutation({
+    mutationFn: (action: CandidateAction) =>
+      api(`/api/servers/${active?.id}/candidate${action === 'discard' ? '' : `/${action}`}`, { method: action === 'discard' ? 'DELETE' : 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['installed', active?.id] }),
   })
   const pendingCount = (installedQuery.data?.items ?? []).filter((i) => i.pending).length
   const rejections = installedQuery.data?.rejections ?? []
@@ -217,25 +234,19 @@ export default function Content() {
   }, [jobQuery.data?.done, qc])
   // the job banner lives at the top of the page — clicking "New server" deep
   // in a result list left it invisible and the build looked like nothing
-  // happened (live 2026-07-27). Scroll to it when the first status arrives.
+  // happened. Scroll to it when the first status arrives.
   const jobBannerRef = useRef<HTMLDivElement | null>(null)
   const bannerVisible = !!(createJob && jobQuery.data)
   useEffect(() => {
     if (bannerVisible) jobBannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [bannerVisible])
   const install = useMutation({
-    mutationFn: (vars: { projectId: string; versionId?: string; force?: boolean }) =>
+    mutationFn: (vars: { projectId: string; versionId?: string }) =>
       api<InstallResult>(`/api/servers/${active?.id}/install`, {
         method: 'POST',
         body: JSON.stringify({ ...vars, type: tab, source: effSource }),
       }),
     onSuccess: (res, vars) => {
-      if (res.needsConfirm) {
-        if (confirm(`${res.reason}\n\nInstall anyway? (loads on next restart)`)) {
-          install.mutate({ ...vars, force: true })
-        }
-        return
-      }
       if (res.error) {
         setInstallMsg(`✗ ${res.error}`)
         setTimeout(() => setInstallMsg(null), 10000)
@@ -258,7 +269,11 @@ export default function Content() {
       const names = res.installed?.map((i) => `${i.title} ${i.version}${i.clientOnly ? ' → client shelf' : ''}`).join(', ') || 'nothing new'
       const extra = res.skipped?.length ? ` · skipped: ${res.skipped.map((s) => s.reason).join('; ')}` : ''
       const allShelf = !!res.installed?.length && res.installed.every((i) => i.clientOnly)
-      setInstallMsg(`✓ Installed: ${names}${extra}${res.installed?.length ? (allShelf ? ' — in the friend pack, never loaded by the server' : ' — restart to load') : ''}`)
+      const after = !res.installed?.length ? ''
+        : res.candidate ? ' — boot-testing now; it goes live only if the test passes'
+        : res.untested ? ` — installed without a boot test (${res.untested}); restart to load`
+        : allShelf ? ' — in the friend pack, never loaded by the server' : ' — restart to load'
+      setInstallMsg(`${res.candidate ? '⏳ Staged' : '✓ Installed'}: ${names}${extra}${after}`)
       if (vars.projectId) setJustInstalled((prev) => new Set(prev).add(String(vars.projectId)))
       qc.invalidateQueries({ queryKey: ['installed', active?.id] })
       setTimeout(() => setInstallMsg(null), 8000)
@@ -310,46 +325,9 @@ export default function Content() {
   })
 
   const [installedFilter, setInstalledFilter] = useState('')
-  const [perfOptional, setPerfOptional] = useState(false)
-  const perfPack = useMutation({
-    mutationFn: (vars: { includeOptional: boolean; force?: boolean }) =>
-      api<InstallResult>(`/api/servers/${active?.id}/perf-pack`, {
-        method: 'POST',
-        body: JSON.stringify(vars),
-      }),
-    onSuccess: (res, vars) => {
-      if (res.needsConfirm) {
-        if (confirm(`${res.reason}\n\nInstall anyway? (loads on next restart)`)) {
-          perfPack.mutate({ ...vars, force: true })
-        }
-        return
-      }
-      const n = Array.isArray(res.installed) ? res.installed.length : 0
-      const skipped = res.skipped?.length ?? 0
-      const w = res.warnings?.length ? ` · skipped: ${res.warnings.length} (no build for this version — normal)` : ''
-      // "already installed" was a lie on a Paper server: none of the perf mods
-      // have a Paper build, so every one landed in `skipped` and nothing was
-      // installed — and the UI, which only ever read `installed`, called that success.
-      setInstallMsg(
-        n
-          ? `✓ Perf pack: ${n} files installed${w} — restart to load`
-          : skipped
-            ? `✗ Perf pack: nothing installed — all ${skipped} mod(s) skipped: ${res.skipped!.slice(0, 3).map((s) => s.reason).join('; ')}${skipped > 3 ? '…' : ''}`
-            : `Perf pack already installed${w}`,
-      )
-      qc.invalidateQueries({ queryKey: ['installed', active?.id] })
-      setTimeout(() => setInstallMsg(null), 10000)
-    },
-    onError: (e) => {
-      setInstallMsg(`✗ ${String(e)}`)
-      setTimeout(() => setInstallMsg(null), 8000)
-    },
-  })
   const [updates, setUpdates] = useState<UpdateInfo[] | null>(null)
   const [changelogFor, setChangelogFor] = useState<string | null>(null)
-  // both of these used to have NO error handler: a Modrinth 429 or a panel 500
-  // flipped the button from "checking…" straight back to "Check for updates"
-  // and said nothing at all, so the click looked like it did nothing
+  // a Modrinth 429 or a panel error must say so, not quietly reset the button
   const failMsg = (e: unknown) => {
     setInstallMsg(`✗ ${String(e).replace(/^Error: \d+: /, '')}`)
     setTimeout(() => setInstallMsg(null), 8000)
@@ -357,6 +335,22 @@ export default function Content() {
   const checkUpdates = useMutation({
     mutationFn: () => api<{ updates: UpdateInfo[] }>(`/api/servers/${active?.id}/installed/updates`),
     onSuccess: (r) => setUpdates(r.updates),
+    onError: failMsg,
+  })
+  // the newest applied mod change, which can be undone
+  const lastChange = useQuery({
+    queryKey: ['last-change', active?.id, candidate?.status],
+    queryFn: () => api<{ change: { txn: string; added: { file: string }[] } | null }>(`/api/servers/${active?.id}/last-change`),
+    enabled: !!active && view === 'installed',
+  })
+  const undo = useMutation({
+    mutationFn: () => api(`/api/servers/${active?.id}/last-change/undo`, { method: 'POST', body: '{}' }),
+    onSuccess: () => {
+      setInstallMsg('✓ Undone: the mods from before that change are back. Restart the server to load them.')
+      qc.invalidateQueries({ queryKey: ['installed', active?.id] })
+      qc.invalidateQueries({ queryKey: ['last-change', active?.id] })
+      setTimeout(() => setInstallMsg(null), 10000)
+    },
     onError: failMsg,
   })
   const updateAll = useMutation({
@@ -372,12 +366,11 @@ export default function Content() {
 
   // optimistic: flip the INSTALLED badge the instant the install succeeds —
   // the installed-list refetch does liveness checks + hash lookups and can lag
-  // seconds behind, which read as "it didn't install" (owner report)
+  // seconds behind, which read as "it didn't install"
   const [justInstalled, setJustInstalled] = useState<Set<string>>(new Set())
   // the badge bridge only needs to outlive the refetch LAG — once a fresh
   // installed list lands it is the truth, and a lingering bridge made a
-  // DELETED mod read INSTALLED in browse until a hard reload (live
-  // 2026-08-02: Valkyrien Skies; same phantom after a preflight rollback)
+  // DELETED mod read INSTALLED in browse until a hard reload
   useEffect(() => {
     setJustInstalled((prev) => (prev.size ? new Set() : prev))
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -391,7 +384,7 @@ export default function Content() {
   // only identity the two sources share.
   // strip "[ETF]"-style bracket tags first: Modrinth titles carry them, CF
   // titles don't, and the mismatch made an installed mod look installable
-  // from the other source's tab (live 2026-07-21)
+  // from the other source's tab
   const titleKey = (t: string) => t.replace(/\[[^\]]*\]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '')
   const installedTitles = new Set(
     (installedQuery.data?.items ?? []).map((i) => (i.title ? titleKey(i.title) : '')).filter(Boolean),
@@ -400,8 +393,7 @@ export default function Content() {
 
   // modpack browsing stays available with NO active server — the Servers
   // page's "start from a modpack" link lands here exactly when there is
-  // nothing to be active yet (live 2026-07-28: the link dead-ended on the
-  // "pick one" screen for a fresh panel)
+  // nothing to be active yet
   if (!active && tab !== 'modpack')
     return (
       <div>
@@ -451,11 +443,13 @@ export default function Content() {
         <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{installMsg}</div>
       )}
 
+      {active && candidate && <CandidateBanner c={candidate} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
+
       {active && rejections.length > 0 && (
         <div className="block border-gold! px-4 py-2.5 text-sm">
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
-              <b>Safety check removed {rejections.reduce((n, r) => n + r.jars.length, 0)} mod(s) in the last 48h</b> — they failed the real loader's boot test and were rolled back so the server can't crash:
+              <b>The boot test turned away {rejections.reduce((n, r) => n + r.jars.length, 0)} mod(s) in the last 48h.</b> Nothing on the server changed:
               {rejections.map((r, i) => (
                 <div key={i} className="mt-1 font-mono text-xs">
                   {new Date(r.at).toLocaleTimeString()} — {r.jars.join(', ')}: {r.reason[0] ?? 'see panel log'}
@@ -601,7 +595,7 @@ export default function Content() {
           {tab === 'modpack' && (
             <div className="border-2 border-diamond/50 bg-diamond/10 px-4 py-2.5 text-xs font-semibold text-diamond">
               {active
-                ? `Installing a modpack adds all its server-side mods + configs to the ACTIVE server. The pack's loader must match (${active.detection.loader}) — packs for other loaders need a new server of that type first.`
+                ? 'A modpack becomes its own server: hit New server and the panel builds it (loader, Java, memory, mods, friend sync). Pouring a pack over an existing world could not be tested or undone as one change, so it is not offered.'
                 : 'No active server yet — pick any pack below and hit New Server: the panel builds the whole thing (loader, Java, memory, mods, friend-sync) in one click.'}
             </div>
           )}
@@ -674,7 +668,7 @@ export default function Content() {
                       New server
                     </button>
                   )}
-                  {active && (isInstalled(h) ? (
+                  {active && tab !== 'modpack' && (isInstalled(h) ? (
                     <span className="font-px text-[10px] text-emerald border-2 border-emerald/50 px-3 py-2 shrink-0">INSTALLED</span>
                   ) : (
                     <button
@@ -691,11 +685,8 @@ export default function Content() {
                       }}
                       disabled={install.isPending}
                       className="btn btn-emerald px-4 py-2 text-sm shrink-0"
-                      title={tab === 'modpack' ? 'Install this pack into the ACTIVE server' : undefined}
                     >
-                      {install.isPending && install.variables?.projectId === h.project_id
-                        ? (tab === 'modpack' ? 'installing pack… (minutes)' : 'placing…')
-                        : 'Install'}
+                      {install.isPending && install.variables?.projectId === h.project_id ? 'placing…' : 'Install'}
                     </button>
                   ))}
                 </div>
@@ -706,14 +697,7 @@ export default function Content() {
                     mc={mc}
                     loader={jarTab ? loader : undefined}
                     installPending={install.isPending}
-                    onInstall={(versionId) => {
-                      if (!active) {
-                        setInstallMsg('✗ installing needs an active server — use New Server to build one from this pack instead')
-                        setTimeout(() => setInstallMsg(null), 6000)
-                        return
-                      }
-                      install.mutate({ projectId: h.project_id, versionId })
-                    }}
+                    onInstall={active && tab !== 'modpack' ? (versionId) => install.mutate({ projectId: h.project_id, versionId }) : undefined}
                   />
                 )}
               </div>
@@ -751,51 +735,6 @@ export default function Content() {
 
       {active && view === 'installed' && (
         <div className="space-y-6">
-          {/* The perf pack is Fabric/Forge mods — not one of them has a Paper build,
-              so on a plugin server the button could only ever install nothing. */}
-          {PLUGIN_LOADERS.includes(active.detection.loader) ? (
-            <div className="border-2 border-line bg-block px-4 py-2.5 text-xs text-text-dim">
-              The performance pack is a set of Fabric/Forge <b>mods</b>, so it cannot run on a{' '}
-              {active.detection.loader.toUpperCase()} server. Paper is already fast by itself — for more, look
-              for performance <b>plugins</b> (e.g. Chunky for pre-generation) in the Plugins tab.
-            </div>
-          ) : (
-          <div className="block px-4 py-3.5">
-            <div className="flex items-center gap-4 flex-wrap">
-              <div className="min-w-0 flex-1">
-                <div className="hud mb-1">ONE CLICK · CURATED</div>
-                <div className="font-extrabold">Performance pack</div>
-                <div className="text-xs text-text-dim mt-0.5">
-                  Lithium, FerriteCore, ModernFix, Krypton, ServerCore, Noisium + 7 more — version-matched
-                  to this server, deps auto-resolved, anything without a compatible build is skipped.
-                </div>
-              </div>
-              <button
-                onClick={() => perfPack.mutate({ includeOptional: perfOptional })}
-                disabled={perfPack.isPending}
-                className="btn btn-emerald px-4 py-2.5 text-sm shrink-0"
-              >
-                {perfPack.isPending ? 'Installing…' : 'Install perf pack'}
-              </button>
-            </div>
-            <label className="flex items-center gap-3 mt-3 pt-3 border-t-2 border-line/40">
-              <button
-                className="lever"
-                data-on={perfOptional}
-                onClick={() => setPerfOptional(!perfOptional)}
-                aria-label="Include experimental performance mods"
-              />
-              <span className="text-xs">
-                <b>Include experimental extras</b>{' '}
-                <span className="text-text-dim">
-                  — C2ME (multithreaded chunks), VMP, ThreadTweak, Dynamic View. Big gains, small
-                  compatibility risk: keep a backup and test with your mods.
-                </span>
-              </span>
-            </label>
-          </div>
-          )}
-
           {/* Windows holds every loaded jar open, so a disable/delete cannot happen
               while the server runs. We queue it rather than refuse — but the player
               must know the change is waiting, not lost. */}
@@ -841,6 +780,16 @@ export default function Content() {
             {updates && updates.length === 0 && (
               <span className="font-px text-[10px] text-emerald self-center">ALL UP TO DATE</span>
             )}
+            {lastChange.data?.change && (
+              <button
+                onClick={() => undo.mutate()}
+                disabled={undo.isPending}
+                className="btn px-4 py-2 text-sm"
+                title={`Takes out ${lastChange.data.change.added.map((f) => f.file).join(', ')} and puts back what it replaced`}
+              >
+                {undo.isPending ? 'undoing…' : 'Undo last change'}
+              </button>
+            )}
             <input
               value={installedFilter}
               onChange={(e) => setInstalledFilter(e.target.value)}
@@ -853,7 +802,7 @@ export default function Content() {
             [
               { key: 'clientonly', tag: 'CLIENT', label: 'Client only — not loaded', hint: 'ships in the friend pack; the server never sees these, so they can never crash a boot' },
               { key: 'gameplay', tag: 'GAMEPLAY', label: 'Gameplay mods', hint: 'the mods you chose' },
-              { key: 'performance', tag: 'ENGINE', label: 'Performance pack', hint: 'keeps the server fast — leave these on' },
+              { key: 'performance', tag: 'ENGINE', label: 'Performance', hint: 'optimization mods: keep the server fast' },
               { key: 'support', tag: 'SCAFFOLD', label: 'Support & libraries', hint: 'required by other mods — removing one breaks its dependents' },
             ] as const
           ).map((g) => {
@@ -994,7 +943,8 @@ function HitExpand({ projectId, source, mc, loader, installPending, onInstall }:
   mc?: string
   loader?: string
   installPending: boolean
-  onInstall: (versionId: string) => void
+  /** absent for modpacks: a pack becomes its own server */
+  onInstall?: (versionId: string) => void
 }) {
   const { data, isLoading } = useQuery({
     queryKey: ['expand', projectId, source, mc, loader],
@@ -1025,7 +975,7 @@ function HitExpand({ projectId, source, mc, loader, installPending, onInstall }:
                   {v.mc.slice(0, 4).join(' ')} · {v.date.slice(0, 10)}
                 </span>
               </div>
-              {v.downloadable ? (
+              {!onInstall ? null : v.downloadable ? (
                 <button
                   onClick={() => onInstall(v.id)}
                   disabled={installPending}
@@ -1171,6 +1121,63 @@ function ConfigsView({ serverId }: { serverId: string }) {
           />
         </div>
       </div>
+    </div>
+  )
+}
+
+type CandidateAction = 'apply' | 'retest' | 'discard'
+
+const RESULT = { passed: '✓ passed', failed: '✗ failed', unverified: '? not tested' } as const
+
+/** One line per test, so it is clear what was tested, skipped or uncertain. */
+function Verdicts({ c }: { c: Candidate }) {
+  const rows: [string, Verdict | undefined][] = [['Server boot', c.server], ['Client join', c.client]]
+  return (
+    <ul className="text-xs text-text-dim">
+      {rows.map(([label, v]) => (
+        <li key={label}>
+          <b>{label}:</b>{' '}
+          {v ? `${RESULT[v.result]}${v.seconds ? ` in ${v.seconds} s` : ''}: ${v.detail}` : 'not run'}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** The mod change waiting for its tests, or the result of the last one. */
+function CandidateBanner({ c, busy, onDecide }: { c: Candidate; busy: boolean; onDecide: (action: CandidateAction) => void }) {
+  const names = c.files.map((f) => f.entry?.title ?? f.file).join(', ')
+  const recent = Date.now() - new Date(c.updatedAt).getTime() < 10 * 60_000
+  if (c.status === 'rejected' || ((c.status === 'applied') && !recent)) return null
+  if (c.status === 'applied') {
+    return (
+      <div className="block border-emerald! px-4 py-2.5 text-sm space-y-1">
+        <div><b>✓ {names}</b>: {c.detail}.</div>
+        <Verdicts c={c} />
+      </div>
+    )
+  }
+  if (c.status === 'needs-approval') {
+    const excerpt = c.client?.excerpt?.length ? c.client.excerpt : c.server?.excerpt ?? []
+    return (
+      <div className="block border-gold! px-4 py-3 text-sm space-y-2">
+        <div><b>{names}</b> could not be fully tested: {c.detail.replace(/^not tested: /, '')}.</div>
+        <Verdicts c={c} />
+        {excerpt.length > 0 && (
+          <pre className="console p-2 text-xs whitespace-pre-wrap max-h-40 overflow-auto">{excerpt.join('\n')}</pre>
+        )}
+        <div className="flex gap-3">
+          <button onClick={() => onDecide('apply')} disabled={busy} className="btn btn-emerald px-4 py-2 text-sm">Apply anyway</button>
+          <button onClick={() => onDecide('retest')} disabled={busy} className="btn px-4 py-2 text-sm">Test again</button>
+          <button onClick={() => onDecide('discard')} disabled={busy} className="btn px-4 py-2 text-sm">Discard</button>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="block border-sky! px-4 py-2.5 text-sm" role="status">
+      <span className="hud !opacity-100 mr-2">TESTING</span>
+      <b>{names}</b>: {c.detail}. Nothing on the server changes until the test passes.
     </div>
   )
 }

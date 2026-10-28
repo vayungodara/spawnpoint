@@ -129,7 +129,7 @@ export interface VersionFile {
   filename: string;
   primary: boolean;
   size: number;
-  hashes: { sha1: string };
+  hashes: { sha1: string; sha512: string };
 }
 export interface Version {
   id: string;
@@ -157,8 +157,27 @@ export function getVersions(
   return mr<Version[]>(`/project/${encodeURIComponent(idOrSlug)}/version${qs ? `?${qs}` : ''}`);
 }
 
+/** Release lines the panel stays on until it has been tested against the next one. */
+const PINNED_LINE: Record<string, string> = {
+  k68glP2e: '4.', // AutoModpack: 5.x is release-candidate only, and client and server must share a line
+};
+
+/** The build to install from a newest-first list: the newest release, or the
+    newest pre-release only when the project has no release for this MC/loader. */
+export function bestVersion(versions: Version[]): Version | undefined {
+  const line = versions[0] && PINNED_LINE[versions[0].project_id];
+  const allowed = line ? versions.filter((v) => v.version_number.startsWith(line)) : versions;
+  return allowed.find((v) => v.version_type === 'release') ?? allowed[0];
+}
+
 export function getVersion(versionId: string): Promise<Version> {
   return mr<Version>(`/version/${encodeURIComponent(versionId)}`);
+}
+
+/** Bulk version lookup (one call for N versions). */
+export function getVersionsBulk(ids: string[]): Promise<Version[]> {
+  if (ids.length === 0) return Promise.resolve([]);
+  return mr<Version[]>(`/versions?ids=${encodeURIComponent(JSON.stringify(ids))}`);
 }
 
 /** Identify local jars by sha1 (for the installed-mods view). */

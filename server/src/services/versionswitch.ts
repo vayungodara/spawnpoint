@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, cpSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, cpSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { PATHS } from '../config.js';
 import { serverDir, pinJavaFor } from './servers.js';
 import { craftyApi } from '../clients/crafty.js';
 import { detect } from './detect.js';
+import { assertNoRecovery, exclusive, liveChanged } from './packtxn.js';
 import { serverPhase } from './phase.js';
 import { stopAndWait, isRunningSafe, createBackup, beginMaintenance, endMaintenance } from './maintenance.js';
 import * as modrinth from '../clients/modrinth.js';
@@ -199,7 +200,12 @@ export async function apply(
   inFlight.add(id);
   beginMaintenance(id);
   try {
-    return await doApply(id, targetMc, opts);
+    // holds the live-folder lock, so no mod apply or undo runs during the switch
+    return await exclusive(id, async () => {
+      assertNoRecovery(id);
+      // mods/ may have changed even if this fails part-way: anything tested against the old ones is stale
+      try { return await doApply(id, targetMc, opts); } finally { liveChanged(id); }
+    });
   } catch (e) {
     return { ok: false, error: String((e as Error).message ?? e).slice(0, 300) };
   } finally {
@@ -212,11 +218,9 @@ const inFlight = new Set<string>();
 async function doApply(id: string, targetMc: string, opts: { acceptDowngrade?: boolean; disableIncompatible?: boolean }): Promise<SwitchResult> {
   const p = await plan(id, targetMc);
 
-  // EVERYTHING below this line assumes Fabric: it downloads a Fabric loader,
-  // writes fabric.jar, and rewrites the launch command to run it. Nothing used
-  // to check the loader, and the route accepts any server id — so pointing this
-  // at the Forge 1.20.1 server would stop it, back up its world, then install a
-  // FABRIC launcher over a Forge install and disable its mods. Refuse loudly.
+  // Everything below assumes Fabric: it downloads a Fabric loader, writes
+  // fabric.jar, and rewrites the launch command to run it. Any other loader
+  // would be broken by that, so refuse.
   if (p.from.loader !== 'fabric') {
     return {
       ok: false,
@@ -307,7 +311,7 @@ async function doApply(id: string, targetMc: string, opts: { acceptDowngrade?: b
     return { ok: true, updated, disabled, backup: backupFile };
   } catch (e) {
     const err = String((e as Error).message ?? e).slice(0, 220);
-    const rolled = await rollback(id).catch(() => false);
+    const rolled = await restoreSnapshot(id).catch(() => false);
     return {
       ok: false,
       error: `${err} — ${rolled ? 'rolled back to the previous version' : 'ROLLBACK FAILED, restore from the snapshot in data/versionswitch'}`,
@@ -331,7 +335,14 @@ async function waitForReady(id: string, timeoutSec: number): Promise<boolean> {
 }
 
 /** Put mods/ and the loader jar back the way they were before the switch. */
-export async function rollback(id: string): Promise<boolean> {
+export function rollback(id: string): Promise<boolean> {
+  return exclusive(id, async () => {
+    assertNoRecovery(id);
+    try { return await restoreSnapshot(id); } finally { liveChanged(id); }
+  });
+}
+
+async function restoreSnapshot(id: string): Promise<boolean> {
   const snap = snapDir(id);
   if (!existsSync(join(snap, 'mods'))) return false;
   if (await isRunningSafe(id)) await stopAndWait(id);

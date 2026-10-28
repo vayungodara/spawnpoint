@@ -70,8 +70,7 @@ export async function serverPhase(id: string, running: boolean): Promise<Phase> 
 
 /** Pre-fill the ready cache for servers that are ALREADY running when the
     panel starts. Without this, every panel deploy blanked the cache and every
-    running server's card flashed "STARTING…" until its first probe — the
-    owner read it as "starting one server starts all three" (2026-07-20). */
+    running server's card flashed "STARTING…" until its first probe. */
 export async function warmPhaseCache(list: () => Promise<{ server_id: string }[]>, running: (id: string) => Promise<boolean>): Promise<void> {
   try {
     for (const s of await list()) {

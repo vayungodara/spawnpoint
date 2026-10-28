@@ -17,7 +17,7 @@ export interface AutostopConfig {
   idleMinutes: number;
 }
 
-const DEFAULTS: AutostopConfig = { enabled: true, idleMinutes: 5 };
+const DEFAULTS: AutostopConfig = { enabled: false, idleMinutes: 15 };
 
 export function loadAutostop(): AutostopConfig {
   if (!existsSync(CONFIG_FILE)) return { ...DEFAULTS };

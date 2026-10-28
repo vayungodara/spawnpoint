@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { PATHS } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
@@ -10,7 +10,7 @@ import { loadGenie } from './chatgenie.js';
 
 // DEATH INSURANCE — rolling inventory snapshots so "server restore my stuff"
 // after a death returns EXACTLY what the player carried, not a kit
-// approximation. Motivation: 6 manual kit-restores in one Horror session.
+// approximation.
 //
 // Design: the panel only ever READS inventories (data get works on every
 // version); the RESTORE side is the genie's job — it receives the raw SNBT

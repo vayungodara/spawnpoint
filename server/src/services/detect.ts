@@ -94,3 +94,16 @@ export function detect(serverDir: string, uuid?: string): Detection {
     mc: override?.mc ?? mc,
   };
 }
+
+const LOADER_LIB: Partial<Record<Loader, string[]>> = {
+  fabric: ['fabricmc', 'fabric-loader'], forge: ['minecraftforge', 'forge'], neoforge: ['neoforged', 'neoforge'],
+};
+
+/** The loader version in this server's libraries/ ("52.0.1", not Forge's "1.21.1-52.0.1"). */
+export function loaderVersion(serverDir: string, det: Detection): string | null {
+  const rel = LOADER_LIB[det.loader];
+  const dir = rel && join(serverDir, 'libraries', 'net', ...rel);
+  if (!dir || !existsSync(dir)) return null;
+  const v = readdirSync(dir).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).pop();
+  return v ? v.replace(`${det.mc}-`, '') : null;
+}

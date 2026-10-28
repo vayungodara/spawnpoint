@@ -4,11 +4,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useServers, useSetActive } from '../api'
 import { PixelDefs, Pi, loaderIcon } from './PixelIcons'
 
-// PIN gate: when Settings has a PIN, everything waits behind this screen.
-// The cookie lasts 30 days, so it's a once-per-device ritual.
+// PIN gate: everything waits behind this screen. The session lasts 30 days.
 function PinGate({ onUnlocked }: { onUnlocked: () => void }) {
   const [pin, setPin] = useState('')
-  const [err, setErr] = useState(false)
+  const [err, setErr] = useState('')
   const submit = async () => {
     const r = await fetch('/api/auth', {
       method: 'POST',
@@ -16,7 +15,7 @@ function PinGate({ onUnlocked }: { onUnlocked: () => void }) {
       body: JSON.stringify({ pin }),
     })
     if (r.ok) onUnlocked()
-    else { setErr(true); setPin('') }
+    else { setErr(r.status === 429 ? 'TOO MANY TRIES · WAIT A MINUTE' : 'WRONG PIN'); setPin('') }
   }
   return (
     <div className="min-h-screen flex items-center justify-center p-6" style={{ background: 'var(--color-bedrock)', backgroundImage: 'var(--noise-dense)' }}>
@@ -29,14 +28,14 @@ function PinGate({ onUnlocked }: { onUnlocked: () => void }) {
         <input
           autoFocus
           value={pin}
-          onChange={(e) => { setErr(false); setPin(e.target.value.replace(/\D/g, '').slice(0, 8)) }}
+          onChange={(e) => { setErr(''); setPin(e.target.value.replace(/\D/g, '').slice(0, 12)) }}
           onKeyDown={(e) => { if (e.key === 'Enter' && pin.length >= 4) submit() }}
           type="password"
           inputMode="numeric"
-          placeholder="••••"
+          placeholder="PIN"
           className={`field w-full px-4 py-3 text-center text-2xl font-mono tracking-[0.5em] ${err ? 'border-redstone!' : ''}`}
         />
-        {err && <div className="font-px text-[10px] text-redstone mt-2">WRONG PIN</div>}
+        {err && <div className="font-px text-[10px] text-redstone mt-2">{err}</div>}
         <button
           onClick={submit}
           disabled={pin.length < 4}
@@ -117,11 +116,10 @@ export default function Shell() {
   const qc = useQueryClient()
   const { data: auth } = useQuery({
     queryKey: ['auth'],
-    queryFn: async () => (await (await fetch('/api/auth/check')).json()) as { required: boolean; ok: boolean },
+    queryFn: async () => (await (await fetch('/api/auth/check')).json()) as { ok: boolean },
     staleTime: 5 * 60_000,
   })
-  // fresh install (no Crafty token yet) — hand the whole first visit to the
-  // wizard; a configured box answers {active:false} and never routes there
+  // until Crafty is connected and a PIN is set, the wizard owns the first visit
   const { data: wiz, isLoading: wizLoading } = useQuery({
     queryKey: ['wizard'],
     queryFn: async () => (await (await fetch('/api/wizard/status')).json()) as { active: boolean },
@@ -140,13 +138,14 @@ export default function Shell() {
   const setActive = useSetActive()
   const navigate = useNavigate()
   const active = data?.servers.find((s) => s.active)
+  const { pathname } = useLocation()
 
   // hold the first paint until we know: otherwise a fresh install flashes the
   // panel (with failing queries) for one round-trip before redirecting
   if (wizLoading) return <div className="min-h-screen" style={{ background: 'var(--color-bedrock)' }} />
   if (wiz?.active) return <Navigate to="/setup" replace />
 
-  if (auth && auth.required && !auth.ok) {
+  if (auth && !auth.ok) {
     return (
       <>
         <PixelDefs />
@@ -165,7 +164,7 @@ export default function Shell() {
             <Pi i="flag" className="pi pi-l" />
             <span className="font-px text-[15px] tracking-[0.04em] font-bold">SPAWNPOINT</span>
           </div>
-          <div className="hud mt-2">SERVER PANEL v0.2</div>
+          <div className="hud mt-2">SERVER PANEL v{__APP_VERSION__}</div>
         </div>
 
         <div className="px-4 py-4 border-y-2 border-ink" style={{ background: 'var(--color-bedrock)' }}>
@@ -210,7 +209,8 @@ export default function Shell() {
               {({ isActive }) => (
                 <div
                   className="h-full px-4 py-3 flex flex-col justify-center transition-[filter] duration-150"
-                  style={{ filter: isActive ? 'none' : 'brightness(0.62) saturate(0.85)' }}
+                  // the grass stratum is bright even when dimmed, so the active one also gets an edge marker
+                  style={{ filter: isActive ? 'none' : 'brightness(0.62) saturate(0.85)', boxShadow: isActive ? 'inset 4px 0 0 var(--color-paper)' : undefined }}
                   onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.filter = 'brightness(0.82) saturate(0.95)' }}
                   onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.filter = 'brightness(0.62) saturate(0.85)' }}
                 >
@@ -260,7 +260,7 @@ export default function Shell() {
 
       <main className="flex-1 min-w-0 p-4 sm:p-6 md:p-8 max-w-6xl">
         {/* key on pathname: strata switches crossfade instead of hard-cutting */}
-        <div key={useLocation().pathname} className="route-in">
+        <div key={pathname} className="route-in">
           <Outlet />
         </div>
       </main>

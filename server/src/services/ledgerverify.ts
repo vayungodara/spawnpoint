@@ -9,7 +9,7 @@ import type { Box } from './undo.js';
 // Ledger-powered build verification. The Ledger mod (Fabric) records every
 // block change into world/ledger.sqlite — action, exact x/y/z, block id and a
 // source, with console-driven fill/setblock attributed to source "command"
-// (verified live 2026-07-17). That makes it an independent oracle for the
+// (verified). That makes it an independent oracle for the
 // genie: after a build wish, ask the DATABASE what actually changed instead of
 // trusting the model's own spot probes.
 //

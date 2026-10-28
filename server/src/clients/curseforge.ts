@@ -77,7 +77,16 @@ export interface CfFile {
   gameVersions: string[];
   hashes: { value: string; algo: number }[]; // algo 1 = sha1
   fileFingerprint: number; // murmur2 of whitespace-stripped bytes
-  dependencies: { modId: number; relationType: number }[]; // 3 = required
+  dependencies: { modId: number; relationType: number }[];
+  releaseType: number; // 1 release, 2 beta, 3 alpha
+}
+
+/** CurseForge dependency relation types. */
+export const RELATION = { required: 3, incompatible: 5 } as const;
+
+/** The build to install from a newest-first list: the newest release, else the newest file. */
+export function bestFile(files: CfFile[]): CfFile | undefined {
+  return files.find((f) => f.releaseType === 1) ?? files[0];
 }
 
 // same hit shape the panel already renders for Modrinth
@@ -122,8 +131,8 @@ export async function search(opts: {
   if (opts.mc) p.set('gameVersion', opts.mc);
   // CF's search ANDs gameVersion+modLoaderType against a SINGLE file-index
   // entry, and older uploads often lack the loader tag — Dynamic Trees' real
-  // 26.1.2 Fabric build vanished from mc+loader searches (live repro
-  // 2026-07-19: each filter alone found it, both together didn't). So when mc
+  // 26.1.2 Fabric build vanished from mc+loader searches (each filter alone
+  // found it, both together didn't). So when mc
   // is set, ask CF for the version only and loader-filter HERE, leniently:
   // an index entry with no loader tag is "unknown", never "wrong".
   const loaderId = opts.loader && LOADERS[opts.loader] && (opts.type === 'mod' || opts.type === 'modpack')

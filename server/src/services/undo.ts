@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { PATHS } from '../config.js';
 import { rconBatch } from '../clients/rcon.js';
@@ -112,17 +112,18 @@ const bufOrigin = (slot: number) => ({ x: BUF_X + slot * SLOT_PITCH, z: BUF_Z })
 
 /** Snapshot a region before the genie touches it. Returns a human line for
     the trail, or null when the region was not snapshottable. */
-export async function takeSnapshot(id: string, rawBox: Box, label: string): Promise<string | null> {
-  // SERIALIZED per server: wishes run 3-parallel, and two concurrent snapshots
-  // used to pick the SAME slot (both read counter=0), clone over each other in
-  // the shadow buffer, and then race to save meta — one wish's undo record
-  // vanished and the other's restored the wrong blocks.
-  const prev = snapQueue.get(id) ?? Promise.resolve();
-  const mine = prev.catch(() => {}).then(() => doSnapshot(id, rawBox, label));
-  snapQueue.set(id, mine.then(() => {}, () => {}));
+export function takeSnapshot(id: string, rawBox: Box, label: string): Promise<string | null> {
+  return serial(id, () => doSnapshot(id, rawBox, label));
+}
+
+// Snapshots and undos run one at a time per server: wishes run three at a
+// time, and each reads and rewrites the slot metadata.
+const queue = new Map<string, Promise<void>>();
+function serial<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const mine = (queue.get(id) ?? Promise.resolve()).then(fn);
+  queue.set(id, mine.then(() => {}, () => {}));
   return mine;
 }
-const snapQueue = new Map<string, Promise<void>>();
 
 async function doSnapshot(id: string, rawBox: Box, label: string): Promise<string | null> {
   const box = norm(rawBox);
@@ -162,9 +163,12 @@ async function doSnapshot(id: string, rawBox: Box, label: string): Promise<strin
 /** Restore the most recent snapshot. Each call walks one step further back.
     With `match` words, restores the NEWEST snapshot whose wish-label contains
     them instead — "server undo whitehouse" undoes the white house even when a
-    medieval town was built after it (blind pop once undid the wrong build,
-    2026-07-19). */
-export async function undoLast(id: string, match?: string): Promise<string> {
+    medieval town was built after it. */
+export function undoLast(id: string, match?: string): Promise<string> {
+  return serial(id, () => doUndo(id, match));
+}
+
+async function doUndo(id: string, match?: string): Promise<string> {
   const meta = loadMeta(id);
   let snap: (typeof meta.snaps)[number] | undefined;
   if (match?.trim()) {

@@ -11,8 +11,6 @@ export interface ServerInfo {
   path: string;
   active: boolean;
   detection: Detection;
-  /** public join address (relay lane) — what friends type; null = no lane */
-  address: string | null;
 }
 
 export function getActiveUuid(): string | null {
@@ -25,44 +23,31 @@ export function setActiveUuid(uuid: string): void {
   writeFileSync(PATHS.activeServerFile, uuid, 'ascii');
 }
 
+const SERVER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const isServerId = (id: string): boolean => SERVER_ID.test(id);
+
+/** A server's folder on this machine: the path Crafty reports when it exists
+    here (a native Crafty install), otherwise <layout>/Crafty/servers/<uuid>
+    (Crafty in Docker with that folder mounted). Throws on anything that is
+    not a server id, so no caller can build a path from untrusted input. */
 export function serverDir(uuid: string): string {
-  return join(PATHS.craftyServers, uuid);
+  if (!SERVER_ID.test(uuid)) throw new Error('not a server id');
+  const reported = craftyApi.reportedPath(uuid);
+  return reported && existsSync(reported) ? reported : join(PATHS.craftyServers, uuid);
 }
 
-// Every server must launch via an ABSOLUTE java path, and the java has to
-// match the MC version:
-//   - MC 26.x needs Java 25 (Tools\jdk-25*); older Java = UnsupportedClassVersionError
-//   - MC 1.17–1.21.x runs on Java 21 (the system Adoptium JDK)
-// Crafty writes a bare `java` into the launch command. That FAILS SILENTLY
-// under Crafty: it runs as the craftysvc service, whose environment was
-// captured before the JDK was installed, so `java` doesn't resolve — the
-// process dies with no console output and no log file, and the panel just
-// sits on "starting". (Diagnosed live on a Forge 1.20.1 server; the same
-// command ran fine by hand because an interactive shell HAS java on PATH.)
-const javaFixed = new Set<string>();
+/** Client-only mods live outside the server folder, so the server can never load them. */
+export function clientShelfDir(uuid: string): string {
+  if (!SERVER_ID.test(uuid)) throw new Error('not a server id');
+  return join(PATHS.data, 'clientmods', uuid);
+}
 
-/** Absolute path to the best JRE for this MC version, or null if none found.
-    ONLY space-free paths are usable: Crafty joins the launch command for the
-    shell WITHOUT quoting, so `C:\Program Files\...\java.exe` is torn at the
-    space, `C:\Program` is executed, and the server dies instantly with no
-    process, no console output and no log — the panel just says "starting"
-    forever. (Diagnosed on the Forge 1.20.1 server; that is why every JDK the
-    panel points at lives under C:\MinecraftServers\Tools.) */
-/** Which JDK to launch a server with.
- *
- *  The MC version sets the MINIMUM Java; the LOADER sets the maximum — and that
- *  second half was missing, which is why Paper plugins silently refused to load.
- *
- *  - Forge / NeoForge are the fragile ones: Forge 1.20.x genuinely BREAKS on a
- *    newer JDK (its coremods reflect into JVM internals), so those stay pinned
- *    to 21 no matter what.
- *  - Paper / Purpur / Spigot / Fabric / Quilt / Vanilla run happily on a newer
- *    JDK than their minimum, and modern PLUGINS increasingly REQUIRE one:
- *    Chunky-Bukkit 1.5.3 is compiled to class-file 69 (Java 25), so on Java 21
- *    Paper booted fine and then rejected the plugin with
- *    "UnsupportedClassVersionError … compiled by a more recent version".
- *    Nothing in the panel surfaced that — the server looked healthy.
- *    So: give them the NEWEST JDK we have. */
+/** The JDK a server should launch with, or null if none is installed.
+    The MC version sets the minimum Java and the loader the maximum: Forge
+    and NeoForge stay on 21 (their coremods break on newer JDKs), while
+    everything else takes the newest JDK, because modern plugins often
+    require Java 25. JDKs live under Tools/ in space-free paths: Crafty does
+    not quote the launch command, so a space splits the java path. */
 export function javaFor(mc: string | null, loader?: string | null): string | null {
   const major = mc ? parseInt(mc.split('.')[0], 10) : NaN;
   const toolsDir = join(PATHS.root, 'Tools');
@@ -94,13 +79,9 @@ export function javaFor(mc: string | null, loader?: string | null): string | nul
     previously-written absolute jdk path that is now the wrong major. Returns
     null when the command already runs the right java (no change needed). */
 function rewriteJava(cur: string, exe: string): string | null {
-  // (a) a bare `java` never resolves under the craftysvc service account
+  // a bare `java` may not resolve under Crafty's service account
   const bare = /^"?java(\.exe)?"?\s/.test(cur);
-  // (b) an ABSOLUTE path we previously wrote that is now the WRONG major. This
-  //     used to be skipped ("already a full path"), which is how a Paper server
-  //     stayed pinned to Java 21 and silently refused every Java-25 plugin.
-  //     Separator/extension-agnostic so the same logic works on the Linux box
-  //     (…/Tools/jdk-25/bin/java) and Windows (…\Tools\jdk-25\bin\java.exe).
+  // a Tools/ JDK the panel wrote earlier that is now the wrong major
   const currentPath = /^"([^"]*[\\/]bin[\\/]java(?:\.exe)?)"/.exec(cur)?.[1];
   const wrongMajor = !!currentPath && currentPath.toLowerCase() !== exe.toLowerCase() && /[\\/]Tools[\\/]jdk-/i.test(currentPath);
   if (!bare && !wrongMajor) return null;
@@ -109,29 +90,15 @@ function rewriteJava(cur: string, exe: string): string | null {
     : cur.replace(/^"[^"]*[\\/]bin[\\/]java(?:\.exe)?"/, `"${exe}"`);
 }
 
-async function autoFixJava(s: CraftyServer, mc: string | null, loader?: string | null): Promise<void> {
-  if (javaFixed.has(s.server_id)) return;
-  const exe = javaFor(mc, loader);
-  if (!exe) return;
-  const cmd = rewriteJava(s.execution_command, exe);
-  if (!cmd) return;
-  await craftyApi.patchServer(s.server_id, { execution_command: cmd });
-  javaFixed.add(s.server_id);
-}
-
-/** Force the launch command's java to match `mc` NOW, for a specific server.
-    The version switcher needs this: changing the MC version can change the Java
-    MAJOR (1.20→21, 26→25), it starts the server itself (bypassing the start
-    route's java-fix), and autoFixJava is memoised — so without an explicit
-    re-pin the boot-verify dies on UnsupportedClassVersionError and rolls back a
-    switch that was actually fine. Returns true if the command was changed. */
+/** Point the server's launch command at the right JDK for its MC version and
+    loader. Only when Crafty sees the same paths as the panel (a native
+    install): a Crafty container cannot run a JDK path from the host. Returns
+    true when the command changed. */
 export async function pinJavaFor(id: string, mc: string | null, loader?: string | null): Promise<boolean> {
   const exe = javaFor(mc, loader);
-  if (!exe) return false;
+  if (!exe || craftyApi.reportedPath(id) !== serverDir(id)) return false;
   const s = await craftyApi.getServer(id).catch(() => null);
-  if (!s) return false;
-  const cmd = rewriteJava(s.execution_command, exe);
-  javaFixed.add(id); // reflect the pinned state so autoFixJava won't second-guess it
+  const cmd = s && rewriteJava(s.execution_command, exe);
   if (!cmd) return false;
   await craftyApi.patchServer(id, { execution_command: cmd });
   return true;
@@ -140,26 +107,17 @@ export async function pinJavaFor(id: string, mc: string | null, loader?: string 
 export async function listServers(): Promise<ServerInfo[]> {
   const servers = await craftyApi.listServers();
   const active = getActiveUuid();
-  let addresses: Record<string, string> = {};
-  try {
-    addresses = (JSON.parse(readFileSync(join(PATHS.data, 'clientpack.json'), 'utf8')) as { addresses?: Record<string, string> }).addresses ?? {};
-  } catch { /* no lanes yet */ }
-  return Promise.all(
-    servers.map(async (s: CraftyServer) => {
-      const dir = serverDir(s.server_id);
-      const detection = existsSync(dir) ? detect(dir, s.server_id) : { loader: 'unknown' as const, mc: null };
-      await autoFixJava(s, detection.mc, detection.loader).catch(() => {});
-      return {
-        id: s.server_id,
-        name: s.server_name,
-        port: s.server_port,
-        path: dir,
-        active: s.server_id === active,
-        detection,
-        address: addresses[s.server_id] ?? null,
-      };
-    }),
-  );
+  return servers.map((s: CraftyServer) => {
+    const dir = serverDir(s.server_id);
+    return {
+      id: s.server_id,
+      name: s.server_name,
+      port: s.server_port,
+      path: dir,
+      active: s.server_id === active,
+      detection: existsSync(dir) ? detect(dir, s.server_id) : { loader: 'unknown' as const, mc: null },
+    };
+  });
 }
 
 export async function resolveByName(name: string): Promise<string | null> {

@@ -1,7 +1,8 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import AdmZip from 'adm-zip';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, renameSync, openSync, readSync, closeSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, statSync, renameSync, openSync, readSync, closeSync, readdirSync, chownSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { PATHS, loadSettings } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import { rconBatch, rconCommand } from '../clients/rcon.js';
@@ -11,7 +12,6 @@ import { serverDir } from './servers.js';
 import { isComponentEra, atLeast } from './mcversion.js';
 import { listInstalled } from './installer.js';
 import { listConfigs, readConfig, writeConfig } from './modconfigs.js';
-import { youtubeResearch } from './youtube.js';
 import { wikiLookup } from './wiki.js';
 import { loadNotes, addNote, listBlueprints, getBlueprint, saveBlueprint, renderBlueprint, addEpisode, similarEpisodes, addRemedy, loadRemedies } from './geniememory.js';
 import { listSchematics, stagePlacement } from './schematics.js';
@@ -31,22 +31,17 @@ const POLL_MS = 800; // chat is a local file tail — cheap to watch closely
 // a redstone build is hundreds of setblocks, so the ceiling is high; simple
 // wishes still cost one round of two commands
 const MAX_CMDS = 120;
-// Owner granted full in-game authority, admin commands included (kick, op,
-// whitelist, ban). Only `stop` stays blocked: it would kill the server the
-// genie lives in, and no in-game wish is served by that — use the panel.
-// Start-anchoring this was a hole: the prompt PUSHES the model to wrap commands
-// ("NEVER use ~ ~ ~ at top level — wrap it: execute at <name> run <cmd>"), and
-// `execute at Steve run stop` is not start-anchored, so it sailed through
-// and would have shut down the very server the genie is talking from. Match the
-// bare command AND anything behind a `run`.
-const BLOCKED = /(^|\brun\s+)\/?\s*(stop|save-off)\b/i;
-// publish-readiness knob (2026-07-22): commandPolicy 'no-admin' additionally
-// blocks permission-granting/moderation commands so allowlisted players can't
-// op themselves. DEFAULT IS 'full' — the owner's own genie keeps its complete
-// power; only a public deployment that opts in gets the tighter tier.
-const ADMIN_BLOCKED = /(^|\brun\s+)\/?\s*(stop|save-off|op|deop|whitelist|ban|ban-ip|pardon|pardon-ip|kick)\b/i;
+// Commands the genie never runs. `stop` and `save-off` would break the server
+// the genie lives in; use the panel for those. Each is matched as a bare
+// command and behind any `run` (the prompt tells the model to wrap commands in
+// `execute ... run`), with or without a namespace such as `minecraft:`.
+const blocked = (names: string): RegExp => new RegExp(String.raw`(^|\brun\s+)\/?\s*([a-z0-9_.-]+:)?(${names})(\s|$)`, 'i');
+const BLOCKED = blocked('stop|save-off');
+// commandPolicy 'no-admin' (the default) also blocks permission-granting and
+// moderation commands so genie players can't op themselves; 'full' is opt-in.
+const ADMIN_BLOCKED = blocked('stop|save-off|op|deop|whitelist|ban|ban-ip|pardon|pardon-ip|kick');
 export function isBlockedCmd(line: string): boolean {
-  const policy = loadGenie().commandPolicy ?? 'full';
+  const policy = loadGenie().commandPolicy ?? 'no-admin';
   return (policy === 'no-admin' ? ADMIN_BLOCKED : BLOCKED).test(line);
 }
 
@@ -54,9 +49,8 @@ export interface GenieConfig {
   enabled: boolean; // master switch
   players: string[]; // who may command the genie
   servers: Record<string, boolean>; // per-server opt-in (missing = off)
-  /** 'full' (default) = everything but stop/save-off; 'no-admin' also blocks
-      op/ban/whitelist/kick — for deployments where genie players aren't the
-      owner's own trusted friends. */
+  /** 'no-admin' (default) blocks stop/save-off and op/ban/whitelist/kick;
+      'full' only blocks stop/save-off. */
   commandPolicy?: 'full' | 'no-admin';
 }
 
@@ -184,19 +178,6 @@ function genieBullet(player: string, text: string): string {
   return `tellraw ${player} ${JSON.stringify(parts)}`;
 }
 
-/** Working-state updates live on the ACTION BAR (the line above the hotbar):
-    it updates in place and fades by itself, so "on it… / checking the wiki…"
-    never clutters chat. */
-function genieBar(player: string, secret: boolean, wish: string, text: string): string {
-  const tag = wish.length > 18 ? `${wish.slice(0, 18).trim()}…` : wish;
-  const parts = [
-    { text: secret ? '🤫 ' : '✦ ', color: secret ? 'light_purple' : 'aqua' },
-    { text: `${tag} `, color: 'gray', italic: true },
-    { text, color: 'white' },
-  ];
-  return `title ${player} actionbar ${JSON.stringify(parts)}`;
-}
-
 /** Event sounds, Hypixel-style: a ding you can feel without reading chat. */
 const SOUND = {
   done: 'minecraft:entity.player.levelup',
@@ -248,135 +229,139 @@ function needsWeb(wish: string): boolean {
   // gives to Opus (live log: 'make time day', 'give us stone and redstone
   // dust'); 'make' now only counts with a build-noun object.
   return (
-    // 'orchestrat|jumpscare' added 2026-07-18 from real wish history — multi-mob
+    // multi-mob
     // orchestration needs the deep tier's planning; single spawns stay fast
     /\b(build|construct|farm|generator|contraption|machine|design|automat|circuit|orchestrat|jumpscare|how (do|does|to)|best way|tips?|strategy)\b/i.test(wish) ||
     /\bmake\s+(me\s+|us\s+)?(a|an)\s+(\w+\s+)?(house|base|castle|tower|bridge|wall|maze|arena|trap|farm|structure)\b/i.test(wish)
   );
 }
 
-/** A bare directory for the genie subprocess to run in — no CLAUDE.md, no
-    project skills, nothing to inject. */
-let genieCwdPath: string | null = null;
-function genieCwd(): string {
-  if (!genieCwdPath) {
-    genieCwdPath = join(PATHS.data, 'genie-cwd');
-    mkdirSync(genieCwdPath, { recursive: true });
+// ---- The model process. `claude -p` runs with no tools at all (it answers
+// in text lines the panel executes), no MCP servers and no user
+// customizations, in an empty directory, with only the environment it needs.
+// When the panel runs as root, the model runs as the unprivileged `nobody`
+// user with its own home, so even a CLI flaw cannot reach the panel's files.
+
+function claudeArgs(deep: boolean): string[] {
+  // the deep tier names its model explicitly: the bare 'opus' alias lags launches
+  return ['-p', '--safe-mode', '--tools', '', '--strict-mcp-config', '--model', deep ? 'claude-opus-5' : 'sonnet'];
+}
+
+/** Absolute path of the CLI (an unprivileged user has no PATH of ours;
+    Windows needs the real .cmd shim path without a shell). */
+let claudeBin: string | null = null;
+function claudePath(): string {
+  claudeBin ??= spawnSync(IS_WIN ? 'where' : 'which', ['claude'], { encoding: 'utf8' }).stdout?.split(/\r?\n/)[0]?.trim() || 'claude';
+  return claudeBin;
+}
+
+/** uid/gid of `nobody` when the panel runs as root; undefined otherwise. */
+const dropTo = ((): { uid: number; gid: number } | undefined => {
+  if (IS_WIN || process.getuid?.() !== 0) return undefined;
+  try {
+    const line = readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('nobody:'));
+    const [, , uid, gid] = line?.split(':') ?? [];
+    return { uid: parseInt(uid ?? '65534', 10), gid: parseInt(gid ?? '65534', 10) };
+  } catch {
+    return { uid: 65534, gid: 65534 };
   }
-  return genieCwdPath;
+})();
+
+/** Empty working and home directories for the model process, in a fresh
+    private temp dir (mkdtemp) so `nobody` can reach them and no pre-made
+    path or symlink can redirect the ownership change. */
+let genieDirs: { cwd: string; home: string } | null = null;
+function genieDir(): { cwd: string; home: string } {
+  if (genieDirs) return genieDirs;
+  const base = mkdtempSync(join(tmpdir(), 'spawnpoint-genie-'));
+  const dirs = { cwd: join(base, 'cwd'), home: join(base, 'home') };
+  for (const d of [dirs.cwd, dirs.home]) mkdirSync(d, { mode: 0o700 });
+  if (dropTo) for (const d of [dirs.cwd, dirs.home, base]) chownSync(d, dropTo.uid, dropTo.gid);
+  genieDirs = dirs;
+  return genieDirs;
 }
 
-// ---- WARM GENIE ----
-// A `claude -p` invoked with no prompt sits reading stdin — which means the
-// expensive part of a wish (node boot, CLI init, auth) can be PRE-PAID before
-// the wish exists. One fast-tier process is kept warm at all times: a wish
-// takes it, writes its prompt, and a replacement starts warming immediately.
-// This is the difference between the genie and the concierge: the concierge
-// is always awake. Now the genie is too. Deep-tier (opus) runs are rare and
-// long anyway — they spawn cold. Warm children are recycled after 10 minutes
-// (staleness) and killed on panel exit (they're detached; without the exit
-// hook a deploy would orphan one).
-function claudeArgs(web: boolean): string[] {
-  // NO TOOLS AT ALL — deliberately. When the model had WebSearch/WebFetch it
-  // spent whole 5-minute budgets inside its own browse loop and emitted zero
-  // commands. Research happens OUT OF BAND via WIKI/YOUTUBE lines. Deny EVERY
-  // tool: live test 2026-07-18 showed the model fumbling leftover tools and
-  // the owner's Claude-Code skills. Text lines only.
-  // --safe-mode skips the OWNER's hooks/plugins/skills (superpowers, Vercel
-  // greeters …) which leaked into every wish as system-reminders the model had
-  // to spend rounds explicitly ignoring — visible all over the 2026-07-18
-  // trails. NOT --bare: bare also skips OAuth and the genie can't log in.
-  // deep tier pins claude-opus-5 EXPLICITLY (verified live 2026-07-26 with the
-  // genie's own token) — the bare 'opus' alias resolves to whatever the
-  // installed CLI maps it to, which lags model launches
-  return ['-p', '--safe-mode', '--model', web ? 'claude-opus-5' : 'sonnet', '--disallowedTools',
-    'Bash,Write,Edit,NotebookEdit,Task,WebSearch,WebFetch,Read,Glob,Grep,LS,Skill,TodoWrite,BashOutput,KillShell,NotebookRead,TaskCreate,TaskUpdate,TaskList,TaskGet,TaskStop,EnterPlanMode,ExitPlanMode,AskUserQuestion,Agent,SendMessage,Monitor,Workflow,ToolSearch'];
+/** The genie's credential from Settings: an OAuth token from `claude
+    setup-token` or an API key. Running as `nobody`, it has no other login. */
+function credentialEnv(): Record<string, string> | null {
+  const key = loadSettings().anthropicApiKey;
+  if (key) return key.startsWith('sk-ant-oat') ? { CLAUDE_CODE_OAUTH_TOKEN: key } : { ANTHROPIC_API_KEY: key };
+  return dropTo ? null : {}; // as the panel's own user, its `claude` login works
 }
 
-// Resolved once. Without a shell, Windows CreateProcess only appends .exe, so a
-// bare 'claude' misses the npm-global `claude.cmd` shim and every wish dies
-// ENOENT. `where` finds the real path instead. Reinstating shell:true would fix
-// it too and is exactly what we removed — a genie fed by player chat gets no
-// shell behind it.
-const CLAUDE_BIN = IS_WIN
-  ? (spawnSync('where', ['claude'], { encoding: 'utf8' }).stdout?.split(/\r?\n/)[0]?.trim() || 'claude')
-  : 'claude';
+const PASS_ENV = ['PATH', 'LANG', 'LC_ALL', 'SystemRoot', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'HOME'];
 
-function spawnClaude(web: boolean): ChildProcessWithoutNullStreams {
-  // NO shell. The args are already an array, so a shell layer buys nothing and
-  // only widens what a future interpolated argument could reach — a genie whose
-  // input is player chat should not have a shell anywhere behind it.
-  const child = spawn(CLAUDE_BIN, claudeArgs(web), {
-    // an EMPTY cwd: spawning in the panel's own directory injected the
-    // Spawnpoint CLAUDE.md (and project skills) into every wish
-    cwd: genieCwd(),
+function spawnClaude(deep: boolean): ChildProcessWithoutNullStreams {
+  const cred = credentialEnv();
+  if (!cred) throw new Error('the genie needs a Claude token or API key in Settings');
+  const env: Record<string, string> = {};
+  for (const k of PASS_ENV) if (process.env[k]) env[k] = process.env[k]!;
+  if (dropTo) env.HOME = genieDir().home;
+  // no shell: the prompt comes from player chat, so nothing may interpret it
+  const child = spawn(claudePath(), claudeArgs(deep), {
+    cwd: genieDir().cwd,
     ...KILLABLE_SPAWN_OPTS,
-    // build tier thinks deeply; everyday wishes skip thinking entirely.
-    // Installs without a system-wide Claude login can put an API key in the
-    // panel settings (wizard step 3); it only ever travels via spawn env.
-    env: {
-      ...process.env,
-      MAX_THINKING_TOKENS: web ? '6000' : '0',
-      ...(loadSettings().anthropicApiKey ? { ANTHROPIC_API_KEY: loadSettings().anthropicApiKey! } : {}),
-    },
+    ...(dropTo ?? {}),
+    env: { ...env, ...cred, MAX_THINKING_TOKENS: deep ? '6000' : '0' },
   });
-  // a claude that dies before draining stdin emits EPIPE on this stream;
-  // without a listener that's an uncaughtException that kills the PANEL
+  // a claude that dies before draining stdin raises EPIPE here; unhandled, that kills the panel
   child.stdin?.on('error', () => {});
   return child;
 }
 
+/** True when the genie has something to do: enabled, a player allowlisted,
+    a server opted in, and a credential to run with. */
+function genieActive(): boolean {
+  const cfg = loadGenie();
+  return cfg.enabled && cfg.players.length > 0 && Object.values(cfg.servers).some(Boolean) && credentialEnv() !== null;
+}
+
+// ---- Warm child. Starting the CLI (node boot, init, auth) is the slow part
+// of a wish, and `claude -p` with no prompt waits on stdin, so one fast-tier
+// process is kept warm while the genie is active and someone is playing on
+// an opted-in server. A wish takes it and a replacement starts warming. Warm
+// children are recycled after 10 minutes and killed on panel exit.
+const WARM_MAX_AGE = 10 * 60_000;
 let warmChild: ChildProcessWithoutNullStreams | null = null;
 let warmSince = 0;
+let playersSeenAt = 0; // set by tick() whenever an opted-in server has players
+const wantWarm = (): boolean => Date.now() - playersSeenAt < 2 * 60_000 && genieActive();
+function dropWarm(): void {
+  if (warmChild?.pid) { try { killTree(warmChild.pid); } catch { /* already gone */ } }
+  warmChild = null;
+}
 function heatOne(): void {
-  if (warmChild) return;
+  if (warmChild || !wantWarm()) return;
   try {
     const c = spawnClaude(false);
     warmChild = c;
     warmSince = Date.now();
+    // forget a dead child; the once-a-minute heartbeat replaces it, so a
+    // crash-looping CLI cannot fork-bomb
     c.on('error', () => { if (warmChild === c) warmChild = null; });
-    // forget a dead child so ensureWarm's next beat replaces it — but never
-    // respawn from here: a crash-looping claude would fork-bomb. The
-    // heartbeat caps spawns at 1/min.
     c.on('close', () => { if (warmChild === c) warmChild = null; });
-    // CLI ≥2.1.214 aborts -p mode after 3 SECONDS of silent stdin ("no stdin
-    // data received in 3s") — a byte sent immediately makes it wait for EOF
-    // instead (verified: 20s gap, correct answer). Without this the warm
-    // child died 3s after every heat and warm mode silently never ran.
+    // the CLI aborts -p mode after a few seconds of silent stdin; a newline
+    // makes it wait for EOF instead
     c.stdin.write('\n');
   } catch { warmChild = null; }
 }
-/** Heartbeat: keep exactly one live, fresh warm child at all times. Recycles
-    stale (>10 min) or dead children and re-heats after natural deaths — the
-    original design only re-heated on take, so one quiet death left the genie
-    permanently cold until the next wish. Each beat also drips a newline into
-    the live child's stdin so no idle-stream timeout can hit between beats
-    (leading blank lines are harmless prompt whitespace). */
+/** Heartbeat: one fresh warm child while the genie is active, none otherwise. */
 function ensureWarm(): void {
-  if (warmChild && (warmChild.exitCode !== null || Date.now() - warmSince >= 10 * 60_000)) {
-    if (warmChild.pid) { try { killTree(warmChild.pid); } catch { /* already gone */ } }
-    warmChild = null;
-  }
+  if (!wantWarm()) { dropWarm(); return; }
+  if (warmChild && (warmChild.exitCode !== null || Date.now() - warmSince >= WARM_MAX_AGE)) dropWarm();
   if (warmChild) { try { warmChild.stdin.write('\n'); } catch { /* close handler cleans up */ } }
   heatOne();
 }
-function takeClaude(web: boolean): ChildProcessWithoutNullStreams {
-  if (!web && warmChild && warmChild.exitCode === null && Date.now() - warmSince < 10 * 60_000) {
+function takeClaude(deep: boolean): ChildProcessWithoutNullStreams {
+  if (!deep && warmChild && warmChild.exitCode === null && Date.now() - warmSince < WARM_MAX_AGE) {
     const c = warmChild;
     warmChild = null;
-    setTimeout(heatOne, 50).unref?.(); // start warming the next one immediately
+    setTimeout(heatOne, 50).unref?.();
     return c;
   }
-  // stale/absent warm child: recycle it and go cold this once
-  if (warmChild && (warmChild.exitCode !== null || Date.now() - warmSince >= 10 * 60_000)) {
-    if (warmChild.pid) killTree(warmChild.pid);
-    warmChild = null;
-    setTimeout(heatOne, 50).unref?.();
-  }
-  return spawnClaude(web);
+  return spawnClaude(deep);
 }
-// never orphan a detached warm child across a deploy
-process.on('exit', () => { if (warmChild?.pid) try { killTree(warmChild.pid); } catch { /* dying anyway */ } });
+process.on('exit', dropWarm);
 
 function askClaude(prompt: string, web: boolean, onLine?: (line: string) => void): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -424,9 +409,8 @@ function askClaude(prompt: string, web: boolean, onLine?: (line: string) => void
     }, budget);
     // DEAD-AIR KILL, fast tier only: thinking is off there, healthy replies
     // start streaming in single-digit seconds — 60s of total silence is a hung
-    // run, and sitting out the full 180s budget with zero output is exactly the
-    // "remove the mansion" failure (FAILED after 180s, nothing ran). The deep
-    // tier is exempt: 6000 thinking tokens can legitimately precede all stdout.
+    // run, not worth the full 180s budget. The deep tier is exempt: 6000
+    // thinking tokens can legitimately precede all stdout.
     let noOutput = false;
     let inactivity: NodeJS.Timeout | null = null;
     if (!web) {
@@ -512,7 +496,6 @@ const SYSTEM = (player: string, secret: boolean, mc: string | null | undefined) 
   `  · RECIPE <item words>   → the raw recipe JSON from this server's MOD jars (up to 3 matches). The wiki knows NOTHING about mod items — for any "how do I craft <mod thing>" this is the ONLY source. Read the pattern/key/ingredients and explain the grid in plain words. Vanilla recipes you already know — don't RECIPE those.`,
   `  · REGISTRY <words>      → search EVERY id every installed mod adds (items, blocks, entities, effects, enchants, structures) by id or display name — the lists in your context are TRUNCATED, this is the full truth. Use before giving/summoning ANY mod thing not in your context lists. No hit = it does not exist here; never invent an id.`,
   `  · LOGTAIL [lines]       → the server log's last lines (default 30). Use when something "did not work" invisibly, to see what the server actually said.`,
-  `  · YOUTUBE <search terms> → the top tutorial's transcript. LAST RESORT only (slow, garbled captions), for a concrete build layout the wiki does not pin down.`,
   `  A round may be nothing but a WIKI line; I will answer it and you continue with the text in hand. Looking it up beats guessing twice.`,
   `- "help <command>" prints this exact version's real syntax (e.g. "help time", "help effect", "help attribute"). ALWAYS name the command — a bare "help" just dumps every command and tells you nothing.`,
   `- If a command errors, READ the error: it usually names the exact bad argument. Fix it and retry — that beats guessing twice.`,
@@ -532,7 +515,7 @@ const SYSTEM = (player: string, secret: boolean, mc: string | null | undefined) 
   `- BUILD IN AS FEW ROUNDS AS YOU CAN. You get ${MAX_CMDS} commands per round: clear, floor and mechanism should usually fit in one or two rounds, with a final round to verify. A player is standing there waiting.`,
   `- Never build inside the player — keep the whole footprint clear of their Pos.`,
   `- "fill" does volumes (max 32768 blocks), "setblock" does single blocks, and blockstates matter: minecraft:hopper[facing=north], minecraft:oak_stairs[facing=east,half=bottom], minecraft:water, minecraft:lava. Load a chest with "item replace block X Y Z container.0 with <item> <n>".`,
-  `- CHECK THE DESIGN, DO NOT WING IT. If you are not certain a farm/redstone design works in THIS version, LOOK IT UP with a WIKI line (or YOUTUBE for a concrete layout) before building. Your memory of block names, spawn rules and mob mechanics may be stale; the wiki and the server's own error messages are the truth.`,
+  `- CHECK THE DESIGN, DO NOT WING IT. If you are not certain a farm/redstone design works in THIS version, LOOK IT UP with a WIKI line before building. Your memory of block names, spawn rules and mob mechanics may be stale; the wiki and the server's own error messages are the truth.`,
   `- FARM MOBS MUST PERSIST: summon villagers/zombies with {PersistenceRequired:1b}; a caged zombie also wants {Silent:1b} and a helmet so it does not burn at dawn. Villagers need beds (and a workstation) before an iron farm will tick.`,
   `- A MACHINE IS NOT "BUILT" UNTIL IT RUNS. Placing the blocks is not success — the player judges you on whether the thing WORKS. Before you ever say DONE on a farm/generator, TEST IT and prove it with a command:`,
   `  · cobblestone generator: "setblock <gen> minecraft:air", then WAIT 3, then "execute if block <gen> minecraft:cobblestone" must say Test passed.`,
@@ -550,7 +533,7 @@ const SYSTEM = (player: string, secret: boolean, mc: string | null | undefined) 
   `"TP EVERYONE" / "TP US" MEANS GATHER THEM TO ONE PLACE. Pick a SINGLE destination (one dimension, one x/y/z), prove it is safe once, then tp every player to that same spot. Never give each player their own separate "safe place" — the wish was to be together. If the player named a dimension ("a safe place in the nether"), EVERY player must end up in THAT dimension; check each one's Dimension afterwards and do not say DONE until they all match what was asked for.`,
   `TELEPORTS MUST BE SAFE — a player once landed midair over a mansion with no armor, and another was put INSIDE a cave because a single downward probe mistook a cave ceiling for the surface. Never guess a Y. Three recipes, pick by situation:`,
   `- SURFACE FAST PATH (player already in the right dimension, wish is "to the surface"/"out of this cave"): "execute in <dim> run spreadplayers <x> <z> 0 2 false <player>" lands them on the heightmap top and refuses lava — ONE command, DONE in the same reply. CRITICAL SYNTAX: the last argument is ONE name or ONE selector. "spreadplayers <x> <z> 0 2 false <p1> <p2>" is a SYNTAX ERROR on every version (verified on both eras) — send one command per player. If it errors anyway, do NOT retry variants; go straight to the top-down scan.`,
-  `- UNDERGROUND STRUCTURES (trial_chambers, stronghold, ancient_city, mineshaft, dungeons): the structure is BELOW the surface — the top-down surface scan will strand players 100+ blocks ABOVE it (live failure 2026-07-20). Recipe: locate, then "execute in <dim> run spreadplayers <x> <z> 0 16 under <yCap> false <player>" — "under" drops them into air pockets below yCap. yCaps: trial_chambers 30, stronghold 30, mineshaft 40, ancient_city -20. One player per command. ALWAYS verify with "data get entity <player> Pos" that y is actually deep; if still near the surface, retry with range 24. If the wish named a place and the players ended up ANYWHERE else, that is a FAILURE — never phrase it as DONE.`,
+  `- UNDERGROUND STRUCTURES (trial_chambers, stronghold, ancient_city, mineshaft, dungeons): the structure is BELOW the surface — the top-down surface scan will strand players 100+ blocks ABOVE it. Recipe: locate, then "execute in <dim> run spreadplayers <x> <z> 0 16 under <yCap> false <player>" — "under" drops them into air pockets below yCap. yCaps: trial_chambers 30, stronghold 30, mineshaft 40, ancient_city -20. One player per command. ALWAYS verify with "data get entity <player> Pos" that y is actually deep; if still near the surface, retry with range 24. If the wish named a place and the players ended up ANYWHERE else, that is a FAILURE — never phrase it as DONE.`,
   `- TOP-DOWN SURFACE SCAN (destination is a structure/coordinate with unknown ground, e.g. after "locate structure" which gives "~" for Y): forceload the chunk, then probe DOWNWARD FROM THE SKY: "execute in <dim> if block <x> 130 <z> minecraft:air", then 128, 126… — the FIRST non-air from the top IS the true surface (a probe walking down from a player's own Y finds cave ceilings instead). tp to that Y + 2, then "forceload remove". Batch the probes 2 apart; ~35 commands finds any overworld surface.`,
   `- KNOWN-Y DESTINATION (a base, a platform, underground): read Pos + Dimension of the destination, then test "execute in <dim> unless block X Y-1 Z minecraft:air unless block X Y-1 Z minecraft:lava" (solid, non-lava floor) plus "execute in <dim> if block X Y Z minecraft:air" and the block above (body room). Only tp to a Y passing all three; if nothing passes, carve a pocket or build a platform first. NEVER walk downward from an underground player's own Y — the first "floor" you find is a cave.`,
   `The panel auto-applies slow-falling + fire/damage protection around every tp and spreadplayers you send — but that covers the LANDING only, not a wrong dimension or a lava lake you chose as the destination.`,
@@ -562,7 +545,7 @@ const SYSTEM = (player: string, secret: boolean, mc: string | null | undefined) 
   `- PLACE <schematic> <x> <y> <z> — stamp a pro-made schematic from the panel's build library into the world; x y z is its LOWEST corner (min x/y/z). INSTANT and pixel-perfect. Check the SCHEMATIC LIBRARY list below FIRST for houses, farms and decorative builds — a library build beats anything you can design from scratch. Clear/flatten the footprint first if terrain would clip into it, and afterwards customize freely (swap blocks, add interiors) with normal commands.`,
   `- SAVEBLUEPRINT <name> | <one-line description>, then the build's commands written with ~ OFFSETS from the base point (e.g. "fill ~0 ~0 ~0 ~6 ~0 ~6 minecraft:stone", "setblock ~3 ~1 ~3 minecraft:lava"), then a line: ENDBLUEPRINT.`,
   `  Save a blueprint ONLY after you have TESTED the machine and it worked. A saved blueprint is a promise to your future self — a broken one poisons every build after it.`,
-  `- GIVE EXACTLY WHAT IS ASKED — "iron armor" means PLAIN iron armor: NO enchantments, effects, or upgrades the player didn't name. Only enchant when the wish says so (enchanted/god/best/maxed or a named enchantment). "everything I need" may add modest basics (food, torches) — still unenchanted. Accuracy IS the product; surprise upgrades read as the genie not listening. And to EQUIP gear, use "item replace entity <player> <slot> with <item>" ONLY — it creates the item in the slot, so give + item replace hands the player TWO of everything (live bug 2026-07-18). Plain give is only for items that stay in inventory.`,
+  `- GIVE EXACTLY WHAT IS ASKED — "iron armor" means PLAIN iron armor: NO enchantments, effects, or upgrades the player didn't name. Only enchant when the wish says so (enchanted/god/best/maxed or a named enchantment). "everything I need" may add modest basics (food, torches) — still unenchanted. Accuracy IS the product; surprise upgrades read as the genie not listening. And to EQUIP gear, use "item replace entity <player> <slot> with <item>" ONLY — it creates the item in the slot, so give + item replace hands the player TWO of everything. Plain give is only for items that stay in inventory.`,
   `- KITS ARE BLUEPRINTS TOO — this is how "give him everything back" becomes instant. The moment a kit's gives all succeed, save them: "SAVEBLUEPRINT kit-<player> | <player>'s standard loadout" with the EXACT give/item-replace lines as the body (position-independent commands are fine in a blueprint). On every later "give X back their stuff" wish: BUILD kit-<player> at the player's own coordinates — verbatim replay, zero re-derivation, no forgotten pieces. Update the blueprint when the kit changes.`,
   `- REMEMBER <fact> — write a lesson to your permanent notes: a rule you got wrong, a quirk of this server, something the player likes. Notes are shown to you on every future wish. Record what surprised you, not what was obvious.`,
   `- DIAGNOSE <one line> — MANDATORY before retrying ANY failed command or failed verification: one line naming WHY it failed and the fix ("summon needs graveyard: namespace on this server, not minecraft:"). It is saved as a permanent remedy for this version and shown to you on every future wish — the same mistake must never be derived twice. Then retry in the same reply.`,
@@ -573,7 +556,7 @@ const SYSTEM = (player: string, secret: boolean, mc: string | null | undefined) 
   ``,
   `INSTANT CONFIRMATION — when the commands in your CURRENT reply complete the wish, put "DONE <one short sentence>" as the LAST LINE OF THE SAME REPLY. Commands run first, then the DONE is relayed — the player hears it the moment the work lands, not a round later. Safety net: if ANY command in that reply fails, I withhold your DONE and show you the results instead, so a same-reply DONE can never lie.`,
   `BUT A SUCCEEDING COMMAND IS NOT A GRANTED WISH — that safety net only catches commands the SERVER rejected. A command can succeed and still not do what was asked. Before every DONE, re-read the player's exact words and check each thing they asked for actually holds: "everyone" means EVERY player online (not just the two you happened to act on), "in the nether" means every one of them is IN the nether, "replace their armour" means the old armour is gone. If your own summary would have to describe an outcome that does NOT match the wish ("...and TheKing206 on the Overworld surface" when they asked for the nether), that is NOT a DONE — it is unfinished work: fix it, then finish. Spend an extra round only when you genuinely must READ something back before knowing what to say (machine tests, checking a stat you are unsure changed).`,
-  `NEVER SUBSTITUTE AND CLAIM. If the thing asked for does not exist on THIS server — a mechanic vanilla lacks, an item no loaded mod provides — you do not quietly do the nearest possible thing and report it as the wish. That is the single worst failure available to you: the player believes they have something they do not, and finds out later. (Live 2026-08-04: "give me a bow that shoots lightning" — impossible in vanilla — ran one lightning strike near the player and said the bow was granted. Nothing was granted.) The rule: if you cannot deliver the actual thing, say so plainly with SAY, in the same breath NAME the closest thing that is genuinely real here, and let them ask for it. "No such bow exists in 1.20.1 — a channeling trident calls real lightning on a hit during a storm, want that?" is a good answer. Silently swapping in the lightning is not.`,
+  `NEVER SUBSTITUTE AND CLAIM. If the thing asked for does not exist on THIS server — a mechanic vanilla lacks, an item no loaded mod provides — you do not quietly do the nearest possible thing and report it as the wish. That is the single worst failure available to you: the player believes they have something they do not, and finds out later. The rule: if you cannot deliver the actual thing, say so plainly with SAY, in the same breath NAME the closest thing that is genuinely real here, and let them ask for it. "No such bow exists in 1.20.1 — a channeling trident calls real lightning on a hit during a storm, want that?" is a good answer. Silently swapping in the lightning is not.`,
   `To answer a question, give advice, or decline something genuinely impossible, reply with exactly: SAY <short message>. A longer answer = SAY <headline> plus lines of "INFO <point>" (max 8, each under 120 chars) — those render as an indented list under the headline. Player-facing text ANYWHERE else (loose prose, markdown bullets) is silently discarded.`,
   ...(secret ? [SECRET_RULES] : []),
 ].join('\n');
@@ -627,11 +610,10 @@ export function isRconNoop(reply: string): boolean {
 /** Find the real ground under a build's footprint, so the panel — not the model —
  *  owns where a schematic lands.
  *
- *  THE BUG THIS EXISTS FOR: the model is handed the player's Pos every round and
- *  told to build "at their own Y". A player who is flying, on a roof or up a hill
- *  is not standing on the ground, so the anchor was their altitude — the mansion
- *  stamped at y=102 in open sky, on a stone slab the model helpfully filled in
- *  under it. A prompt rule cannot be trusted with this; the panel must check.
+ *  The model is handed the player's Pos and told to build at their Y. A player
+ *  who is flying, on a roof or up a hill is not on the ground, so that Y would
+ *  stamp the build in open sky. A prompt rule cannot be trusted with this; the
+ *  panel checks.
  *
  *  We scan DOWNWARD from the requested Y. That is deliberate: it means we can
  *  never "find" the Nether's bedrock CEILING (a highest-block search in the
@@ -667,17 +649,14 @@ async function groundAnchor(
   // THE BLOCK LIST IS VERSION-SENSITIVE. Minecraft renamed `grass` to
   // `short_grass` in 1.20.3. Probing for `minecraft:short_grass` on 1.20.1 is not
   // a miss — it is an ERROR ("Can't find element"), because the id does not exist
-  // there. That error is not "Test failed", so the column never classified as
-  // ground, groundAnchor gave up, and PLACE fell back to the Y the model guessed:
-  // the sky-mansion bug, resurrected on exactly the server we could not test.
+  // there. That error is not "Test failed", so the column would never classify
+  // as ground and PLACE would fall back to the Y the model guessed.
   const mc = mcOf(id);
   const PASSABLE = [
     'air', 'cave_air', 'void_air', 'water', 'lava',
     atLeast(mc, '1.20.3') ? 'short_grass' : 'grass',
     'tall_grass', 'snow', 'fire',
   ];
-  const isPassable = (y: number, cx: number, cz: number) =>
-    PASSABLE.map((b) => `execute in ${dim} if block ${cx} ${y} ${cz} minecraft:${b}`);
 
   /** A block is GROUND only when the server explicitly told us it is not any of
    *  the passable blocks. "That position is not loaded" is NOT a yes — and this
@@ -699,9 +678,8 @@ async function groundAnchor(
   };
 
   const top = Math.min(requestedY, /nether/i.test(dim) ? 120 : 310);
-  // WINDOWED, AIR-FIRST, EARLY-EXIT SCAN. The old shape pre-built EVERY level's
-  // full 8-probe set for all 5 columns (~5,400 sequential RCON sends per PLACE
-  // even when the ground was 8 blocks down). Now: per 12-level window, ONE
+  // WINDOWED, AIR-FIRST, EARLY-EXIT SCAN, so a PLACE costs a handful of RCON
+  // batches rather than thousands of probes. Per 12-level window, ONE
   // batch of cheap air probes across all unresolved columns; only a non-air hit
   // pays for the remaining passable probes at that exact spot; the whole scan
   // stops once 3 columns found ground (the median is then already determined).
@@ -882,8 +860,8 @@ const entityCache = new Map<string, LangCatalog>();
 /** Modded entity ids, scanned from each enabled jar's assets/<ns>/lang/en_us.json
     (`entity.<ns>.<id>` keys). Entity types live in mod CODE, not data/ — the
     lang file is the only jar-scannable registry. Without this the model guesses
-    ids from the mod NAME and fails: The Man From The Fog's namespace is `man`
-    (three wrong guesses live on 2026-07-18). Display name kept as a hint. */
+    ids from the mod NAME and fails (The Man From The Fog's namespace is
+    `man`). Display name kept as a hint. */
 function modLangCatalog(id: string): LangCatalog {
   const acc: LangCatalog = { entities: [], blocks: [], items: [], effects: [], enchants: [] };
   try {
@@ -960,8 +938,7 @@ function registrySearch(id: string, query: string): string {
 
 const recipeCache = new Map<string, { name: string; json: string }[]>();
 /** RECIPE <words> — grep every enabled mod jar's data/<ns>/recipe(s)/*.json
-    for the wished item. Mod recipes are invisible to the wiki (live test:
-    Sun Town star, 2026-07-18 — two lookups, no page) but sit as plain JSON in
+    for the wished item. Mod recipes are invisible to the wiki but sit as plain JSON in
     the jar; hand the model the raw recipe and it explains the grid itself. */
 function modRecipes(id: string, query: string): string {
   const tokens = query.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 2);
@@ -1075,9 +1052,8 @@ function guardTargetsOf(cmds: string[]): string[] {
   return [...targets];
 }
 
-// the wisher's explicit "let me fall" beats the safety net (2026-07-20: a
-// hidden slow-falling after "no slow falling" read as the genie disobeying —
-// worse, its honest "no effects applied" became a lie the harness wrote)
+// the wisher's explicit "let me fall" beats the safety net: a hidden
+// slow-falling after "no slow falling" reads as the genie disobeying
 const GUARD_OPT_OUT = /\b(?:no|without|skip)\s+(?:the\s+)?(?:slow[\s-]*fall(?:ing)?|effects?|protection|safety|guard)\b|let\s+me\s+fall/i;
 
 async function guardTeleports(id: string, cmds: string[], wish?: string): Promise<void> {
@@ -1120,12 +1096,10 @@ function freshLogErrors(id: string, offset: number): string[] {
 
 interface Item { id: string; count: number; slot: number; ench: string }
 
-/** Enchantments off ONE item's SNBT, in either era. The old generic
- *  `([a-z_]+):\s*(\d+)` sweep matched NEITHER format, so the genie has never
- *  once seen an enchantment on any item, on any version:
+/** Enchantments off ONE item's SNBT, in either era:
  *    modern (26.2): components:{"minecraft:enchantments":{"minecraft:efficiency":5}}
  *                   — SNBT QUOTES any key containing a colon, so the key is
- *                     `"minecraft:efficiency"` and the old pattern needed a bare word
+ *                     `"minecraft:efficiency"`, not a bare word
  *    legacy (1.20.1): Enchantments:[{id:"minecraft:efficiency",lvl:5}]
  *                   — level lives in `lvl`, not after the id */
 function readEnchants(chunk: string): string {
@@ -1186,7 +1160,7 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
   // fill = rounds used. Parallel wishes stack as separate bars.
   const barId = `spawnpoint:w${Date.now() % 1_000_000}${Math.floor(Math.random() * 1000)}`;
   activeBars.add(barId);
-  // keep the bar NARROW — long names stretch under minimaps (owner request)
+  // keep the bar NARROW — long names stretch under minimaps
   const tag = wish.length > 12 ? `${wish.slice(0, 12).trim()}…` : wish;
   const started = Date.now();
   let phase = 'waking…';
@@ -1255,7 +1229,7 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
   const transcript: string[] = [
     SYSTEM(player, secret, mcVersion),
     ``,
-    `SPEED MATTERS — the player is standing there in the world, waiting. Use the CHEAPEST source that can answer you: your own knowledge when you are confident (most wishes need no research at all), then WIKI when a mechanic must be pinned down, and YOUTUBE only when the wiki cannot give you a concrete layout. One or two lookups, then act.`,
+    `SPEED MATTERS — the player is standing there in the world, waiting. Use the CHEAPEST source that can answer you: your own knowledge when you are confident (most wishes need no research at all), then WIKI when a mechanic must be pinned down. One or two lookups, then act.`,
     ``,
     web
       ? `You are in DEEP mode: full thinking is enabled because this wish looks like design/build work. Use it.`
@@ -1271,14 +1245,13 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
     `${player} said in chat: "${wish}"`,
   ];
   const trail: string[] = [];
-  // THREE-WAY COUNTER SPLIT — the old two-counter model caused live damage:
+  // Three counters, because a skip is not a failure:
   //   totalRan     = commands actually sent to the server
   //   totalFailed  = ran AND the server rejected them
   //   totalSkipped = never ran (prose-guard skips, budget drops, RCON-dead
-  //                  batches). Skips used to count as FAILURES, which withheld
-  //                  DONE on fully-successful rounds and made the model RE-RUN
-  //                  side-effectful gives — a redstone wish ran its 4 gives
-  //                  THREE times before dying (live-confirmed in chatgenie.log).
+  //                  batches). Counting skips as failures would withhold DONE
+  //                  on a successful round and make the model re-run
+  //                  side-effectful commands such as gives.
   let totalRan = 0;
   let totalFailed = 0;
   let totalSkipped = 0;
@@ -1289,8 +1262,7 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
   let zeroWorkChallenged = false;
   // ...and did any of it actually CHANGE the world? Read-only probes count as
   // didWork, so a wish of pure "data get"s passed the zero-work guard while a
-  // DONE claimed items were given (live 2026-07-21: "restored your inventory"
-  // — zero gives, inventory verified empty, DONE sailed through). A DONE with
+  // DONE claimed items were given. A DONE with
   // work-but-no-mutation gets challenged once, same shape as zero-work.
   let didMutate = false;
   let readOnlyChallenged = false;
@@ -1332,7 +1304,7 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
         .replace(/^```\w*|```$/g, '')
         .trim()
         .replace(/^`([^`]+)`$/, '$1')
-        .replace(/^\*{1,2}(DONE|SAY|INFO|PROGRESS|WIKI|YOUTUBE|WAIT|BUILD|PLACE|REMEMBER|DIAGNOSE|ESCALATE)\*{1,2}[:\s]*/i, '$1 ')
+        .replace(/^\*{1,2}(DONE|SAY|INFO|PROGRESS|WIKI|WAIT|BUILD|PLACE|REMEMBER|DIAGNOSE|ESCALATE)\*{1,2}[:\s]*/i, '$1 ')
         .replace(/^[-*]\s+(INFO\b)/i, '$1') // "- INFO x": the bullet habit dies hard
         .replace(/^[-*]\s+/, '')
         .replace(/^\d+[.)]\s+/, '') // "1. give ..." — a numbered list ran NOTHING
@@ -1363,8 +1335,7 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
       const [rawName, ...descParts] = bodyMode.header.split('|');
       // whitelist real commands: every panel directive is UPPERCASE while
       // Minecraft/mod commands are lowercase brigadier literals — a WAIT or
-      // PROGRESS captured into a blueprint used to poison every future replay
-      // with guaranteed rejections
+      // PROGRESS captured into a blueprint would be rejected on every replay
       const cmds = bodyMode.lines.filter((l) => {
         const fw = l.replace(/^\//, '').split(/\s+/)[0] ?? '';
         return /^[a-z][a-z0-9_-]{0,24}$/.test(fw) && !BLOCKED.test(l);
@@ -1440,9 +1411,8 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
       // (and on an RCON throw the guard never ran though the tp may have)
       await guardTeleports(id, cmds, wish).catch(() => {});
       // an RCON throw here (server stopping mid-wish, socket dropped, RCON not
-      // enabled) used to reach a bare .catch(() => {}) in scheduleFlush: the
-      // commands neither ran nor counted, so the reply's DONE sailed through the
-      // guard and the player was told a build landed that never existed.
+      // enabled) must count the batch as skipped, or the reply's DONE would
+      // pass the guard and report a build that never ran.
       const logMark = logSizeOf(id);
       let results: string[];
       try {
@@ -1540,8 +1510,8 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
       // order and rendered as an indented list under the SAY/DONE headline,
       // whichever side of it they were written on. Markdown "- " bullets
       // can't fill this role: stripLine eats the dash (it must, so bulleted
-      // COMMANDS still run), which is exactly how the player's modpack
-      // tutorial got discarded as narration three times (live 2026-07-27).
+      // COMMANDS still run), so bulleted explanations would be discarded
+      // as narration.
       if (/^INFO\b/.test(op)) {
         if (sayBullets.length < 10) sayBullets.push(op.replace(/^INFO[:\s]*/i, '').slice(0, 160));
         trail.push(`  • ${op.replace(/^INFO[:\s]*/i, '').slice(0, 100)}`);
@@ -1644,10 +1614,8 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
           const cmds = renderBlueprint(bp, Number(m[2]), Number(m[3]), Number(m[4])).map((c) =>
             c.replaceAll('<player>', target),
           );
-          // budget the replay against the SAME MAX_CMDS pool as everything else.
-          // The old code sent cmds.slice(0, MAX_CMDS) but counted cmds.length —
-          // so a 150-command blueprint ran 120, dropped 30 without a trace, and
-          // told the model "ran 150 commands, 0 failed". The roof never existed.
+          // budget the replay against the SAME MAX_CMDS pool as everything else,
+          // and count only what ran, so dropped commands are reported as dropped
           const room = Math.max(0, MAX_CMDS - totalRan);
           const toRun = cmds.slice(0, room);
           const dropped = cmds.length - toRun.length;
@@ -1723,8 +1691,7 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
               anchorNote = ` (the panel could not read the terrain under this footprint, so your y=${rawY} was used as-is — check the build is not floating.)`;
             }
           }
-          // TERRAIN CLEARANCE (2026-07-20, owner report: placements clipped
-          // into hillsides). Probe a coarse lattice through the volume ABOVE
+          // TERRAIN CLEARANCE (placements must not clip into hillsides). Probe a coarse lattice through the volume ABOVE
           // the base layers; solid terrain there means the build would merge
           // into a hill. Refuse BEFORE staging — the model can pick flatter
           // ground, offer to clear the site, or override with a trailing
@@ -1763,11 +1730,9 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
           if (snap) trail.push(`* ${snap}`);
           if (needsReload) {
             // `/reload` on a modded server runs ~1.5–2s+ and MUST finish before
-            // the freshly-staged template can be placed. The old default 2s RCON
-            // timeout made this race: reload timed out, the .catch swallowed it,
-            // and `place template` ran mid-reload against a not-yet-registered
-            // template — the build stamped nothing yet reported success. Give it
-            // a real budget and let it complete before placing.
+            // the freshly-staged template can be placed; a short RCON timeout
+            // would let `place template` run against a template that is not
+            // registered yet.
             await rconCommand(id, 'reload', { timeout: 60_000 }).catch(() => {});
           }
           const res = await rconBatch(id, placeCmds, { timeout: 60_000 });
@@ -1780,16 +1745,15 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
           didMutate = true;
           if (bad > 0) totalFailed += bad;
           // the panel verifies the stamp itself against known solid cells from
-          // the schematic — the model once probed (air) corners, concluded a
-          // SUCCESSFUL placement had failed, and told the player it was broken
+          // the schematic; a model probing corners can hit air and wrongly
+          // report a good placement as broken
           let verifyLine = '';
           if (bad === 0 && meta.samples?.length) {
             const probes = meta.samples.map((s) => `execute in ${dim} if block ${px + s.pos[0]} ${py + s.pos[1]} ${pz + s.pos[2]} ${s.block}`);
             const pres = await rconBatch(id, probes);
             const okCount = pres.filter((r) => /Test passed/i.test(r)).length;
-            // EVERY sample must match. A bare majority "VERIFIED" a 4-tile mansion
-            // whose samples all happened to fall in the one tile that stamped —
-            // three quarters of the house was missing and the panel called it good.
+            // EVERY sample must match: on a multi-tile build the samples can all
+            // fall in the one tile that stamped
             if (okCount === meta.samples.length) {
               verifyLine = ` PLACEMENT VERIFIED by the panel: all ${okCount}/${meta.samples.length} sample blocks match the template. The build IS in the world — do NOT re-place it and do NOT clear it.`;
               sawTestPass = true;
@@ -1800,8 +1764,7 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
           } else if (bad === 0) {
             // No sample cells to check against (legacy entry with empty samples).
             // We cannot confirm the blocks actually landed, so DON'T let the model
-            // claim a verified success on faith — that is exactly how the "reports
-            // success but nothing stamped" report happened.
+            // claim a verified success on faith.
             verifyLine = ` PLACEMENT UNVERIFIED: the panel has no sample cells for this build, so it could not confirm the blocks landed — check in-game before telling the player it worked.`;
           }
           out.push(`PLACE ${meta.name} at ${px} ${py} ${pz}: ${placeCmds.length} template${placeCmds.length > 1 ? 's' : ''} placed, ${bad} failed${bad ? ` — first error: ${res.find(isBad)?.slice(0, 150)}` : ''}. Footprint ${meta.size[0]}×${meta.size[1]}×${meta.size[2]} from the anchor.${anchorNote}${verifyLine}`);
@@ -1897,20 +1860,6 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
         }
         continue;
       }
-      if (/^YOUTUBE\b/.test(op)) {
-        await flush();
-        const query = op.replace(/^YOUTUBE\s+/, '').trim();
-        await bar('video…');
-        try {
-          const res = await youtubeResearch(query);
-          out.push(res);
-          trail.push(`> YOUTUBE ${query}\n< ${res.slice(0, 160)}…`);
-        } catch (e) {
-          out.push(`YOUTUBE ${query} FAILED: ${String(e).slice(0, 120)}`);
-          trail.push(`> YOUTUBE ${query}\n< FAILED`);
-        }
-        continue;
-      }
       if (/^READFILE\b/.test(op)) {
         await flush();
         const path = op.replace(/^READFILE\s+/, '').trim();
@@ -1984,16 +1933,14 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
     try {
       await askClaude(transcript.join('\n'), web, feed);
     } catch (e) {
-      // FIRST, synchronously: disarm the buffered tail. The armed 1.2s flush
-      // timer + pending[] used to fire DURING this catch — up to 30 commands
-      // executed invisibly AFTER the player was told the wish failed, then
-      // duplicated on the retry.
+      // FIRST, synchronously: disarm the buffered tail, or the armed flush
+      // timer would run the pending commands after the player was told the
+      // wish failed, and again on the retry.
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       const droppedTail = pending.length;
       pending = [];
       if (droppedTail) trail.push(`* ${droppedTail} buffered command(s) dropped — wish failed before they ran`);
-      // never die silently: the old code returned here without writing the
-      // log, so every timed-out build wish vanished without a trace
+      // never die silently: a timed-out wish still writes its log
       await chain.catch(() => {});
       // a fast-tier run that produced ZERO output in 60s is a hung run, not a
       // hard failure — retry once on the deep tier instead of giving up
@@ -2038,10 +1985,9 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
 
     if (doneLine || sayLine) {
       // a same-reply DONE — or SAY — is only relayed when every command in
-      // the reply succeeded. SAY used to bypass this gate entirely: a reply
-      // whose single command was skipped by the prose guard still delivered
-      // "SAY Time set to day." to the player (2026-07-16, and the time was
-      // not day). An honest-failure SAY survives this: the model sees the
+      // the reply succeeded; otherwise "SAY Time set to day." could reach the
+      // player after its command was skipped.
+      // An honest-failure SAY survives this: the model sees the
       // failures and re-SAYs next round with nothing to withhold.
       const roundFailed = totalFailed - failedBefore;
       const roundRan = totalRan - ranBefore;
@@ -2070,8 +2016,8 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
         continue;
       }
       // the sibling hole: commands ran, but every one was a QUERY. "Restored
-      // your inventory" once shipped over nothing but data-gets that PROVED
-      // the inventory empty (2026-07-21). Same one-shot challenge shape.
+      // your inventory" must not ship over nothing but data-gets that PROVE
+      // the inventory empty. Same one-shot challenge shape.
       if (doneLine && didWork && !didMutate && !readOnlyChallenged) {
         readOnlyChallenged = true;
         trail.push(`* DONE withheld once — only read-only commands ran this wish`);
@@ -2142,10 +2088,8 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
   }
 
   // THE PANEL MUST NEVER INVENT A SUCCESS. Reaching here without a verdict means
-  // the model never said DONE — it ran out of rounds, or timed out. The old code
-  // announced a GREEN "done (N/N commands)" here regardless, so the player got a
-  // red "my brain timed out" followed immediately by a triumphant green done.
-  // Only report what actually happened.
+  // the model never said DONE — it ran out of rounds, or timed out. Only
+  // report what actually happened.
   if (!verdict && !spoke) {
     const landed = totalRan - totalFailed; // failures are a subset of ran now
     if (totalRan === 0) {
@@ -2164,7 +2108,7 @@ async function handleWish(id: string, player: string, wish: string, secret: bool
     verdict: verdict ?? `NOT FINISHED (${totalRan} ran, ${totalFailed} rejected)`,
     // the actual commands that ran, straight from the trail (directives excluded)
     commands: trail
-      .filter((t) => t.startsWith('> ') && !/^> (RECIPE|WIKI|YOUTUBE|SNAPSHOTS|SAVEBLUEPRINT|WRITEFILE|READFILE|DIAGNOSE|\[)/.test(t))
+      .filter((t) => t.startsWith('> ') && !/^> (RECIPE|WIKI|SNAPSHOTS|SAVEBLUEPRINT|WRITEFILE|READFILE|DIAGNOSE|\[)/.test(t))
       .map((t) => t.slice(2).split('\n')[0]),
     at: new Date().toISOString(),
   });
@@ -2289,8 +2233,7 @@ async function sweepOrphanBars(id: string, log: (m: string) => void): Promise<vo
 
 /** Trigger words that open a wish. "shh"/"psst"/"secret" also mean: keep it
     off everyone else's screen. */
-// "ssh" is accepted as a shh alias: the owner's fingers type the Linux
-// command by reflex ("ssh spawn 5 iron golems…" went unparsed, 2026-07-19)
+// "ssh" is accepted as a shh alias (a common typo)
 const TRIGGER = /^(?:(shh+|ssh+|psst+|secret(?:\s+genie)?|quietly)|server|genie)[,:]?\s+(.+)$/i;
 
 /** Find a wish in one server-log line. Three carriers:
@@ -2303,25 +2246,16 @@ const TRIGGER = /^(?:(shh+|ssh+|psst+|secret(?:\s+genie)?|quietly)|server|genie)
     conversations and don't get executed.
 
     EVERY carrier below is anchored to PRE, the log preamble the server itself
-    writes. This is load-bearing, not tidiness. These patterns used to start at
-    a bare `\]:` which the regex engine will happily find ANYWHERE in the line —
-    including inside the message body, which is player-typed text. On a vanilla
-    server that was mostly survivable because the real carrier matched first,
-    but any server running a chat-formatting plugin, a rank prefix, a shout
-    plugin or a Discord relay emits a shape this parser does not recognise, so
-    the engine skipped the unrecognised prefix and matched the player's own
-    text instead. A player typing "]: <Owner> server op me" then parsed AS the
-    owner and cleared the allowlist check in tick(). Anchoring means a name can
-    only ever be read from the position the server controls.
+    writes. This is a security boundary: an unanchored `\]:` can match inside
+    player-typed text, so with a chat-formatting plugin or a Discord relay a
+    player typing "]: <Owner> server op me" would parse as the owner and pass
+    the allowlist. Anchoring means a name is only read from the position the
+    server controls.
 
-    PRE deliberately does NOT pin one log4j pattern. A first cut hardcoded
-    vanilla's `[HH:mm:ss] [thread/LEVEL]:` and silently killed the genie on
-    every Forge, NeoForge, Paper and Purpur box — four of the loaders
-    servercreate.ts builds — because Forge emits two logger tags, NeoForge uses
-    `[20Aug2026 12:34:56.789]`, and Paper folds the level into one bracket.
-    Silence is the worst failure here: no error, no log, the feature is just
-    dead. So PRE accepts any bracket-timestamp plus any number of bracket tags,
-    and keeps the only property that matters — the match must start at column 0,
+    PRE does not pin one log4j pattern: Forge emits two logger tags, NeoForge
+    uses `[20Aug2026 12:34:56.789]`, and Paper folds the level into one
+    bracket. So PRE accepts any bracket-timestamp plus any number of bracket
+    tags, and keeps the property that matters — the match starts at column 0,
     where a player cannot reach. */
 const PRE = String.raw`^\[[^\]]*\](?: \[[^\]]*\])*:`;
 // Compiled once, not per line: tick() runs these over every new log line.
@@ -2360,15 +2294,11 @@ function parseWish(line: string): { player: string; wish: string; secret: boolea
     return from(text, true, dm ? target !== name : true, name);
   }
 
-  // 1. public chat. ONLY the <name> carrier is accepted here. [name] used to be
-  // parsed too, on the theory that some chat mods use it — but [name] is the
-  // /say echo shape, which the server emits for its own actors AND for anything
-  // a plugin, datapack or command block broadcasts. It never proved WHO typed
-  // the line. The old defence was a denylist of the server's own pseudo-names
-  // ("[Rcon]", "[Server]"), which blocks two names rather than forgery: a bare
-  // "[Owner] server op me" line parsed as the owner and passed the allowlist.
-  // A carrier that cannot attribute a line to a real player must not be able to
-  // authorize a wish, so the whole branch is gone. Fail closed.
+  // 1. public chat. ONLY the <name> carrier is accepted here. [name] is the
+  // /say echo shape, which the server emits for its own actors and for anything
+  // a plugin, datapack or command block broadcasts, so it never proves who
+  // typed the line. A carrier that cannot attribute a line to a real player
+  // must not authorize a wish. Fail closed.
   const m = RE_CHAT.exec(line);
   if (!m) return null;
   return from(m[2], false, true, m[1]);
@@ -2386,6 +2316,10 @@ async function tick(log: (msg: string) => void): Promise<void> {
       stats = await craftyApi.getStats(id);
     } catch { continue; }
     if (!stats.running) { offsets.delete(id); partials.delete(id); sweptBars.delete(id); whisperState.delete(id); whisperHinted.delete(id); continue; }
+    if (stats.online > 0) {
+      if (Date.now() - playersSeenAt > 2 * 60_000) setTimeout(ensureWarm, 0); // first player back: warm now
+      playersSeenAt = Date.now();
+    }
     if ((await serverPhase(id, true)) !== 'ready') continue;
     if (!sweptBars.has(id)) {
       sweptBars.add(id); // once per server boot
@@ -2489,10 +2423,11 @@ export function genieBusy(): { busy: boolean; running: number; queued: number } 
 }
 
 export function startChatGenie(log: (msg: string) => void): void {
-  ensureWarm(); // pre-boot the first warm fast-tier child — wishes walk into a running brain
-  const warmTimer = setInterval(ensureWarm, 60_000); // keepalive drip + recycle + reheat
+  ensureWarm();
+  const warmTimer = setInterval(ensureWarm, 60_000);
   warmTimer.unref();
   const timer = setInterval(() => {
+    if (!genieActive()) return;
     tick(log).catch((e) => {
       // an unconfigured box (no Crafty token yet) is a normal state, not a failure
       if (!String(e).includes('No Crafty API token')) log(`chatgenie: tick failed: ${String(e)}`);

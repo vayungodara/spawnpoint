@@ -1,601 +1,241 @@
-import { existsSync, mkdirSync, rmSync, copyFileSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { spawn, execFile } from 'node:child_process';
+import { existsSync, mkdirSync, rmSync, copyFileSync, writeFileSync, readdirSync, renameSync } from 'node:fs';
+import { spawn, spawnSync, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { join, basename, dirname } from 'node:path';
 import { PATHS } from '../config.js';
 import { serverDir, javaFor } from './servers.js';
-import { detect } from './detect.js';
-import { killTree, IS_WIN, sandboxLink, KILLABLE_SPAWN_OPTS } from './platform.js';
-import { FORGE_ARGFILE } from './preflight.js';
-import { spawnSync } from 'node:child_process';
+import { detect, loaderVersion, type Detection } from './detect.js';
+import { killTree, IS_WIN, KILLABLE_SPAWN_OPTS, linkOrCopy } from './platform.js';
+import { loaderLaunchArgs, linkLoader, excerptOf, type Verdict } from './preflight.js';
 
-// the client gate needs a DISPLAY. Three ways to get one, checked in order:
-//   'xvfb'   — Linux + xvfb-run: invisible virtual framebuffer.
-//   'window' — macOS/Windows (or a Linux desktop without xvfb): the REAL
-//              client opens as a small window on the desktop for a few
-//              minutes. Full fidelity, zero extra dependencies — a visible
-//              window beats a stubbed-GL headless hack, because stubbed GL
-//              can mask or invent render-init crashes and the verdict lies.
-//   null     — headless box that isn't Linux-with-xvfb: the gate degrades
-//              HONESTLY — the verdict says why it skipped, the dry-boot
-//              preflight still protects the server, and nothing pretends to
-//              have tested a client.
-type GateMode = 'xvfb' | 'window';
-let modeState: GateMode | null | undefined;
-export function gateMode(): GateMode | null {
-  if (modeState !== undefined) return modeState;
-  if (process.platform === 'linux' && spawnSync('which', ['xvfb-run'], { stdio: 'ignore' }).status === 0) {
-    modeState = 'xvfb';
-  } else if (IS_WIN || process.platform === 'darwin' || process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
-    modeState = 'window';
-  } else {
-    modeState = null;
-  }
+// CLIENT BOOT TEST. AutoModpack mirrors whatever the server has; it does not
+// check that the result runs. So before a change reaches friends, this boots
+// a real Minecraft client (HeadlessMC + mc-runtime-test) with the exact
+// client set, then boots a throwaway copy of the server and has the client
+// join it. Singleplayer proves the pack launches; the join proves a player
+// gets in (some mods kick every client on join while booting fine).
+//
+// Display modes, checked in order:
+//   'xvfb'     Linux with xvfb-run: real rendering on a virtual display.
+//   'window'   macOS, Windows or a Linux desktop: a small real window.
+//   'headless' anywhere else: HeadlessMC stubs out LWJGL. Mod loading,
+//              mixins and init are tested; GPU-specific crashes are not.
+// The client runs in HeadlessMC's offline mode, its documented mode for
+// automated tests.
+
+type GateMode = 'xvfb' | 'window' | 'headless';
+let modeState: GateMode | undefined;
+function gateMode(): GateMode {
+  if (modeState) return modeState;
+  if (process.platform === 'linux' && spawnSync('which', ['xvfb-run'], { stdio: 'ignore' }).status === 0) modeState = 'xvfb';
+  else if (IS_WIN || process.platform === 'darwin' || process.env.DISPLAY || process.env.WAYLAND_DISPLAY) modeState = 'window';
+  else modeState = 'headless';
   return modeState;
 }
 
-// TIER-2 LAUNCH GATE — AutoModpack is a mirror, not a validator (its own
-// README: users must ensure the modpack works before it distributes it). So
-// after every pack regenerate, this boots the EXACT client set friends will
-// receive — a real Minecraft client (under Xvfb on headless Linux, as a small
-// desktop window elsewhere) with mc-runtime-test driving it into a world —
-// and records PASS/FAIL. A client-side conflict is caught
-// on this box instead of on a friend's screen.
-//
-// Proven live 2026-07-20: main's 43-mod set (sodium+iris+shaders present)
-// boots and joins in ~2min; the harness caught its first real finding the
-// same evening (ImmediatelyFast's font-atlas patch NPEs under Xvfb/Mesa).
-//
-// ENV_SKIP: mods that crash ONLY in the Xvfb/Mesa software-GL environment
-// while being demonstrably fine on real clients (owner plays with them
-// daily). They ship to players but are excluded from xvfb-mode boots — in
-// window mode the client runs on a real GPU, so the FULL set is tested.
-// Keep this list SHORT and documented — every entry is a hole in the gate.
-const ENV_SKIP = [
-  'immediatelyfast', // FontSet.resetTextures NPE under Xvfb/Mesa only — bisected 2026-07-20
-];
+// Mods that crash only under Xvfb's software GL while working on real GPUs.
+// They are left out of xvfb-mode boots; every entry is a hole in the test.
+const ENV_SKIP = ['immediatelyfast']; // FontSet.resetTextures NPE under Mesa
 
 const HMC = join(PATHS.root, 'Tools', 'headlessmc');
-const LAUNCHER = join(HMC, 'headlessmc-launcher-2.10.0.jar');
-
-// the launcher JVM takes the newest JDK under Tools/ (jdk-25 on the home
-// box, java.exe on Windows); which java the GAME runs under is HMC's own
-// affair, chosen at version-install time via `--java`.
-let gateJavaState: string | null | undefined;
-function gateJava(): string | null {
-  if (gateJavaState !== undefined) return gateJavaState;
-  gateJavaState = null;
-  const tools = join(PATHS.root, 'Tools');
-  if (existsSync(tools)) {
-    // numeric-major sort: a legacy jdk-8 must not beat jdk-25 lexically
-    const jdks = readdirSync(tools).filter((x) => x.startsWith('jdk-'))
-      .sort((a, b) => (parseInt(b.slice(4), 10) || 0) - (parseInt(a.slice(4), 10) || 0));
-    for (const d of jdks) {
-      const p = join(tools, d, 'bin', IS_WIN ? 'java.exe' : 'java');
-      if (existsSync(p)) { gateJavaState = p; break; }
-    }
-  }
-  return gateJavaState;
-}
-
-// low-priority wrappers: Linux gets nice+ionice (the bulk-ops law), macOS
-// has nice but no ionice, Windows has neither — and gates only run when zero
-// players are online, so priority matters least exactly where it's missing.
-const NICE = IS_WIN ? [] : ['nice', '-n', '19'];
-const NICE_IO = IS_WIN ? [] : process.platform === 'linux'
-  ? ['nice', '-n', '19', 'ionice', '-c3'] : ['nice', '-n', '19'];
-
-/** Full argv for a gate CLIENT boot, per display mode. extraProps are -D
-    JVM props (gameargs etc.), launcherArgs everything after the launcher jar. */
-function clientArgv(extraProps: string[], launcherArgs: string[]): string[] {
-  const argv = [...NICE_IO];
-  if (gateMode() === 'xvfb') argv.push('xvfb-run', '-a');
-  argv.push(gateJava()!);
-  if (gateMode() === 'xvfb') argv.push('-Dhmc.check.xvfb=true');
-  // LWJGL on macOS must create its window on the process's first thread
-  if (process.platform === 'darwin') argv.push('-XstartOnFirstThread');
-  argv.push(...extraProps, '-jar', LAUNCHER, ...launcherArgs);
-  return argv;
-}
-
-// window mode keeps the visible client small and out of the way; xvfb mode
-// leaves geometry alone (the virtual framebuffer nobody sees)
-const WINDOW_SIZE_ARGS = '--width 640 --height 360';
-// known HMC hang modes — timeout is a FAIL. 15 min: a 70-mod pack with a
-// 183MB physics mod under software GL genuinely needs >10 (live 2026-07-21)
-const RUN_TIMEOUT_MS = 15 * 60_000;
+const HMC_VERSION = '2.10.0';
+const LAUNCHER = join(HMC, `headlessmc-launcher-${HMC_VERSION}.jar`);
+const LAUNCHER_SHA256 = '52bd5006f478377b3893011d458562977d38c65ead6d2b31089beb4d614f13cd';
 const RUNTIME_TEST_VERSION = '4.5.1';
+const RUN_TIMEOUT_MS = 15 * 60_000;
 
-export interface GateVerdict {
-  ok: boolean;
-  skipped?: string;
-  detail: string;
-  mods?: number;
-  seconds?: number;
-  at: string;
-  /** MULTIPLAYER-JOIN result — the singleplayer boot proves the pack LAUNCHES,
-      this proves a player actually gets INTO the world. The custom-weapons
-      class (join-handshake packet kills the connection) is only visible here. */
-  join?: { ok: boolean; detail: string };
-  /** sha256 of the manifest this verdict judged — identical content skips re-gating */
-  manifestSha?: string;
+/** The newest JDK under Tools/ runs the launcher (numeric sort: jdk-8 < jdk-25). */
+function gateJava(): string | null {
+  const tools = join(PATHS.root, 'Tools');
+  if (!existsSync(tools)) return null;
+  const jdks = readdirSync(tools).filter((x) => x.startsWith('jdk-'))
+    .sort((a, b) => (parseInt(b.slice(4), 10) || 0) - (parseInt(a.slice(4), 10) || 0));
+  for (const d of jdks) {
+    const p = join(tools, d, 'bin', IS_WIN ? 'java.exe' : 'java');
+    if (existsSync(p)) return p;
+  }
+  return null;
 }
 
-// one boot at a time (2-4GB each), coalesce repeat requests per server
-let chain: Promise<void> = Promise.resolve();
-const queued = new Set<string>();
-let gateRunning = 0;
-/** a queued-or-running gate dies with the panel process — admin/exit asks */
-export function gateBusy(): boolean { return queued.size > 0 || gateRunning > 0; }
+const NICE = IS_WIN ? [] : ['nice', '-n', '19'];
+const NICE_IO = process.platform === 'linux' ? ['nice', '-n', '19', 'ionice', '-c3'] : NICE;
 
-/** GATES WAIT FOR QUIET. The manifest changes exactly when a server BOOTS —
-    i.e. exactly when the owner sits down to play — and the boot+join gates
-    cost cores and gigabytes (live 2026-07-27: Sensible MC ran 291 ticks
-    behind while its own boot test and join sandbox hammered the box). A
-    verdict is never worth lagging the live game: hold the gate until no
-    player is online on ANY server, rechecking every 3 min. */
-async function waitForQuiet(serverId: string, log: (m: string) => void): Promise<void> {
+/** Download the pinned HeadlessMC launcher on first use (13 MB, sha-checked). */
+async function ensureHeadlessMc(): Promise<void> {
+  if (existsSync(LAUNCHER)) return;
+  mkdirSync(HMC, { recursive: true });
+  const res = await fetch(`https://github.com/headlesshq/headlessmc/releases/download/${HMC_VERSION}/headlessmc-launcher-${HMC_VERSION}.jar`, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`HeadlessMC download failed (${res.status})`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (createHash('sha256').update(buf).digest('hex') !== LAUNCHER_SHA256) throw new Error('HeadlessMC download failed its checksum');
+  writeFileSync(`${LAUNCHER}.part`, buf);
+  renameSync(`${LAUNCHER}.part`, LAUNCHER);
+}
+
+/** Point HeadlessMC at its own Minecraft dir, the gate's JDK and this run's game dir. */
+function writeHmcConfig(gamedir: string): void {
+  const dir = join(HMC, 'HeadlessMC');
+  mkdirSync(dir, { recursive: true });
+  // .properties escaping eats backslashes; the JVM accepts forward slashes everywhere
+  const fwd = (p: string): string => p.replace(/\\/g, '/');
+  writeFileSync(join(dir, 'config.properties'), [
+    `hmc.mcdir=${fwd(join(HMC, 'mc'))}`,
+    `hmc.gamedir=${fwd(gamedir)}`,
+    `hmc.java.versions=${fwd(gateJava() ?? '')}`,
+    'hmc.offline=true',
+    '',
+  ].join('\n'), 'utf8');
+}
+
+/** argv for a gate client boot in the current display mode. */
+function clientArgv(gameArgs: string, version: string, heap: string): string[] {
+  const mode = gateMode();
+  const props = [...(mode === 'xvfb' ? ['-Dhmc.check.xvfb=true'] : []),
+    ...(gameArgs || mode === 'window' ? [`-Dhmc.gameargs=${[gameArgs, mode === 'window' ? '--width 640 --height 360' : ''].filter(Boolean).join(' ')}`] : [])];
+  return [
+    ...NICE_IO,
+    ...(mode === 'xvfb' ? ['xvfb-run', '-a'] : []),
+    gateJava()!,
+    // LWJGL on macOS must create its window on the first thread
+    ...(process.platform === 'darwin' ? ['-XstartOnFirstThread'] : []),
+    ...props,
+    '-jar', LAUNCHER,
+    '--command', 'launch', version, '-offline',
+    ...(mode === 'headless' ? ['-lwjgl'] : []),
+    '--jvm', heap,
+  ];
+}
+
+const execFileP = promisify(execFile);
+async function hmcCmd(args: string[]): Promise<void> {
+  const argv = [...NICE, gateJava()!, '-jar', LAUNCHER, '--command', ...args];
+  await execFileP(argv[0], argv.slice(1), { cwd: HMC, timeout: 8 * 60_000, maxBuffer: 32 * 1024 * 1024 });
+}
+
+/** Install this MC version with the server's own loader version into
+    HeadlessMC (once) and return the installed version's name. */
+async function ensureVersion(mc: string, loader: 'fabric' | 'forge', uid: string | null): Promise<string> {
+  const versions = join(HMC, 'mc', 'versions');
+  const wanted = (d: string): boolean => loader === 'fabric'
+    ? d.startsWith(`fabric-loader-${uid ?? ''}`) && d.endsWith(`-${mc}`)
+    : d.startsWith(`${mc}-forge-${uid ?? ''}`);
+  const find = (): string | undefined => (existsSync(versions) ? readdirSync(versions).find(wanted) : undefined);
+  const have = find();
+  if (have) return have;
+  await hmcCmd(['download', mc]);
+  await hmcCmd([loader, mc, '--java', parseInt(mc.split('.')[0], 10) >= 26 ? '25' : '21', ...(uid ? ['--uid', uid] : [])]);
+  const installed = find();
+  if (!installed) throw new Error(`HeadlessMC did not install ${loader} ${uid ?? ''} for ${mc}`);
+  return installed;
+}
+
+/** The mc-runtime-test jar for this MC (asset names use the version, then its minor family). */
+async function runtimeTestJar(mc: string, loader: 'fabric' | 'forge'): Promise<string | null> {
+  const assetLoader = loader === 'forge' ? 'lexforge' : 'fabric';
+  const names = [mc, mc.split('.').slice(0, 2).join('.')]
+    .map((v) => `mc-runtime-test-${v}-${RUNTIME_TEST_VERSION}-${assetLoader}-release.jar`);
+  for (const name of names) if (existsSync(join(HMC, name))) return join(HMC, name);
+  for (const name of names) {
+    const res = await fetch(`https://github.com/headlesshq/mc-runtime-test/releases/download/${RUNTIME_TEST_VERSION}/${name}`, { redirect: 'follow' });
+    if (!res.ok) continue;
+    writeFileSync(join(HMC, name), Buffer.from(await res.arrayBuffer()));
+    return join(HMC, name);
+  }
+  return null;
+}
+
+/** Hold the test while anyone is playing on any server: a client boot costs
+    cores and gigabytes, and the live game comes first. */
+async function waitForQuiet(onStatus: (d: string) => void): Promise<void> {
   const { craftyApi } = await import('../clients/crafty.js');
-  let announced = false;
-  let quietStreak = 0;
   for (;;) {
     let online = 0;
     try {
       for (const s of await craftyApi.listServers()) {
-        try {
-          const st = await craftyApi.getStats(s.server_id);
-          if (st.running) online += st.online ?? 0;
-        } catch { /* one server's stats must not block the gate */ }
+        const st = await craftyApi.getStats(s.server_id).catch(() => null);
+        if (st?.running) online += st.online ?? 0;
       }
-    } catch { return; } // Crafty unreachable — don't deadlock the queue
-    if (online === 0) {
-      // demand quiet TWICE, 2 min apart — a boot regenerates the manifest
-      // seconds before the owner logs in, and a single check green-lit a
-      // gate straight into their session (live 2026-07-27, evening)
-      if (++quietStreak >= 2) return;
-      await new Promise((r) => setTimeout(r, 120_000));
-      continue;
-    }
-    quietStreak = 0;
-    if (!announced) {
-      log(`launchgate: holding ${serverId}'s gate — ${online} player(s) online, the live game comes first`);
-      announced = true;
-    }
-    await new Promise((r) => setTimeout(r, 180_000));
+    } catch { return; }
+    if (online === 0) return;
+    onStatus(`waiting for ${online} player(s) to log off before the client test`);
+    await new Promise((r) => setTimeout(r, 60_000));
   }
 }
 
-/** sha256 of the pack manifest — the identity of what a gate actually judged.
-    EVERY server boot rewrites the manifest file (mtime changes, content
-    usually doesn't), and each rewrite queued a full 25-min gate cycle for a
-    pack that was already proven (live 2026-07-27: every play session began
-    with a redundant re-verification of the identical pack). */
-function manifestSha(serverId: string): string | null {
-  try {
-    const p = join(serverDir(serverId), 'automodpack', 'host-modpack', 'automodpack-content.json');
-    return createHash('sha256').update(readFileSync(p)).digest('hex');
-  } catch {
-    return null;
-  }
+/** The files a client receives and the jars the server runs, for one test. */
+export interface ClientSet {
+  /** absolute source path + path relative to the client's game dir */
+  files: { src: string; rel: string }[];
+  serverJars: string[];
+  /** names this run's log file: <label>-client.log */
+  label: 'candidate' | 'live';
+  /** file names this change adds; a change the test must leave out is untested */
+  changed: string[];
 }
 
-export function queueLaunchGate(serverId: string, log: (m: string) => void): void {
-  if (queued.has(serverId)) return;
-  queued.add(serverId);
-  chain = chain.then(async () => {
-    queued.delete(serverId);
-    gateRunning++;
-    try {
-      const sha = manifestSha(serverId);
-      const last = lastVerdict(serverId);
-      if (sha && last?.manifestSha === sha) {
-        log(`launchgate: ${serverId} pack content unchanged since its last verdict — re-gate skipped`);
-        return;
-      }
-      await waitForQuiet(serverId, log);
-      // the pack may have changed again while we waited — judge what's there NOW
-      const v = await runGate(serverId, log);
-      if (!v.skipped) {
-        v.manifestSha = manifestSha(serverId) ?? undefined;
-        try {
-          writeFileSync(join(PATHS.data, 'launchgate', serverId, 'verdict.json'), JSON.stringify(v, null, 2), 'utf8');
-        } catch { /* verdict already saved without the sha — worst case one extra re-gate */ }
-        log(`launchgate: ${v.ok ? 'PASS' : 'FAIL'} ${serverId} — ${v.detail}`);
-      }
-    } catch (e) {
-      log(`launchgate: ${serverId} errored: ${String(e).slice(0, 150)}`);
-    } finally {
-      gateRunning--;
-    }
-  });
-}
-
-/** Gate EVERY pack regenerate, however it happened. The queue hook on panel
-    installs misses two real paths (both hit live 2026-07-20: hand-placed
-    extras jars, and generateModpackOnStart at server boot — the sodium-extra
-    0.9.3 vs sodium 0.8.12 crash shipped through exactly that gap). Watch the
-    content manifest itself: mtime change = new pack = boot-test it. */
-export function startLaunchGateWatcher(listIds: () => Promise<string[]>, log: (m: string) => void): void {
-  const seen = new Map<string, number>();
-  const tick = async (): Promise<void> => {
-    let ids: string[] = [];
-    try { ids = await listIds(); } catch { return; }
-    for (const id of ids) {
-      try {
-        const p = join(serverDir(id), 'automodpack', 'host-modpack', 'automodpack-content.json');
-        if (!existsSync(p)) continue;
-        const mtime = statSync(p).mtimeMs;
-        const prev = seen.get(id);
-        seen.set(id, mtime);
-        if (prev !== undefined && mtime !== prev) {
-          log(`launchgate: pack manifest changed for ${id} — queueing boot test`);
-          queueLaunchGate(id, log);
-        }
-      } catch { /* server dir mid-change — next tick */ }
-    }
-  };
-  const timer = setInterval(() => { tick().catch(() => {}); }, 60_000);
-  timer.unref();
-}
-
-export function lastVerdict(serverId: string): GateVerdict | null {
-  try {
-    return JSON.parse(readFileSync(join(PATHS.data, 'launchgate', serverId, 'verdict.json'), 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-const execFileP = promisify(execFile);
-
-// ASYNC on purpose: `download <mc>` is a multi-minute full-client fetch on a
-// first-time version, and the execFileSync original froze the ENTIRE panel
-// (blocked event loop — no requests, no timers, gate timeouts never fired)
-// for its whole duration. Live 2026-07-21: "panel isnt loading" while the
-// horrorFabric gate downloaded 1.20.1.
-async function hmcCmd(args: string[]): Promise<void> {
-  const argv = [...NICE, gateJava()!, '-jar', LAUNCHER, '--command', ...args];
-  await execFileP(argv[0], argv.slice(1), {
-    cwd: HMC, timeout: 8 * 60_000, maxBuffer: 32 * 1024 * 1024,
-  });
-}
-
-/** Make sure HMC has this MC version + loader installed (one-time per pair). */
-async function ensureVersion(mc: string, loader: 'fabric' | 'forge'): Promise<void> {
-  const versions = join(HMC, 'mc', 'versions');
-  const have = existsSync(versions) && readdirSync(versions).some((d) =>
-    loader === 'fabric' ? d.startsWith('fabric-loader-') && d.endsWith(`-${mc}`) : d.startsWith(`${mc}-forge-`),
-  );
-  if (have) return;
-  await hmcCmd(['download', mc]);
-  await hmcCmd([loader, mc, '--java', parseInt(mc.split('.')[0], 10) >= 26 ? '25' : '21']);
-}
-
-/** mc-runtime-test jar for this MC (cached; asset names use the minor version
-    family, e.g. 26.1.2 -> 26.1). */
-async function runtimeTestJar(mc: string, loader: 'fabric' | 'forge'): Promise<string | null> {
-  // mc-runtime-test names old Forge builds "lexforge" (a plain "forge" URL
-  // 404s and curl happily saves the words "Not Found" as a 9-byte jar,
-  // which then kills FML's zip scan — live 2026-07-21)
-  const assetLoader = loader === 'forge' ? 'lexforge' : 'fabric';
-  const candidates = [mc, mc.split('.').slice(0, 2).join('.')];
-  for (const v of candidates) {
-    const local = join(HMC, `mc-runtime-test-${v}-${RUNTIME_TEST_VERSION}-${assetLoader}-release.jar`);
-    if (existsSync(local)) return local;
-  }
-  for (const v of candidates) {
-    const name = `mc-runtime-test-${v}-${RUNTIME_TEST_VERSION}-${assetLoader}-release.jar`;
-    const url = `https://github.com/headlesshq/mc-runtime-test/releases/download/${RUNTIME_TEST_VERSION}/${name}`;
-    const res = await fetch(url, { redirect: 'follow' });
-    if (res.ok) {
-      const local = join(HMC, name);
-      writeFileSync(local, Buffer.from(await res.arrayBuffer()));
-      return local;
-    }
-  }
+/** Why the client test cannot run for this server, or null when it can. */
+export function clientGateBlocker(serverId: string): string | null {
+  const det = detect(serverDir(serverId), serverId);
+  if ((det.loader !== 'fabric' && det.loader !== 'forge') || !det.mc) return `the client test supports Fabric and Forge, not ${det.loader}`;
+  if (!gateJava()) return 'the client test needs a JDK under Tools/; one downloads the first time a server starts';
   return null;
 }
 
-// ---- MULTIPLAYER-JOIN GATE ------------------------------------------------
-// Boots a THROWAWAY copy of the real server (symlinked jars+mods, fresh flat
-// world, offline mode, side port) and quick-plays the already-assembled gate
-// client into it (--quickPlayMultiplayer, vanilla since 1.20 — no helper mod).
-// The verdict comes from the SERVER's log: "joined the game" followed by a
-// quiet dwell = PASS; "lost connection: Internal Exception/EncoderException"
-// = exactly the custom-weapons class that singleplayer boots can never see
-// (live 2026-07-20: unconditional S2C payload on JOIN kicked every vanilla
-// client while the pack booted fine).
-// AutoModpack is EXCLUDED on both sides: the sandbox would host a modpack
-// with a fresh fingerprint and require=true would kick our test client for
-// being "unsynced" — a false FAIL about infrastructure, not the pack.
-const JOIN_PORT = 25999;
-const JOIN_SERVER_UP_MS = 4 * 60_000;
-const JOIN_DWELL_MS = 25_000; // survive this long after joining = handshake done
-const JOIN_TOTAL_MS = 8 * 60_000;
+// a client test costs several gigabytes, so only one runs at a time
+let chain: Promise<unknown> = Promise.resolve();
 
-async function runJoinGate(
-  serverId: string,
-  det: { loader: string; mc: string | null },
-  rundir: string,
-  log: (m: string) => void,
-): Promise<{ ok: boolean; detail: string }> {
-  const sdir = serverDir(serverId);
-  // quickPlayMultiplayer exists since 1.20 — older eras fall back to boot-only
-  const [maj, min] = (det.mc ?? '0.0').split('.').map((n) => parseInt(n, 10));
-  if (maj < 1 || (maj === 1 && min < 20)) return { ok: true, detail: 'join test skipped (pre-1.20 client, no quickplay)' };
-
-  // a 350-mod pack loading a real world OOMs a 2G sandbox; gates only run
-  // when nobody is playing, so a bigger heap costs no one anything. The
-  // timeouts scale too: Sensible MC's sandbox took 4.5 min just to reach
-  // Done and the 369-mod client relaunch alone outlives the stock 8-min
-  // budget (live 2026-07-27 — a timeout is a FAIL about the clock, not
-  // the pack).
-  const modCount = existsSync(join(sdir, 'mods'))
-    ? readdirSync(join(sdir, 'mods')).filter((f) => f.endsWith('.jar')).length : 0;
-  const big = modCount > 200;
-  const heap = big ? '-Xmx4G' : '-Xmx2G';
-  const serverUpMs = big ? 2 * JOIN_SERVER_UP_MS : JOIN_SERVER_UP_MS;
-  const totalMs = big ? 20 * 60_000 : JOIN_TOTAL_MS;
-  let launchArgs: string[] | null = null;
-  // same short-lived-JVM flags as the dry-boot (see preflight.ts FAST_BOOT):
-  // the sandbox lives minutes and its JIT warmup is pure waste
-  const fast = ['-XX:TieredStopAtLevel=1', '-XX:+UseParallelGC', '-XX:-UsePerfData'];
-  if (det.loader === 'fabric') launchArgs = [heap, ...fast, '-jar', 'fabric.jar', 'nogui'];
-  else if (det.loader === 'forge' || det.loader === 'neoforge') {
-    const ns = det.loader === 'forge' ? 'minecraftforge' : 'neoforge';
-    const fdir = join(sdir, 'libraries', 'net', ns, det.loader === 'forge' ? 'forge' : 'neoforge');
-    const ver = existsSync(fdir) ? readdirSync(fdir)[0] : null;
-    const rel = ver ? `libraries/net/${ns}/${det.loader === 'forge' ? 'forge' : 'neoforge'}/${ver}/${FORGE_ARGFILE}` : null;
-    if (rel && existsSync(join(sdir, rel))) launchArgs = [heap, ...fast, `@${rel}`, 'nogui'];
-  }
-  const java = javaFor(det.mc, det.loader);
-  if (!launchArgs || !java) return { ok: true, detail: 'join test skipped (no dry-boot recipe for this loader)' };
-
-  const srv = join(PATHS.data, 'joingate', serverId, 'server');
-  rmSync(srv, { recursive: true, force: true });
-  mkdirSync(join(srv, 'mods'), { recursive: true });
-  for (const item of ['fabric.jar', 'libraries', 'versions', '.fabric']) {
-    const src = join(sdir, item);
-    if (existsSync(src)) sandboxLink(src, join(srv, item));
-  }
-  for (const jar of readdirSync(join(sdir, 'mods')).filter((f) => f.endsWith('.jar'))) {
-    if (/automodpack/i.test(jar)) continue;
-    sandboxLink(join(sdir, 'mods', jar), join(srv, 'mods', jar));
-  }
-  writeFileSync(join(srv, 'eula.txt'), 'eula=true\n', 'utf8');
-  writeFileSync(join(srv, 'server.properties'), [
-    `server-port=${JOIN_PORT}`, 'enable-rcon=false', 'online-mode=false', 'white-list=false',
-    'level-type=flat', 'generate-structures=false', 'spawn-protection=0', 'view-distance=4',
-    'max-players=3', 'motd=spawnpoint joingate', 'sync-chunk-writes=false', '',
-  ].join('\n'), 'utf8');
-  // Simple Voice Chat binds its OWN UDP port (default 24454) regardless of
-  // server-port — with the real server running, the sandbox's bind fails and
-  // voicechat SHUTS THE SERVER DOWN, a false FAIL about ports, not the pack
-  // (live 2026-07-27). port=-1 = ride the MC server port, which is ours.
-  mkdirSync(join(srv, 'config', 'voicechat'), { recursive: true });
-  writeFileSync(join(srv, 'config', 'voicechat', 'voicechat-server.properties'), 'port=-1\n', 'utf8');
-
-  // the client rundir was assembled for the singleplayer boot — strip the
-  // test driver (it would force its own singleplayer flow) and automodpack
-  for (const jar of readdirSync(join(rundir, 'mods'))) {
-    if (/mc-runtime-test|automodpack/i.test(jar)) rmSync(join(rundir, 'mods', jar), { force: true });
-  }
-
-  const started = Date.now();
-  return await new Promise((resolve) => {
-    let srvOut = '';
-    let cliChild: ReturnType<typeof spawn> | null = null;
-    let settled = false;
-    let dwellTimer: NodeJS.Timeout | null = null;
-    const srvArgv = [...NICE, java, ...launchArgs];
-    const srvChild = spawn(srvArgv[0], srvArgv.slice(1), {
-      cwd: srv, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS,
-    });
-    const finish = (ok: boolean, detail: string): void => {
-      if (settled) return;
-      settled = true;
-      if (dwellTimer) clearTimeout(dwellTimer);
-      clearTimeout(totalKiller);
-      try { if (cliChild?.pid) killTree(cliChild.pid); } catch { /* gone */ }
-      try { if (srvChild.pid) killTree(srvChild.pid); } catch { /* gone */ }
-      try { writeFileSync(join(PATHS.data, 'joingate', serverId, 'last-run.log'), srvOut.slice(-30_000), 'utf8'); } catch { /* diagnostics */ }
-      resolve({ ok, detail });
-    };
-    // A NO-SHOW is not a verdict. Phase 1 already proved this client boots;
-    // when the sandbox server is healthy and never even SAW a connection
-    // attempt, the hung headless relaunch (369-mod packs do this, live
-    // 2026-07-27: client log just stops mid-init) says nothing about the
-    // PACK. Real join failures leave server-side evidence — a kick line, an
-    // encoder exception, the server crashing — and those still FAIL.
-    const inconclusive = (why: string): void => {
-      if (/Done \(/.test(srvOut) && !/lost connection|logged in|joined the game/i.test(srvOut)) {
-        finish(true, `join inconclusive — ${why}; the sandbox server stayed healthy and saw no failed join, boot is proven`);
-      } else finish(false, why);
-    };
-    const totalKiller = setTimeout(() => inconclusive(`join test produced no verdict in ${totalMs / 60000} min`), totalMs);
-    let joined = false;
-    const onServerLine = (): void => {
-      if (!joined && /joined the game/.test(srvOut)) {
-        joined = true;
-        log(`launchgate: join test — client joined the sandbox server for ${serverId}, dwelling ${JOIN_DWELL_MS / 1000}s`);
-        const joinedAtLen = srvOut.length;
-        dwellTimer = setTimeout(() => {
-          const after = srvOut.slice(joinedAtLen);
-          const kick = /lost connection: (.*)/.exec(after);
-          if (kick && /Internal Exception|EncoderException|DecoderException/i.test(kick[1])) {
-            finish(false, `player was KICKED after joining: ${kick[1].slice(0, 160)}`);
-          } else finish(true, 'player joined the server and stayed connected');
-        }, JOIN_DWELL_MS);
-      }
-      // a kick can land before the dwell timer was even set (instant encoder kicks)
-      if (joined && /lost connection: .*(Internal Exception|EncoderException|DecoderException)/i.test(srvOut)) {
-        const kick = /lost connection: (.*)/.exec(srvOut);
-        finish(false, `player was KICKED on join: ${(kick?.[1] ?? 'unknown').slice(0, 160)}`);
-      }
-    };
-    srvChild.stdout!.on('data', (d: Buffer) => { srvOut += d.toString(); onServerLine(); });
-    srvChild.stderr!.on('data', (d: Buffer) => { srvOut += d.toString(); onServerLine(); });
-    srvChild.on('exit', (code) => { if (!joined) finish(false, `sandbox server exited (code ${code}) before the client joined`); });
-
-    // wait for the sandbox server's Done line, then quick-play the client in
-    const upPoll = setInterval(() => {
-      if (settled) { clearInterval(upPoll); return; }
-      if (Date.now() - started > serverUpMs && !/Done \(/.test(srvOut)) {
-        clearInterval(upPoll);
-        finish(false, 'sandbox server did not finish starting in time');
-        return;
-      }
-      if (!/Done \(/.test(srvOut) || cliChild) return;
-      clearInterval(upPoll);
-      const escaped = (det.mc ?? '').replace(/\./g, '\\.');
-      const versionRegex = det.loader === 'fabric' ? `fabric-loader-.*-${escaped}` : `${escaped}-forge-.*`;
-      log(`launchgate: join test — sandbox server up, quick-playing client into 127.0.0.1:${JOIN_PORT}`);
-      const gameArgs = `--quickPlayMultiplayer 127.0.0.1:${JOIN_PORT}`
-        + (gateMode() === 'window' ? ` ${WINDOW_SIZE_ARGS}` : '');
-      const cliArgv = clientArgv([`-Dhmc.gameargs=${gameArgs}`],
-        ['--command', 'launch', versionRegex, '-regex', '--jvm', '-Xmx4G']);
-      cliChild = spawn(cliArgv[0], cliArgv.slice(1), { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
-      cliChild.on('exit', (code) => {
-        if (!joined) inconclusive(`client exited (code ${code}) before ever joining the server`);
-      });
-    }, 2000);
-  });
+/** Boot a real client with `set`, then join a throwaway copy of the server. Serialized globally. */
+export function clientGate(serverId: string, set: ClientSet, onStatus: (d: string) => void, log: (m: string) => void): Promise<Verdict> {
+  const run = chain.then(() => clientGateInner(serverId, set, onStatus, log), () => clientGateInner(serverId, set, onStatus, log));
+  chain = run.catch(() => {});
+  return run;
 }
 
-// ---- JOIN-KICK SELF-HEAL ---------------------------------------------------
-// A join kick NAMES its culprit: "Failed to encode packet '…custom_payload'
-// (custom-weapons:dead_eye_sync)" — the namespace is the mod id. Zero-noise
-// rule: don't just report that, FIX it. Resolve the id to its jar (server
-// mods / client shelf / hand-placed extras), move the jar to quarantine,
-// clean the ledger, resync — the regenerate re-queues the gate, which proves
-// the healed pack. The owner sees it in the Content banner, not as a broken
-// evening for friends.
-async function modIdOf(jarPath: string): Promise<string | null> {
+async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: string) => void, log: (m: string) => void): Promise<Verdict> {
+  const blocker = clientGateBlocker(serverId);
+  if (blocker) return { result: 'unverified', detail: blocker };
+  const det = detect(serverDir(serverId), serverId) as Detection & { mc: string; loader: 'fabric' | 'forge' };
+  await waitForQuiet(onStatus);
+  onStatus('preparing the test client (the first run downloads Minecraft)');
+  const work = join(PATHS.data, 'launchgate', serverId);
+  const rundir = join(work, 'run');
+  let version: string;
   try {
-    const { default: AdmZip } = await import('adm-zip');
-    const zip = new AdmZip(jarPath);
-    const fab = zip.getEntry('fabric.mod.json');
-    if (fab) return (JSON.parse(zip.readAsText(fab)) as { id?: string }).id ?? null;
-    for (const name of ['META-INF/mods.toml', 'META-INF/neoforge.mods.toml']) {
-      const toml = zip.getEntry(name);
-      if (toml) return /modId\s*=\s*"([^"]+)"/.exec(zip.readAsText(toml))?.[1] ?? null;
-    }
-  } catch { /* unreadable jar — fall through to filename match */ }
-  return null;
-}
-
-async function healJoinKick(serverId: string, kickDetail: string, log: (m: string) => void): Promise<string | null> {
-  const ns = /\(([a-z0-9_-]+):[a-z0-9_/.-]+\)/i.exec(kickDetail)?.[1];
-  if (!ns || /^(minecraft|forge|neoforge|fabric|fabricloader|brand|register)$/i.test(ns)) return null;
-  const sdir = serverDir(serverId);
-  const { clientShelfDir, deleteInstalled } = await import('./installer.js');
-  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const places = [
-    join(sdir, 'mods'),
-    clientShelfDir(serverId),
-    join(sdir, 'automodpack', 'host-modpack', 'main', 'mods'),
-  ];
-  for (const dir of places) {
-    if (!existsSync(dir)) continue;
-    for (const jar of readdirSync(dir).filter((f) => f.endsWith('.jar'))) {
-      const id = await modIdOf(join(dir, jar));
-      const hit = id ? norm(id) === norm(ns) : norm(jar).includes(norm(ns));
-      if (!hit) continue;
-      const qdir = join(PATHS.data, 'quarantine', serverId);
-      mkdirSync(qdir, { recursive: true });
-      copyFileSync(join(dir, jar), join(qdir, jar)); // keep the jar restorable
-      try { deleteInstalled(serverId, jar); } catch { /* not panel-installed */ }
-      rmSync(join(dir, jar), { force: true }); // hand-placed copies too
-      const { recordGateHeal } = await import('./preflight.js');
-      recordGateHeal(serverId, jar, `multiplayer-join gate: players get KICKED by this mod — ${kickDetail.slice(0, 160)}`);
-      log(`launchgate: SELF-HEAL — quarantined ${jar} (mod id '${ns}' named in the join kick), resyncing pack`);
-      const { syncAutoModpack } = await import('./automodpack.js');
-      void syncAutoModpack(serverId, log); // regenerate → watcher re-gates the healed pack
-      return jar;
-    }
+    await ensureHeadlessMc();
+    writeHmcConfig(rundir); // before any HeadlessMC command, or it installs into ~/.minecraft
+    version = await ensureVersion(det.mc, det.loader, loaderVersion(serverDir(serverId), det));
+  } catch (e) {
+    return { result: 'unverified', detail: `could not prepare the test client: ${String(e).slice(0, 140)}` };
   }
-  return null;
-}
-
-async function runGate(serverId: string, log: (m: string) => void): Promise<GateVerdict> {
-  const started = Date.now();
-  const save = (v: GateVerdict): GateVerdict => {
-    const dir = join(PATHS.data, 'launchgate', serverId);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'verdict.json'), JSON.stringify(v, null, 2), 'utf8');
-    return v;
-  };
-  const at = new Date().toISOString();
-  const sdir = serverDir(serverId);
-  const det = detect(sdir, serverId);
-  if ((det.loader !== 'fabric' && det.loader !== 'forge') || !det.mc) {
-    return save({ ok: true, skipped: `${det.loader} client gate not supported yet`, detail: 'skipped', at });
-  }
-  if (!gateMode()) {
-    return save({ ok: true, skipped: 'client gate needs a display — headless Linux: install xvfb; a desktop session runs it as a small visible window. Server-side dry-boot still active', detail: 'skipped', at });
-  }
-  if (!existsSync(LAUNCHER) || !gateJava()) {
-    return save({ ok: true, skipped: 'client gate launcher not installed (Tools/headlessmc + a Tools/ JDK) — server-side dry-boot still active', detail: 'skipped', at });
-  }
-  const contentPath = join(sdir, 'automodpack', 'host-modpack', 'automodpack-content.json');
-  if (!existsSync(contentPath)) return save({ ok: true, skipped: 'no automodpack content', detail: 'skipped', at });
-
-  await ensureVersion(det.mc, det.loader);
   const testJar = await runtimeTestJar(det.mc, det.loader);
-  if (!testJar) return save({ ok: true, skipped: `no mc-runtime-test build for ${det.mc}`, detail: 'skipped', at });
+  if (!testJar) return { result: 'unverified', detail: `mc-runtime-test has no build for ${det.mc}` };
 
-  // assemble the EXACT synced set from the content manifest
-  const rundir = join(PATHS.data, 'launchgate', serverId, 'run');
+  const skipped = (name: string): boolean => gateMode() === 'xvfb' && ENV_SKIP.some((s) => name.toLowerCase().includes(s));
+  const untestable = set.changed.filter(skipped);
+  if (untestable.length) return { result: 'unverified', detail: `${untestable.join(', ')} cannot run on the virtual display, so the client test cannot cover it` };
   rmSync(rundir, { recursive: true, force: true });
   mkdirSync(join(rundir, 'mods'), { recursive: true });
-  const content = JSON.parse(readFileSync(contentPath, 'utf8')) as { list?: { file: string }[]; files?: { file: string }[] };
-  const files = content.list ?? content.files ?? [];
-  // ENV_SKIP entries are Xvfb/Mesa artifacts — a window-mode boot runs on a
-  // real GPU and tests the full set
-  const envSkip = gateMode() === 'xvfb' ? ENV_SKIP : [];
   let mods = 0;
-  let skippedEnv = 0;
-  for (const f of files) {
-    const rel = f.file.replace(/^\//, '');
-    if (envSkip.some((s) => basename(rel).toLowerCase().includes(s))) { skippedEnv++; continue; }
-    for (const base of [join(sdir, 'automodpack', 'host-modpack', 'main'), sdir]) {
-      const src = join(base, rel);
-      if (existsSync(src)) {
-        const dst = join(rundir, rel);
-        mkdirSync(dirname(dst), { recursive: true });
-        copyFileSync(src, dst);
-        if (rel.startsWith('mods/')) mods++;
-        break;
-      }
-    }
+  const left: string[] = [];
+  for (const f of set.files) {
+    if (skipped(basename(f.rel))) { left.push(basename(f.rel)); continue; }
+    const dst = join(rundir, f.rel);
+    mkdirSync(dirname(dst), { recursive: true });
+    // jars never change, so a link is safe; configs a mod rewrites must not write through to the live pack
+    if (f.rel.endsWith('.jar')) linkOrCopy(f.src, dst);
+    else copyFileSync(f.src, dst);
+    if (f.rel.startsWith('mods/')) mods++;
   }
   copyFileSync(testJar, join(rundir, 'mods', basename(testJar)));
 
-  // gate runs are serialized, so mutating the shared HMC gamedir is safe
-  const cfg = join(HMC, 'HeadlessMC', 'config.properties');
-  // .properties escaping eats backslashes — Windows paths go in with forward
-  // slashes, which the JVM accepts everywhere
-  const gamedir = IS_WIN ? rundir.replace(/\\/g, '/') : rundir;
-  const props = readFileSync(cfg, 'utf8').replace(/^hmc\.gamedir=.*$/m, `hmc.gamedir=${gamedir}`);
-  writeFileSync(cfg, props, 'utf8');
+  onStatus(`booting a ${det.mc} client with ${mods} mods (takes a few minutes)`);
+  log(`launchgate: booting ${det.mc} client with ${mods} mods for ${serverId} (${gateMode()} mode)`);
+  const heap = mods > 150 ? '-Xmx4G' : '-Xmx2G';
+  const started = Date.now();
 
-  if (gateMode() === 'window') {
-    log('launchgate: no virtual display on this OS — the verification client opens as a small Minecraft window for a few minutes. Leave it alone; it closes itself when the verdict is in.');
-  }
-  log(`launchgate: booting ${det.mc} client with ${mods} mods (${skippedEnv} env-skipped) for ${serverId}`);
-  const escaped = det.mc.replace(/\./g, '\\.');
-  const versionRegex = det.loader === 'fabric' ? `fabric-loader-.*-${escaped}` : `${escaped}-forge-.*`;
-  const sp = await new Promise<GateVerdict>((resolve) => {
-    const argv = clientArgv(
-      gateMode() === 'window' ? [`-Dhmc.gameargs=${WINDOW_SIZE_ARGS}`] : [],
-      ['--command', 'launch', versionRegex, '-regex', '--jvm', '-Xmx4G'],
-    );
-    // KILLABLE_SPAWN_OPTS: on POSIX the child owns a process group, so a
-    // timeout kill takes the WHOLE tree (nice→ionice→xvfb-run→java).
-    // child.kill alone only shot the nice wrapper and the Minecraft client
-    // lived on as an orphan, wedging every later gate run (live 2026-07-21,
-    // twice). On Windows killTree's taskkill /T does the same job.
+  const sp = await new Promise<Verdict>((resolve) => {
+    const argv = clientArgv('', version, heap);
     const child = spawn(argv[0], argv.slice(1), { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
     let out = '';
     child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
@@ -604,50 +244,158 @@ async function runGate(serverId: string, log: (m: string) => void): Promise<Gate
     child.on('exit', (code) => {
       clearTimeout(killer);
       const seconds = Math.round((Date.now() - started) / 1000);
-      writeFileSync(join(PATHS.data, 'launchgate', serverId, 'last-run.log'), out.slice(-40_000), 'utf8');
+      writeFileSync(join(work, `${set.label}-client.log`), out.slice(-40_000), 'utf8');
       if (code === 0 && /exited with code: 0/.test(out)) {
-        resolve({ ok: true, detail: `client booted and joined a world (${mods} mods, ${seconds}s)`, mods, seconds, at });
-      } else {
-        const crash = /Crash report saved to:.*?(\S+\.txt)/.exec(out)?.[1];
-        // exit null = OUR timeout kill. If the log proves the client got past
-        // mod loading into the interactive phase — mc-runtime-test spinning on
-        // a mod's modal GUI (MCA's Destiny screen) or a gameplay mod holding
-        // player spawn — that's a mod BLOCKING AUTOPLAY, not a broken pack:
-        // real load failures crash with an exit code. Boot counts as proven
-        // and the join gate (whose verdict reads the sandbox SERVER's log, so
-        // client GUIs can't stall it) stays the decisive test.
-        const blockedAutoplay =
-          code === null && !crash && /(Screen not yet null:|Waiting for player to load)/.test(out);
-        if (blockedAutoplay) {
-          resolve({
-            ok: true, mods, seconds, at,
-            detail: `client booted (${mods} mods, ${seconds}s) — a mod GUI/spawn hook blocked the automated play-test, boot still proven`,
-          });
-        } else {
-          resolve({
-            ok: false, mods, seconds, at,
-            detail: `client did NOT survive (exit ${code}${crash ? `, crash report ${crash}` : ''}) — pack change may crash friends' games, check data/launchgate/${serverId}/last-run.log`,
-          });
-        }
+        resolve({ result: 'passed', detail: `a client booted into a world with ${mods} mods`, seconds });
+        return;
       }
+      const crash = /Crash report saved to:.*?(\S+\.txt)/.exec(out)?.[1];
+      // the launcher failing before Minecraft ran says nothing about the pack
+      if (!crash && !/Minecraft exited with code|Loading \d+ mods|ModLauncher running/.test(out)) {
+        const last = out.trim().split('\n').pop()?.trim().slice(0, 160) ?? '';
+        resolve({ result: 'unverified', detail: `the test client did not start (${last || `exit ${code}`})`, seconds });
+        return;
+      }
+      // stubbed graphics cannot run every pack (rendering mods call real GL)
+      if (gateMode() === 'headless' && /This issue is likely caused by HeadlessMc/i.test(out)) {
+        resolve({ result: 'unverified', detail: 'the test client has no display and its stubbed graphics cannot run this pack; install xvfb to test it', seconds, excerpt: excerptOf(out) });
+        return;
+      }
+      // killed by our timeout after the client reached the interactive phase:
+      // a mod's modal screen or spawn hook blocked the automated play-test.
+      // Load failures crash with an exit code, so the boot itself is proven.
+      if (code === null && !crash && /(Screen not yet null:|Waiting for player to load)/.test(out)) {
+        resolve({ result: 'passed', detail: `a client booted with ${mods} mods; a mod's screen blocked the automated play-test`, seconds });
+        return;
+      }
+      resolve({
+        result: 'failed', seconds,
+        detail: `the client crashed with exit code ${code}${crash ? ` (${basename(crash)})` : ''}`,
+        excerpt: excerptOf(out),
+      });
     });
   });
-  if (!sp.ok) return save(sp);
+  if (sp.result !== 'passed') return sp;
 
-  // singleplayer proved the pack LAUNCHES — now prove a player gets IN.
-  // Re-check for players first: the boot phase runs for many minutes and the
-  // owner may have logged on since the queue's quiet check.
-  await waitForQuiet(serverId, log);
-  const jv = await runJoinGate(serverId, det, rundir, log).catch((e) => ({ ok: false, detail: `join test errored: ${String(e).slice(0, 140)}` }));
-  let healNote = '';
-  if (!jv.ok && /KICKED/i.test(jv.detail)) {
-    const healed = await healJoinKick(serverId, jv.detail, log).catch(() => null);
-    if (healed) healNote = ` — SELF-HEALED: ${healed} quarantined (data/quarantine/${serverId}/), pack regenerating and re-testing without it`;
+  await waitForQuiet(onStatus);
+  onStatus('joining a throwaway copy of the server');
+  const join_ = await joinTest(serverId, det, version, set.serverJars, rundir, log)
+    .catch((e): Verdict => ({ result: 'unverified', detail: `the join test errored: ${String(e).slice(0, 140)}` }));
+  if (join_.result !== 'passed') return { ...join_, detail: `${sp.detail}, but ${join_.detail}` };
+  const stubbed = gateMode() === 'headless' ? ' (graphics stubbed: install xvfb to test rendering too)'
+    : left.length ? ` (${left.join(', ')} left out: it cannot run on the virtual display)` : '';
+  return { result: 'passed', detail: `${sp.detail}, then ${join_.detail}${stubbed}`, seconds: Math.round((Date.now() - started) / 1000) };
+}
+
+// The join test boots a throwaway server (the candidate's jars, a fresh flat
+// world, offline mode, a side port) and quick-plays the client into it. The
+// verdict comes from the server's log: "joined the game" plus a quiet dwell
+// passes; "lost connection: Internal Exception" fails. AutoModpack is left
+// out on both sides: the sandbox would host a pack with a new fingerprint
+// and kick the test client as unsynced.
+const JOIN_PORT = 25999;
+const JOIN_DWELL_MS = 25_000;
+
+async function joinTest(
+  serverId: string,
+  det: Detection & { mc: string; loader: 'fabric' | 'forge' },
+  version: string,
+  serverJars: string[],
+  rundir: string,
+  log: (m: string) => void,
+): Promise<Verdict> {
+  const [maj, min] = det.mc.split('.').map((n) => parseInt(n, 10));
+  if (maj === 1 && min < 20) return { result: 'unverified', detail: 'the join could not be tested (clients before 1.20 have no quick-play)' };
+  const big = serverJars.length > 200;
+  const launchArgs = loaderLaunchArgs(serverDir(serverId), det, big ? '-Xmx4G' : '-Xmx2G');
+  const java = javaFor(det.mc, det.loader);
+  if (!launchArgs || !java) return { result: 'unverified', detail: 'no boot recipe for this server' };
+  const serverUpMs = (big ? 8 : 4) * 60_000;
+  const totalMs = (big ? 20 : 8) * 60_000;
+
+  const srv = join(PATHS.data, 'joingate', serverId);
+  rmSync(srv, { recursive: true, force: true });
+  mkdirSync(join(srv, 'mods'), { recursive: true });
+  linkLoader(serverDir(serverId), srv);
+  for (const jar of serverJars) if (!/automodpack/i.test(basename(jar))) linkOrCopy(jar, join(srv, 'mods', basename(jar)));
+  writeFileSync(join(srv, 'eula.txt'), 'eula=true\n', 'utf8');
+  writeFileSync(join(srv, 'server.properties'), [
+    `server-port=${JOIN_PORT}`, 'enable-rcon=false', 'online-mode=false', 'white-list=false',
+    'level-type=flat', 'generate-structures=false', 'spawn-protection=0', 'view-distance=4',
+    'max-players=3', 'motd=spawnpoint join test', 'sync-chunk-writes=false', '',
+  ].join('\n'), 'utf8');
+  // Simple Voice Chat binds its own UDP port; -1 rides the game port instead
+  // of colliding with the real server's voice port
+  mkdirSync(join(srv, 'config', 'voicechat'), { recursive: true });
+  writeFileSync(join(srv, 'config', 'voicechat', 'voicechat-server.properties'), 'port=-1\n', 'utf8');
+  // the singleplayer driver would force its own flow; AutoModpack would demand a sync
+  for (const jar of readdirSync(join(rundir, 'mods'))) {
+    if (/mc-runtime-test|automodpack/i.test(jar)) rmSync(join(rundir, 'mods', jar), { force: true });
   }
-  return save({
-    ...sp,
-    join: jv,
-    ok: sp.ok && jv.ok,
-    detail: jv.ok ? `${sp.detail}; multiplayer join OK (${jv.detail})` : `pack boots but MULTIPLAYER JOIN FAILED — ${jv.detail}${healNote}. Check data/joingate/${serverId}/last-run.log`,
+
+  const started = Date.now();
+  return await new Promise<Verdict>((resolve) => {
+    let srvOut = '';
+    let cli: ReturnType<typeof spawn> | null = null;
+    let settled = false;
+    let joined = false;
+    let dwell: NodeJS.Timeout | null = null;
+    const srvArgv = [...NICE, java, ...launchArgs];
+    const srvChild = spawn(srvArgv[0], srvArgv.slice(1), { cwd: srv, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
+    const finish = (v: Verdict): void => {
+      if (settled) return;
+      settled = true;
+      if (dwell) clearTimeout(dwell);
+      clearTimeout(totalKiller);
+      clearInterval(upPoll);
+      try { if (cli?.pid) killTree(cli.pid); } catch { /* gone */ }
+      try { if (srvChild.pid) killTree(srvChild.pid); } catch { /* gone */ }
+      try { writeFileSync(join(PATHS.data, 'launchgate', serverId, 'join.log'), srvOut.slice(-30_000), 'utf8'); } catch { /* diagnostics */ }
+      setTimeout(() => rmSync(srv, { recursive: true, force: true }), 2000);
+      resolve(v);
+    };
+    // A client that never even tried to connect proves nothing either way:
+    // the join is untested. Real join failures leave evidence on the server
+    // (a kick line, an encoder exception, a crash) and fail the test.
+    const inconclusive = (why: string): void => {
+      if (/Done \(/.test(srvOut) && !/lost connection|logged in|joined the game/i.test(srvOut)) {
+        finish({ result: 'unverified', detail: `the join could not be tested (${why})` });
+      } else finish({ result: 'failed', detail: why });
+    };
+    const totalKiller = setTimeout(() => inconclusive(`no join verdict in ${totalMs / 60_000} min`), totalMs);
+    // after the join, any disconnect is a failure: the test client never leaves on its own
+    const kicked = (): string | null => {
+      const m = /lost connection: (.*)/i.exec(srvOut);
+      return m ? m[1].slice(0, 160) : null;
+    };
+    const onLine = (): void => {
+      const kick = joined ? kicked() : null;
+      if (kick) { finish({ result: 'failed', detail: `a player was kicked on join: ${kick}` }); return; }
+      if (!joined && /joined the game/.test(srvOut)) {
+        joined = true;
+        log(`launchgate: join test client joined ${serverId}'s copy, dwelling ${JOIN_DWELL_MS / 1000}s`);
+        dwell = setTimeout(() => {
+          const k = kicked();
+          finish(k ? { result: 'failed', detail: `a player was kicked after joining: ${k}` } : { result: 'passed', detail: 'joined a copy of the server and stayed connected' });
+        }, JOIN_DWELL_MS);
+      }
+    };
+    srvChild.stdout!.on('data', (d: Buffer) => { srvOut += d.toString(); onLine(); });
+    srvChild.stderr!.on('data', (d: Buffer) => { srvOut += d.toString(); onLine(); });
+    srvChild.on('exit', (code) => finish({ result: 'failed', detail: `the server copy exited (code ${code}) ${joined ? 'with the player connected' : 'before the client joined'}` }));
+    const upPoll = setInterval(() => {
+      if (settled || cli) return;
+      if (!/Done \(/.test(srvOut)) {
+        if (Date.now() - started > serverUpMs) finish({ result: 'unverified', detail: 'the join could not be tested (the server copy did not finish starting in time)' });
+        return;
+      }
+      const argv = clientArgv(`--quickPlayMultiplayer 127.0.0.1:${JOIN_PORT}`, version, big ? '-Xmx4G' : '-Xmx2G');
+      cli = spawn(argv[0], argv.slice(1), { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
+      cli.on('exit', (code) => {
+        if (!joined) inconclusive(`the client exited (code ${code}) before joining`);
+        else finish({ result: 'failed', detail: `the client exited (code ${code}) after joining` });
+      });
+    }, 2000);
   });
 }
+

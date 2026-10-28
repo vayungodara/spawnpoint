@@ -1,10 +1,8 @@
 // minecraft.wiki, read directly through its MediaWiki API.
 //
-// The genie used to reach the wiki through the model's own WebSearch/WebFetch
-// tools, which meant every build wish sat in a multi-minute agentic tool loop
-// before it emitted a single command — and a 5-minute budget died there with
-// nothing built. Fetching the page HERE instead keeps each model turn short:
-// it asks for a page, we hand back the text, it thinks once and builds.
+// The genie has no tools of its own, so the panel fetches pages for it: the
+// model asks for a page, the panel hands back the text, and the model builds.
+// This also keeps each model turn short.
 
 const API = 'https://minecraft.wiki/api.php';
 const UA = 'Spawnpoint-Panel/0.1 (private Minecraft server panel)';

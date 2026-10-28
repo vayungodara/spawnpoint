@@ -3,13 +3,10 @@ import { craftyApi, type CraftyServer } from '../clients/crafty.js';
 
 // One source of truth for how ports are laid out across the fleet.
 //
-// The bug this module exists to kill: server creation only ever uniquified the
-// GAME port (nextFreePort), never rcon.port. Crafty's template hands every new
-// server the same rcon.port, so two servers would silently share it — and the
-// genie's RCON client (clients/rcon.ts) connects to 127.0.0.1:<that server's
-// own rcon.port>, so whichever server bound the shared port first would receive
-// commands meant for the other. Deriving rcon.port from the game port makes a
-// unique game port *guarantee* a unique rcon port.
+// Crafty's template hands every new server the same rcon.port, so two servers
+// would share it and one would receive RCON commands meant for the other.
+// Deriving rcon.port from the game port makes a unique game port guarantee a
+// unique rcon port.
 
 export const PANEL_PORT = 25570; // the Spawnpoint panel — never hand this to a server
 // rcon.port = server-port + 10000. The big offset keeps every rcon port in a

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router'
 import { useQueries, useQuery, useMutation } from '@tanstack/react-query'
 import { useServers, useSetActive, type Stats, type ServerInfo } from '../api'
 import { Pi, loaderIcon } from '../components/PixelIcons'
-import bandSurface from '../assets/band-surface.png'
+import bandSurface from '../assets/band-surface.webp'
 
 const loaderColors: Record<string, string> = {
   forge: 'bg-dirt text-paper',

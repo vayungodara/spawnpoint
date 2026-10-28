@@ -5,10 +5,9 @@ import { PATHS, craftyToken } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import { rconCommand } from '../clients/rcon.js';
 
-// CRAFTY WATCHDOG — on 2026-07-20 Crafty wedged silently: port 8443 kept
-// listening but its accept queue filled (129/128) and every panel command
-// timed out; a "stopped" server ran on for hours. Zero-noise rule: that
-// failure class gets a self-healing watcher, not a surprised owner.
+// CRAFTY WATCHDOG — Crafty can wedge silently: port 8443 keeps listening
+// but its accept queue fills and every panel command times out, so a
+// "stopped" server runs on. This watcher detects that and heals it.
 //
 //  - probe: listServers with a hard 8s cap, every 60s
 //  - 3 consecutive failures = wedged (one blip is a busy box, not a patient)

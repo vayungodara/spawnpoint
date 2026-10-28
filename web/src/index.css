@@ -312,7 +312,7 @@ input[type='range'].xp::-webkit-slider-thumb {
 @keyframes pulse { 50% { box-shadow: 0 0 0 5px oklch(72% 0.17 150 / 0.25); } }
 .pulse-now { animation: pulse 2s ease-in-out infinite; }
 
-/* ---------- state-change motion (2026-07-18 polish pass) ---------- */
+/* ---------- state-change motion ---------- */
 
 /* lamps IGNITE when they turn on/crash — the class swap replays the pop, so a
    server coming online gets a visible "torch lit" moment instead of a silent

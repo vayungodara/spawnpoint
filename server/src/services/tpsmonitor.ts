@@ -42,7 +42,7 @@ export function tpsSource(id: string): { source: Source | 'none' | 'unknown'; re
     return {
       source: 'none',
       reason:
-        'This Minecraft version has no built-in tick command (`tick query` arrived in 1.20.3) and no TPS source was found. Install the Spark mod to see TPS here.',
+        'This server answered none of the TPS commands (`tick query` needs Minecraft 1.20.3 or newer). Install the Spark mod to see TPS here.',
     };
   }
   return { source: s };
@@ -77,10 +77,12 @@ function candidates(mc: string | null, loader: string | undefined): Source[] {
   return [...new Set(list)];
 }
 
-/** Ask one source. Returns null if that source is not available here. */
-async function read(id: string, src: Source): Promise<Sample | null> {
+/** Ask one source. 'unsupported' means the server rejected the command;
+    null means no usable answer this time (starting up, shutting down). */
+async function read(id: string, src: Source): Promise<Sample | 'unsupported' | null> {
   const out = strip(await rconCommand(id, CMD[src]));
-  if (!out || UNKNOWN.test(out)) return null;
+  if (UNKNOWN.test(out)) return 'unsupported';
+  if (!out) return null;
 
   if (src === 'tick') {
     // "Target tick rate: 20.0 per second. Average time per tick: 3.2ms (Target: 50.0ms)"
@@ -123,21 +125,28 @@ async function sample(id: string): Promise<void> {
 
   let s: Sample | null = null;
   if (known) {
-    s = await read(id, known).catch(() => null);
-    if (!s) SOURCE.delete(id); // it stopped answering (mod removed, version switched) — re-probe
+    const r = await read(id, known).catch(() => null);
+    if (r && r !== 'unsupported') s = r;
+    else SOURCE.delete(id); // it stopped answering (mod removed, version switched) — re-probe
   }
 
   if (!s) {
     const { loader, mc } = detect(serverDir(id), id);
-    for (const src of candidates(mc, loader)) {
-      s = await read(id, src).catch(() => null);
-      if (s) {
+    // RCON comes up after "Done" and answers oddly while stopping, so only a
+    // server that rejected every probe as an unknown command has no source
+    let unsupported = 0;
+    const list = candidates(mc, loader);
+    for (const src of list) {
+      const r = await read(id, src).catch(() => null);
+      if (r === 'unsupported') unsupported++;
+      else if (r) {
+        s = r;
         SOURCE.set(id, src);
         break;
       }
     }
     if (!s) {
-      SOURCE.set(id, 'none');
+      if (unsupported === list.length) SOURCE.set(id, 'none');
       return;
     }
   }
@@ -152,7 +161,7 @@ async function sample(id: string): Promise<void> {
   HISTORY.set(id, arr);
 }
 
-async function tick(log: (m: string) => void): Promise<void> {
+async function tick(): Promise<void> {
   // sample every server the panel is actively watching (genie-enabled or not —
   // any running+ready server gets a pulse)
   let servers;
@@ -178,9 +187,9 @@ async function tick(log: (m: string) => void): Promise<void> {
   }
 }
 
-export function startTpsMonitor(log: (msg: string) => void): void {
+export function startTpsMonitor(): void {
   const timer = setInterval(() => {
-    tick(log).catch(() => {});
+    tick().catch(() => {});
   }, SAMPLE_MS);
   timer.unref();
 }

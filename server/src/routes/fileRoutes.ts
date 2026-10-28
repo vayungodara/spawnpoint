@@ -1,15 +1,17 @@
 import type { FastifyInstance } from 'fastify';
-import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, createReadStream, createWriteStream } from 'node:fs';
+import { existsSync, readdirSync, statSync, lstatSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, createReadStream, createWriteStream, realpathSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
-import { join, resolve, sep, dirname, basename } from 'node:path';
+import { join, resolve, sep, dirname, basename, relative } from 'node:path';
 import { chownSync, statSync as statS } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { serverDir } from '../services/servers.js';
+import { liveChanged, assertNoRecovery, stage, stagingPath } from '../services/packtxn.js';
+import { assertNotRequired } from '../services/installer.js';
 
 // WEB FILE MANAGER — browse/edit/upload/download any file under a server's
 // directory from the panel. Every path is confined to the server dir (the one
 // competitor feature Spawnpoint lacked; subsumes SFTP for daily use).
 
-const SERVER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EDIT_MAX = 2 * 1024 * 1024; // editor refuses beyond 2MB — that's not a config file
 
 /** Single-file version of platform.ts's chownToDirOwner: give the written
@@ -23,13 +25,29 @@ function chownFile(p: string): void {
   } catch { /* never fail the caller over ownership */ }
 }
 
-/** Resolve a user path INSIDE the server dir or throw. The resolve()+prefix
-    check is the whole security story — every route funnels through here. */
+/** Resolve a user path inside the server dir or throw. Symlinks in the
+    parent path are followed, so a link cannot lead out. A final symlink is
+    returned as itself (delete and rename act on the link, not its target),
+    but it must point inside too, since reads and writes go through it; a
+    dangling one is refused instead of being written through. */
 function confine(id: string, rel: string): string {
-  const root = resolve(serverDir(id));
+  const root = realpathSync(serverDir(id));
+  const inside = (x: string): boolean => x === root || x.startsWith(root + sep);
+  const escapes = (): Error => new Error('path escapes server directory');
   const p = resolve(join(root, rel));
-  if (p !== root && !p.startsWith(root + sep)) throw new Error('path escapes server directory');
-  return p;
+  if (p === root) return root;
+  const stat = (x: string) => { try { return lstatSync(x); } catch { return null; } };
+  let existing = dirname(p);
+  while (!stat(existing)) existing = dirname(existing);
+  let real: string;
+  try { real = join(realpathSync(existing), relative(existing, p)); } catch { throw escapes(); }
+  if (!inside(real)) throw escapes();
+  if (stat(real)?.isSymbolicLink()) {
+    let target: string;
+    try { target = realpathSync(real); } catch { throw escapes(); }
+    if (!inside(target)) throw escapes();
+  }
+  return real;
 }
 
 function looksBinary(buf: Buffer): boolean {
@@ -39,11 +57,21 @@ function looksBinary(buf: Buffer): boolean {
 }
 
 export default async function fileRoutes(app: FastifyInstance) {
+  // an unfinished apply or undo must roll back against the files it recorded
   app.addHook('preHandler', async (req, reply) => {
-    const id = (req.params as { id?: string })?.id;
-    if (id !== undefined && !SERVER_UUID.test(id)) return reply.code(400).send({ error: 'bad server id' });
+    const id = (req.params as { id?: string }).id;
+    if (!id || req.method === 'GET') return;
+    try { assertNoRecovery(id); } catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
   });
-
+  // any write through the file manager changes what a mod test saw
+  app.addHook('onResponse', async (req, reply) => {
+    const id = (req.params as { id?: string }).id;
+    if (id && req.method !== 'GET' && reply.statusCode < 300) liveChanged(id);
+  });
+  /** removing or renaming a jar in mods/ must not orphan a mod that needs it */
+  const guardJar = (id: string, path: string): void => {
+    if (dirname(path) === join(realpathSync(serverDir(id)), 'mods') && path.endsWith('.jar')) assertNotRequired(id, basename(path));
+  };
   app.get<{ Params: { id: string }; Querystring: { path?: string } }>(
     '/api/servers/:id/files',
     async (req, reply) => {
@@ -116,12 +144,7 @@ export default async function fileRoutes(app: FastifyInstance) {
     },
   );
 
-  // STREAMING UPLOAD — the old base64-in-JSON path made the BROWSER build a
-  // ~1.3x copy of the file as one giant string (a 200MB Physics Mod jar froze
-  // the tab, live 2026-07-21) and capped out at ~70MB server-side. This one
-  // pipes bytes straight to disk. Uploads into mods/ also enter the normal
-  // pipeline: dry-boot preflight + AutoModpack sync, and they appear in
-  // Content → Installed like any panel install.
+  // Uploads stream straight to disk (no base64 copy in the browser).
   app.addContentTypeParser('application/octet-stream', (_req, payload, done) => done(null, payload));
   app.post<{ Params: { id: string }; Querystring: { path?: string; filename?: string } }>(
     '/api/servers/:id/files/upload-stream',
@@ -130,15 +153,22 @@ export default async function fileRoutes(app: FastifyInstance) {
       try {
         const name = String(req.query.filename ?? 'file').replace(/[\\/]/g, '');
         const p = confine(req.params.id, join(req.query.path ?? '', name));
+        // a jar dropped into mods/ is a mod install: it joins the server's
+        // candidate and goes live only after the boot test
+        if (dirname(p) === join(realpathSync(serverDir(req.params.id)), 'mods') && name.endsWith('.jar')) {
+          // a private part file, renamed into place: a test reading the old bytes keeps them
+          const dest = stagingPath(req.params.id, name);
+          const part = `${dest}.${randomBytes(4).toString('hex')}.part`;
+          await pipeline(req.body as NodeJS.ReadableStream, createWriteStream(part));
+          // from here to stage() is synchronous, so nothing can slip in between
+          try { assertNoRecovery(req.params.id); } catch (e) { rmSync(part, { force: true }); throw e; }
+          renameSync(part, dest);
+          const replaces = existsSync(p) ? name : undefined;
+          return { ok: true, candidate: stage(req.params.id, [{ file: name, to: 'mods', replaces }], (m) => app.log.info(m)) };
+        }
         mkdirSync(dirname(p), { recursive: true });
         await pipeline(req.body as NodeJS.ReadableStream, createWriteStream(p));
         chownFile(p);
-        if (/(^|[\\/])mods$/.test(dirname(p)) && name.endsWith('.jar')) {
-          // NO sync here — the preflight syncs after its verdict, so an
-          // unproven jar can never reach friends through a live regenerate
-          const { schedulePreflight } = await import('../services/preflight.js');
-          schedulePreflight(req.params.id, [name], (m) => app.log.info(m));
-        }
         // a dropped .mrpack / CF pack zip is an intent, not just a file — tell
         // the UI what it is so it can offer install / new-server right away
         if (/\.(mrpack|zip)$/i.test(name)) {
@@ -153,52 +183,9 @@ export default async function fileRoutes(app: FastifyInstance) {
     },
   );
 
-  app.post<{ Params: { id: string }; Body: { path: string; filename: string; dataBase64: string } }>(
-    '/api/servers/:id/files/upload',
-    { bodyLimit: 96 * 1024 * 1024 }, // legacy small-file path (base64 inflates 4/3)
-    async (req, reply) => {
-      try {
-        const name = String(req.body.filename ?? 'file').replace(/[\\/]/g, '');
-        const p = confine(req.params.id, join(req.body.path ?? '', name));
-        const data = Buffer.from(String(req.body.dataBase64 ?? ''), 'base64');
-        if (data.length === 0) return reply.code(400).send({ error: 'empty upload' });
-        mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, data);
-        chownFile(p);
-        return { ok: true };
-      } catch (e) {
-        return reply.code(400).send({ error: String((e as Error).message ?? e).slice(0, 200) });
-      }
-    },
-  );
 
-  // ---- DROPPED PACK FILE ACTIONS — a recognized .mrpack / CF pack zip in a
-  // server dir can be poured into THAT server or become a brand-new server.
-  // Both consume the carrier file on success (its content lives on).
-
-  app.post<{ Params: { id: string }; Body: { path: string } }>(
-    '/api/servers/:id/packfile/install',
-    async (req, reply) => {
-      try {
-        const p = confine(req.params.id, req.body.path);
-        const { inspectPackFile, installMrpackFile, installCurseforgeZipFile } = await import('../services/modpack.js');
-        const info = inspectPackFile(p);
-        if (!info) return reply.code(400).send({ error: 'not a Modrinth .mrpack or CurseForge pack zip' });
-        const res = info.kind === 'curseforge'
-          ? await installCurseforgeZipFile(req.params.id, p)
-          : await installMrpackFile(req.params.id, p);
-        if ('error' in res) return reply.code(400).send(res);
-        rmSync(p, { force: true });
-        // no sync here: the preflight gates the whole new set and syncs
-        // after its verdict — unproven pack content never reaches friends
-        const { schedulePreflight } = await import('../services/preflight.js');
-        schedulePreflight(req.params.id, [], (m) => app.log.info(m));
-        return res;
-      } catch (e) {
-        return reply.code(400).send({ error: String((e as Error).message ?? e).slice(0, 200) });
-      }
-    },
-  );
+  // ---- DROPPED PACK FILE — a recognized .mrpack / CF pack zip in a server
+  // dir can become a brand-new server; that consumes the carrier file.
 
   app.post<{ Params: { id: string }; Body: { path: string; name?: string; memGb?: number } }>(
     '/api/servers/:id/packfile/create-server',
@@ -274,6 +261,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       try {
         const from = confine(req.params.id, req.body.from);
         const to = confine(req.params.id, req.body.to);
+        if (from !== to) guardJar(req.params.id, from);
         renameSync(from, to);
         return { ok: true };
       } catch (e) {
@@ -286,14 +274,21 @@ export default async function fileRoutes(app: FastifyInstance) {
     '/api/servers/:id/files/delete',
     async (req, reply) => {
       try {
-        const rel = (req.body.path ?? '').replace(/^[/\\]+|[/\\]+$/g, '');
-        if (rel === '') return reply.code(400).send({ error: 'refusing to delete the server root' });
+        const p = confine(req.params.id, req.body.path ?? '');
+        const root = realpathSync(serverDir(req.params.id));
+        if (p === root) return reply.code(400).send({ error: 'refusing to delete the server root' });
         // the world lives under the Worlds card's journaled machinery — a raw
-        // rm here would bypass backups, slot metadata, and crash recovery
-        if (rel === 'world' || rel === 'worlds') {
+        // rm here would bypass backups, slot metadata, and crash recovery.
+        // Compared by file identity, so "WORLD" on a case-insensitive disk is
+        // caught too; a symlink is deleted as itself, never as the world.
+        const fileId = (x: string): string | null => {
+          try { const s = statSync(x, { bigint: true }); return `${s.dev}:${s.ino}`; } catch { return null; }
+        };
+        const target = lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink() ? null : fileId(p);
+        if (target && [join(root, 'world'), join(root, 'worlds')].some((d) => fileId(d) === target)) {
           return reply.code(400).send({ error: 'use the Worlds card to manage worlds — it backs up first' });
         }
-        const p = confine(req.params.id, rel);
+        guardJar(req.params.id, p);
         rmSync(p, { recursive: true, force: true });
         return { ok: true };
       } catch (e) {

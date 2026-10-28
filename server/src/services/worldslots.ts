@@ -28,10 +28,10 @@ export const SLOT_COUNT = 3;
 const META_DIR = join(PATHS.data, 'worldslots');
 
 interface SlotMeta { name: string; createdAt: string; lastPlayed?: string; pendingSeed?: string }
-/** A switch is two renames. A crash between them used to leave meta pointing
-    at a slot whose directory held the ONLY copy of the live world — and the
-    next switch's "stale copy" rmSync would delete it. The journal records the
-    switch before it starts so `recover()` can finish or unwind it. */
+/** A switch is two renames. A crash between them could leave meta pointing
+    at a slot whose directory holds the only copy of the live world, which the
+    next switch would delete as stale. The journal records the switch before
+    it starts so `recover()` can finish or unwind it. */
 interface Pending { from: number; to: number; stage: 'parking' | 'waking' }
 interface Meta { active: number; slots: Record<string, SlotMeta>; pending?: Pending }
 
@@ -210,9 +210,7 @@ export async function switchSlot(id: string, n: number, opts: { start?: boolean;
   try {
     const r = await doSwitch(id, n, opts);
     // panel runs as root; anything a world op touched must return to the
-    // crafty user or the server can't boot (live 2026-07-19: a reset left
-    // world/ + server.properties root-owned and Horror crashed on start
-    // with "Failed to store properties" until a manual chown)
+    // crafty user or the server can't boot ("Failed to store properties")
     await chownToDirOwner(serverDir(id)).catch(() => {});
     if (r.ok) await clearPregenArtifacts(id);
     finishOp(id, r.ok ? undefined : r.error);

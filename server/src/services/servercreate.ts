@@ -14,7 +14,6 @@ import { javaFor } from './servers.js';
 import { patchProperties } from './properties.js';
 import { derivedRcon, suggestGamePort } from './ports.js';
 import { chownToDirOwner } from './platform.js';
-import { ensureLane } from './lanes.js';
 
 // One-click "create a server FROM a modpack": Crafty's wizard API builds the
 // base server (it downloads Fabric / runs the Forge installer itself), then
@@ -142,15 +141,14 @@ export function listLoaders(): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Every trap a freshly-created server falls into, closed in one place. Each
-// of these cost real debugging time on the "Horror" server (2026-07-13).
+// Every trap a freshly-created server falls into, closed in one place.
 // ---------------------------------------------------------------------------
 
 /** Modded loaders read their heap from user_jvm_args.txt, NOT from the
     -Xmx in Crafty's launch command — so RAM chosen in Crafty silently did
     nothing and the server ran on the JVM default. Vanilla/Fabric/Paper take
     it on the command line. Handle both, always. */
-export function applyMemory(serverId: string, dir: string, execCommand: string, memGb: number): string {
+export function applyMemory(dir: string, execCommand: string, memGb: number): string {
   const min = Math.max(1, Math.min(memGb, Math.round(memGb / 2) || 1));
   const argsFile = join(dir, 'user_jvm_args.txt');
   if (existsSync(argsFile)) {
@@ -221,7 +219,7 @@ export async function finalizeServer(
   }
 
   // 3. RAM, into whichever file this loader actually reads
-  if (cmd && opts.memGb) cmd = applyMemory(serverId, dir, cmd, opts.memGb);
+  if (cmd && opts.memGb) cmd = applyMemory(dir, cmd, opts.memGb);
 
   if (cmd && cmd !== server?.execution_command) {
     await craftyApi.patchServer(serverId, { execution_command: cmd }).catch(() => {
@@ -342,11 +340,7 @@ export function startCreateServer(opts: {
     job.warnings.push(...(await provisionAutoModpack(serverId, opts.loader)));
     await chownToDirOwner(dir); // panel is root, the server is not — see platform.ts
 
-    job.status = 'opening the public front door…';
-    const lane = await ensureLane(serverId, name, port);
-    job.warnings.push(...lane.warnings);
-
-    job.status = `done — "${name}" is ready with ${mem}GB, friends join at ${lane.address}. Press Start.`;
+    job.status = `done — "${name}" is ready with ${mem}GB on port ${port}. Press Start.`;
     job.done = true;
   })().catch((e) => {
     job.error = e instanceof Error ? e.message : String(e);
@@ -359,7 +353,7 @@ export function startCreateServer(opts: {
 
 /** The shared build pipeline behind every "server from a pack" flow: Crafty
     builds the base server, `pour` installs the pack content, then the usual
-    trap-closing (EULA/Java/heap), AutoModpack and the public lane. */
+    trap-closing (EULA/Java/heap) and AutoModpack. */
 async function buildPackServer(
   job: CreateJob,
   meta: { loader: string; mc: string; title: string },
@@ -421,11 +415,7 @@ async function buildPackServer(
   job.warnings.push(...(await provisionAutoModpack(serverId, meta.loader)));
   await chownToDirOwner(dir); // panel is root, the server is not — see platform.ts
 
-  job.status = 'opening the public front door…';
-  const lane = await ensureLane(serverId, name, port);
-  job.warnings.push(...lane.warnings);
-
-  job.status = `done — "${name}" is ready with ${mem}GB, friends join at ${lane.address}. Start it from the Dashboard (first boot takes a few minutes).`;
+  job.status = `done — "${name}" is ready with ${mem}GB on port ${port}. Start it from the Dashboard (first boot takes a few minutes).`;
   job.done = true;
 }
 
@@ -501,8 +491,7 @@ export function startCreateFromPackFile(opts: {
 }
 
 /** All jobs this panel run knows about, newest first — the Servers page shows
-    in-progress creations globally (a server "just appearing" out of nowhere
-    read as a bug, live 2026-07-27). */
+    in-progress creations globally, so a server never "just appears". */
 export function listJobs(): CreateJob[] {
   return [...jobs.values()].reverse();
 }

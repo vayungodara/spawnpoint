@@ -185,8 +185,7 @@ export async function createBackup(uuid: string): Promise<BackupInfo | { error: 
   }
 }
 
-// concurrent backups shared one _staging dir: one's Remove-Item raced the
-// other's Compress-Archive (a double-click on Reset World hit this in prod)
+// one backup per server at a time: concurrent ones would share the _staging dir
 const backingUp = new Set<string>();
 
 async function doBackup(uuid: string): Promise<BackupInfo | { error: string }> {
@@ -208,8 +207,8 @@ async function doBackup(uuid: string): Promise<BackupInfo | { error: string }> {
   await stageAndZipWorld(world, join(stage, 'world'), dest);
   const st = statSync(dest);
   // retention: keep the newest 10 LIVE-WORLD backups. Slot zips (the "even a
-  // reset is recoverable" copies) are never auto-deleted — ten routine backups
-  // used to silently purge the only copy of a reset world.
+  // reset is recoverable" copies) are never auto-deleted: they may be the
+  // only copy of a reset world.
   const rotatable = listBackups(uuid).filter((b) => b.restorable);
   for (const old of rotatable.slice(10)) unlinkSync(join(backupDir(uuid), old.file));
   return { file, sizeMb: Math.round((st.size / 1e6) * 10) / 10, createdAt: st.mtime.toISOString() };

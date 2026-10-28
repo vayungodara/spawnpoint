@@ -14,16 +14,7 @@ import {
   type ChunkyServerConfig,
 } from '../services/chunky.js';
 
-// server ids are Crafty UUIDs; reject anything else so a crafted :id can't
-// traverse out of the servers root via serverDir()'s path.join
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 export default async function chunkyRoutes(app: FastifyInstance) {
-  app.addHook('preHandler', async (req, reply) => {
-    const id = (req.params as { id?: string })?.id;
-    if (id !== undefined && !UUID.test(id)) return reply.code(400).send({ error: 'bad server id' });
-  });
-
   // static option lists the UI renders dropdowns/checkboxes from
   app.get('/api/chunky/options', async () => ({ shapes: SHAPES, dimensions: DIMENSIONS }));
 

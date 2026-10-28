@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useServers } from '../api'
-import bandVault from '../assets/band-vault.png'
+import bandVault from '../assets/band-vault.webp'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = init?.body ? { 'content-type': 'application/json' } : undefined

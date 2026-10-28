@@ -3,6 +3,10 @@ import { existsSync, mkdirSync, writeFileSync, renameSync, rmSync, cpSync, statS
 import { join, dirname, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { serverDir } from './servers.js';
+import { detect } from './detect.js';
+import * as modrinth from '../clients/modrinth.js';
+import * as curseforge from '../clients/curseforge.js';
+import { chownToDirOwner } from './platform.js';
 
 /** Is `target` really inside `root`? A bare startsWith() accepts a SIBLING
     directory that merely shares the prefix (…/<uuid> vs …/<uuid>-evil) —
@@ -30,12 +34,8 @@ function extractSubtree(zip: AdmZip, folder: string, extractRoot: string): boole
   }
   return any;
 }
-import { detect } from './detect.js';
-import * as modrinth from '../clients/modrinth.js';
-import * as curseforge from '../clients/curseforge.js';
-import { chownToDirOwner } from './platform.js';
 
-// Installs a Modrinth modpack (.mrpack) into an EXISTING server:
+// Installs a Modrinth modpack (.mrpack) into a newly created server (servercreate.ts):
 //  - downloads every server-side file from the pack index into the server dir
 //  - applies overrides/ and server-overrides/ (configs, datapacks, etc.)
 // It does NOT change the server's loader — mismatches are rejected up front.
@@ -127,7 +127,7 @@ export async function installModpack(
       mc: det.mc ?? undefined,
       loader: det.loader === 'unknown' ? undefined : det.loader,
     });
-    version = all[0];
+    version = modrinth.bestVersion(all);
   }
   if (!version) {
     return { error: `No modpack version for ${det.mc}/${det.loader}. Try "all versions" and pick a version matching your server.` };
@@ -149,7 +149,7 @@ export async function installModpack(
 }
 
 /** Install a LOCAL .mrpack (dropped into the panel, or just downloaded) into
-    an existing server. All the safety of the search flow — loader mismatch
+    a newly created server. All the safety of the search flow — loader mismatch
     rejected, Zip Slip screened, client-only files skipped. */
 export async function installMrpackFile(
   serverUuid: string,
@@ -221,8 +221,8 @@ export async function installMrpackFile(
   }
 }
 
-// CurseForge modpack (client zip: manifest.json + overrides/) into an
-// EXISTING server. Same contract as the .mrpack flow. One CF limitation:
+// CurseForge modpack (client zip: manifest.json + overrides/) into a
+// newly created server. Same contract as the .mrpack flow. One CF limitation:
 // manifests don't tag client-only mods, so everything installs and the user
 // may need to disable a client-only mod if the server crashes on boot.
 interface CfManifest {
@@ -246,7 +246,7 @@ export async function installCurseforgeModpack(
   if (opts.fileId && !files.some((f) => String(f.id) === opts.fileId)) {
     files = await curseforge.getFiles(opts.modId); // pinned file outside the filter
   }
-  const file = opts.fileId ? files.find((f) => String(f.id) === opts.fileId) : files[0];
+  const file = opts.fileId ? files.find((f) => String(f.id) === opts.fileId) : curseforge.bestFile(files);
   if (!file) {
     return { error: `No pack version for ${det.mc ?? '?'}/${det.loader}. Pick a version matching your server on CurseForge.` };
   }

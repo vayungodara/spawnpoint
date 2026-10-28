@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useServers } from '../api'
-import bandRedstone from '../assets/band-redstone.png'
+import bandRedstone from '../assets/band-redstone.webp'
 import PregenSection from './PregenSection'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -117,7 +117,7 @@ export default function Config() {
   const [applied, setApplied] = useState(false)
   const [resetMsg, setResetMsg] = useState<string | null>(null)
   // the restart-to-apply bar is dismissible: not every saved change deserves an
-  // immediate restart (owner request). Editing anything brings it back.
+  // immediate restart. Editing anything brings it back.
   const [restartDismissed, setRestartDismissed] = useState(false)
   useEffect(() => {
     if (dirty) setRestartDismissed(false)

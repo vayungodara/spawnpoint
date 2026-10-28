@@ -124,7 +124,7 @@ export function renderBlueprint(bp: Blueprint, x: number, y: number, z: number):
 }
 
 // ---- EPISODES — every completed wish becomes a retrievable memory ----------
-// (2026-07-20 research: Voyager/JARVIS-1's core lesson — agents compound when
+// (Voyager/JARVIS-1's core lesson — agents compound when
 // "the last time someone wished something LIKE this" is retrieved before
 // planning, failures included. Token-overlap retrieval; at a few hundred
 // episodes an embedding index buys nothing.)

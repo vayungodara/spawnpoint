@@ -20,7 +20,7 @@ export interface AutobackupConfig {
   lastRunDay?: string; // YYYY-MM-DD guard so one firing per day
 }
 
-const DEFAULTS: AutobackupConfig = { enabled: false, hour: 4, keep: 3 };
+const DEFAULTS: AutobackupConfig = { enabled: true, hour: 4, keep: 3 };
 
 export function loadAutobackup(): AutobackupConfig {
   try {
@@ -59,7 +59,8 @@ function worldChangedSince(uuid: string, sinceIso: string | null): boolean {
 
 function trim(uuid: string, keep: number): void {
   const dir = join(PATHS.root, 'Backups', 'panel', uuid);
-  for (const old of listBackups(uuid).slice(keep)) {
+  // world-slot zips may be the only copy of a reset world: never rotate them
+  for (const old of listBackups(uuid).filter((b) => b.restorable).slice(keep)) {
     try { unlinkSync(join(dir, old.file)); } catch { /* locked - next round */ }
   }
 }
@@ -70,11 +71,14 @@ async function runOnce(log: (msg: string) => void): Promise<void> {
   for (const srv of servers) {
     const id = srv.server_id;
     try {
-      const newest = listBackups(id)[0]?.createdAt ?? null;
+      const newest = listBackups(id).find((b) => b.restorable)?.createdAt ?? null;
       if (!worldChangedSince(id, newest)) continue; // idle since last backup
       const res = await createBackup(id);
-      if ('error' in res) log(`autobackup: ${srv.server_name}: ${res.error}`);
-      else log(`autobackup: ${srv.server_name} -> ${res.file} (${res.sizeMb} MB)`);
+      if ('error' in res) {
+        log(`autobackup: ${srv.server_name}: ${res.error}`);
+        continue;
+      }
+      log(`autobackup: ${srv.server_name} -> ${res.file} (${res.sizeMb} MB)`);
       trim(id, cfg.keep);
     } catch (e) {
       log(`autobackup: ${srv.server_name} failed: ${String(e)}`);

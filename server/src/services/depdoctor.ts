@@ -4,8 +4,10 @@ import { PATHS } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import * as modrinth from '../clients/modrinth.js';
 import { serverDir } from './servers.js';
-import { detect } from './detect.js';
-import { install, clientShelfDir } from './installer.js';
+import { install } from './installer.js';
+import { clientShelfDir } from './servers.js';
+import { updateLedger } from './ledger.js';
+import { settled, assertNoRecovery } from './packtxn.js';
 
 // DEPENDENCY DOCTOR — a failed boot from missing mod dependencies should be
 // fixed in the background, not shown to the owner (his words: "fixed
@@ -71,6 +73,8 @@ function parseConflictMods(log: string): string[] {
 }
 
 async function treat(id: string, log: (m: string) => void): Promise<boolean> {
+  // an unfinished apply or undo is reversed on the next start; leave mods/ alone until then
+  try { assertNoRecovery(id); } catch { return false; }
   const dir = serverDir(id);
   const logFile = join(dir, 'logs', 'latest.log');
   if (!existsSync(logFile)) return false;
@@ -96,27 +100,18 @@ async function treat(id: string, log: (m: string) => void): Promise<boolean> {
 
   const fixed: string[] = [];
 
-  /** move a jar to the client shelf AND flip its install-ledger entry so the
-      pack export still finds (and ships) it — a bare rename desynced the
-      ledger and the pack silently dropped the mod */
+  /** move a jar to the client shelf (AutoModpack still ships it to clients) */
   const shelfJar = (jar: string): void => {
+    assertNoRecovery(id); // re-checked here: the lookups before this awaited
     mkdirSync(clientShelfDir(id), { recursive: true });
     renameSync(join(dir, 'mods', jar), join(clientShelfDir(id), jar));
-    try {
-      const lp = join(PATHS.data, 'install-ledger.json');
-      const ledger = JSON.parse(readFileSync(lp, 'utf8')) as Record<string, { file: string; clientOnly?: boolean }[]>;
-      const e = (ledger[id] ?? []).find((x) => x.file === jar);
-      if (e) {
-        e.clientOnly = true;
-        writeFileSync(lp, JSON.stringify(ledger, null, 2), 'utf8');
-      }
-    } catch { /* ledger untouched — export will warn about the missing jar */ }
+    updateLedger(id, (entries) => entries.map((e) => (e.file === jar ? { ...e, clientOnly: true } : e)));
   };
 
   // 0) a mod whose MISSING hard deps are client-only libraries is itself a
   //    CLIENT mod sitting on a server — installing the deps can never help
-  //    (they shelve themselves as client-only and the requirer keeps failing;
-  //    untitled.log looped exactly this way, live 2026-07-20). Shelf the
+  //    (they shelve themselves as client-only and the requirer keeps failing
+  //    in a loop). Shelf the
   //    REQUIRER: the pack still ships it, the server stops loading it.
   const requirers = new Map<string, string[]>(); // requirer modid -> missing dep ids
   for (const m of text.matchAll(/Mod '[^']+' \(([a-z0-9_-]{2,})\)[^\n]*?of (?:mod '[^']+' \()?([a-z0-9_.-]{2,})\)?,? which is missing/gi)) {
@@ -166,27 +161,29 @@ async function treat(id: string, log: (m: string) => void): Promise<boolean> {
     } catch { /* unknown on modrinth — leave it alone */ }
   }
 
-  // 2) install missing hard deps (mod id == modrinth slug in practice; a miss
-  //    just logs and moves on)
+  // 2) install missing hard deps (a mod id is usually its Modrinth slug, or
+  //    the slug with dashes). They go through a boot-tested candidate.
+  let staged = false;
   for (const dep of missing) {
     try {
-      // modid ≈ slug, but not always: entity_model_features's slug is
-      // entity-model-features (live miss 2026-07-20) — retry with hyphens
       const proj = await modrinth.getProject(dep.id).catch(() => modrinth.getProject(dep.id.replace(/_/g, '-')));
-      const r = await install(id, { projectId: proj.id, type: 'mod', force: true });
-      if ('installed' in r && r.installed.length) {
-        fixed.push(...r.installed.map((i) => i.title));
-      }
+      const r = await install(id, { projectId: proj.id, type: 'mod' }, log);
+      if (r.candidate) staged = true;
+      else if (r.installed.length) fixed.push(...r.installed.map((i) => i.title));
     } catch {
-      log(`depdoctor: ${dep.id} not found on Modrinth — cannot auto-fix, leaving the log for a human`);
+      log(`depdoctor: ${dep.id} not found on Modrinth, so it cannot be fixed automatically`);
     }
+  }
+  if (staged) {
+    const c = await settled(id);
+    if (c?.status === 'applied') fixed.push(...c.files.map((f) => f.entry?.title ?? f.file));
+    else log(`depdoctor: the fix for ${id} was not applied (${c?.detail ?? 'unknown'})`);
   }
 
   if (!fixed.length) return false;
-  log(`depdoctor: auto-fixed boot of ${detect(dir, id).mc ?? '?'} server ${id}: ${fixed.join(', ')} — restarting`);
-  // shelved/installed jars must reach the synced modpack too (regenerates on boot)
-  const { syncAutoModpack } = await import('./automodpack.js');
-  await syncAutoModpack(id, log);
+  log(`depdoctor: fixed the boot of server ${id} (${fixed.join(', ')}), restarting`);
+  const { publishPack } = await import('./automodpack.js');
+  await publishPack(id, log);
   await craftyApi.action(id, 'start_server').catch(() => {});
   return true;
 }

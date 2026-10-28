@@ -4,7 +4,6 @@ import { PATHS } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import { serverDir } from './servers.js';
 import { isRunningSafe, createBackup, beginMaintenance, endMaintenance } from './maintenance.js';
-import { cleanupOrphanLanes } from './lanes.js';
 
 // SERVER DELETION — the last operation that still required opening Crafty.
 // Order matters: world backup FIRST (a deleted server must stay recoverable,
@@ -77,15 +76,6 @@ export async function deleteServer(
     }
 
     cleanPanelState(id, problems);
-    // lane/SRV/firewall teardown rides the existing janitor logic against the
-    // fresh server list — same path the daily cleanup uses
-    try {
-      const live = new Set((await craftyApi.listServers()).map((s) => s.server_id));
-      const r = await cleanupOrphanLanes(live, () => {});
-      problems.push(...r.problems);
-    } catch (e) {
-      problems.push(`lane cleanup failed (the daily janitor will retry): ${String(e).slice(0, 100)}`);
-    }
 
     return { ok: true, backedUp, problems: problems.length ? problems : undefined };
   } finally {

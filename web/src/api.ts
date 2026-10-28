@@ -12,7 +12,6 @@ export interface ServerInfo {
   path: string
   active: boolean
   detection: Detection
-  address: string | null
 }
 export interface Stats {
   running: boolean

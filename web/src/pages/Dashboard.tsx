@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
 import { useServers, useStats, useLogs, useServerAction, useSendCommand, useAutostop, useSetAutostop } from '../api'
 import { Pi } from '../components/PixelIcons'
-import bandControl from '../assets/band-control.png'
+import bandControl from '../assets/band-control.webp'
 
 function fallbackCopy(text: string, onDone: () => void) {
   const ta = document.createElement('textarea')
@@ -173,7 +173,6 @@ function PlayersLiveCard({ serverId, running }: { serverId: string; running: boo
       return r.json()
     },
     onSuccess: (_r, p) => { setNote(`✓ ${p.action} ${p.name}`); setMsgFor(null); setMsgText(''); setTimeout(() => setNote(null), 4000) },
-    // errors used to pin forever — clear them like successes
     onError: (e) => { setNote(`✗ ${String(e)}`); setTimeout(() => setNote(null), 8000) },
   })
   if (!running || !data || data.offline) return null
@@ -218,12 +217,12 @@ function PlayersLiveCard({ serverId, running }: { serverId: string; running: boo
 }
 
 // task scheduler: daily/interval automations (restart, announce, command,
-// start/stop, loud/quiet) driven by a 30s tick on the panel
+// start/stop) driven by a 30s tick on the panel
 interface SchedTask { id: string; enabled: boolean; serverId: string; kind: string; arg?: string; schedule: { type: 'daily' | 'interval'; time?: string; minutes?: number }; lastRun?: string }
 
 const KIND_LABEL: Record<string, string> = {
   restart: 'restart server', announce: 'announce', command: 'run command',
-  start: 'start server', stop: 'stop server (if empty)', loud: 'PC loud mode', quiet: 'PC quiet mode',
+  start: 'start server', stop: 'stop server (if empty)',
 }
 
 function SchedulerCard({ serverId }: { serverId: string }) {
@@ -859,57 +858,6 @@ function CleanerRow() {
   )
 }
 
-// host CPU profile: loud = full turbo, quiet = 90% cap + no boost. Same
-// switches as the desktop "Loud/Quiet Mode" bats, now flippable remotely.
-function PerfModeRow() {
-  const qc = useQueryClient()
-  const [err, setErr] = useState<string | null>(null)
-  const { data } = useQuery({
-    queryKey: ['perfmode'],
-    queryFn: async () => (await (await fetch('/api/perfmode')).json()) as { mode: 'loud' | 'quiet' | 'unknown' },
-  })
-  const set = useMutation({
-    mutationFn: async (loud: boolean) => {
-      const r = await fetch('/api/perfmode', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ loud }),
-      })
-      const j = await r.json()
-      if (!r.ok) throw new Error(j.error ?? r.statusText)
-      return j
-    },
-    onSuccess: () => { setErr(null); qc.invalidateQueries({ queryKey: ['perfmode'] }) },
-    onError: (e) => setErr(String(e).replace(/^Error: /, '')),
-  })
-  if (!data || data.mode === 'unknown') return null
-  const loud = data.mode === 'loud'
-  return (
-    <div className="block px-4 py-3">
-      <div className="flex items-center gap-4 flex-wrap">
-        <button
-          className="lever"
-          data-on={loud}
-          disabled={set.isPending}
-          onClick={() => set.mutate(!loud)}
-          aria-label="Toggle loud mode"
-        />
-        <div className="min-w-0">
-          <div className="text-sm font-bold flex items-center gap-2">
-            <Pi i="bolt" className="pi pi-s" /> Loud mode <span className="hud">PC · {loud ? 'FULL TURBO' : 'QUIET 90%'}</span>
-          </div>
-          <div className="text-text-dim text-xs mt-0.5">
-            {loud
-              ? 'full CPU speed + turbo boost — max performance, louder fans'
-              : 'CPU capped at 90%, turbo off — cool and near-silent, ~5-15% slower peaks'}
-          </div>
-        </div>
-      </div>
-      {err && <div className="text-xs font-semibold text-redstone mt-2.5 pt-2.5 border-t-2 border-line/40">✗ {err}</div>}
-    </div>
-  )
-}
-
 function fmtMem(mem: number | string): string {
   if (typeof mem === 'string') return mem
   if (mem > 1e9) return `${(mem / 1e9).toFixed(1)} GB`
@@ -1014,11 +962,6 @@ export default function Dashboard() {
   const logRef = useRef<HTMLDivElement>(null)
   const cpuHist = useRef<number[]>([])
 
-  const { data: playit } = useQuery({
-    queryKey: ['playit'],
-    queryFn: async () => (await fetch('/api/playit/address')).json() as Promise<{ address: string | null }>,
-    staleTime: 5 * 60_000,
-  })
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
@@ -1099,8 +1042,10 @@ export default function Dashboard() {
     })
   }
 
+  // friends join at the host this browser reached the panel by, on the server's port
+  const joinAddress = active ? (active.port === 25565 ? location.hostname : `${location.hostname}:${active.port}`) : ''
   const copyJoin = () => {
-    const text = active?.address ?? playit?.address
+    const text = joinAddress
     if (!text) return
     const done = () => {
       setNotice('✓ Join address copied — send it to your friends')
@@ -1183,13 +1128,11 @@ export default function Dashboard() {
 
       {notice && <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{notice}</div>}
 
-      {(active.address ?? playit?.address) && (
-        <button onClick={copyJoin} className="btn btn-block w-full sm:w-auto px-5 py-3 text-left flex items-center gap-4" title="Click to copy">
-          <span className="hud !opacity-100 text-emerald shrink-0">JOIN AT</span>
-          <span className="font-mono text-sm font-bold truncate">{active.address ?? playit?.address}</span>
-          <span className="hud shrink-0">CLICK TO COPY</span>
-        </button>
-      )}
+      <button onClick={copyJoin} className="btn btn-block w-full sm:w-auto px-5 py-3 text-left flex items-center gap-4" title="Click to copy">
+        <span className="hud !opacity-100 text-emerald shrink-0">JOIN AT</span>
+        <span className="font-mono text-sm font-bold truncate">{joinAddress}</span>
+        <span className="hud shrink-0">CLICK TO COPY</span>
+      </button>
 
       {/* ============ the Anvil ============ */}
       <div className="apanel">
@@ -1198,8 +1141,7 @@ export default function Dashboard() {
             className={`ph-dot ${booting ? 'animate-pulse' : running ? '' : stats?.crashed ? 'ph-dot-crash' : 'ph-dot-off'}`}
             style={booting ? { background: 'var(--color-gold)', boxShadow: '0 0 8px var(--color-gold)' } : undefined}
           />
-          <b>anvil</b>
-          <span className="truncate">· {active.address ?? playit?.address ?? `${active.name}.local:25565`}</span>
+          <b className="truncate">{active.name}</b>
           <span className="ml-auto shrink-0" style={{ color: 'var(--color-emerald)' }}>
             CPU <b style={{ color: 'inherit' }}>{running ? `${stats?.cpu ?? 0}%` : '—'}</b>
           </span>
@@ -1357,9 +1299,6 @@ export default function Dashboard() {
           )}
         </div>
       </div>
-
-      {/* PC loud/quiet mode (powercfg on the host) */}
-      <PerfModeRow />
 
       {/* task scheduler */}
       <SchedulerCard serverId={active.id} />

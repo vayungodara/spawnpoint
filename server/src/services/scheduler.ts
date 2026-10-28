@@ -5,7 +5,6 @@ import { PATHS } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import { rconCommand } from '../clients/rcon.js';
 import { serverPhase } from './phase.js';
-import { setPerfMode } from './perfmode.js';
 import { isRunningSafe, isUnderMaintenance } from './maintenance.js';
 
 // Task scheduler: "restart daily at 04:00", "announce every 2h", "run this
@@ -15,7 +14,7 @@ import { isRunningSafe, isUnderMaintenance } from './maintenance.js';
 
 const FILE = join(PATHS.data, 'scheduler.json');
 
-export type TaskKind = 'restart' | 'command' | 'announce' | 'start' | 'stop' | 'loud' | 'quiet';
+export type TaskKind = 'restart' | 'command' | 'announce' | 'start' | 'stop';
 
 export interface Schedule {
   type: 'daily' | 'interval';
@@ -164,12 +163,6 @@ async function run(t: SchedTask, log: (m: string) => void): Promise<void> {
       await craftyApi.action(t.serverId, 'stop_server');
       return;
     }
-    case 'loud':
-      await setPerfMode(true);
-      return;
-    case 'quiet':
-      await setPerfMode(false);
-      return;
   }
 }
 

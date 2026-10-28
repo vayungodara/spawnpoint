@@ -129,8 +129,8 @@ function parseBlockStateString(s: string): PaletteEntry {
 function decodeSchem(root: Tag): Grid {
   let c = comp(root);
   // legacy MCEdit .schematic (pre-1.13): numeric block ids in Blocks/Data byte
-  // arrays, no Palette. It used to die deep in the parser with a cryptic
-  // "NBT: expected compound" — name the real problem and the way out instead.
+  // arrays, no Palette. Name the format and the way out instead of failing
+  // deep in the parser.
   if (c['Blocks'] && c['Data'] && !c['Palette'] && !c['Schematic']) {
     throw new Error(
       'this is a legacy MCEdit .schematic (pre-1.13 numeric block ids) — open it in Amulet or WorldEdit and re-export as a modern .schem, then upload that',
@@ -333,11 +333,10 @@ function tileToStructure(g: Grid, ox: number, oy: number, oz: number, tw: number
     entities: nList(TAG.Compound, []),
     blocks: nList(TAG.Compound, blocks),
     palette: nList(TAG.Compound, paletteTags),
-    // Stamp the version the BUILD WAS MADE IN, not ours. This is the whole point
-    // of DataVersion: it tells the target server's DataFixer how far forward to
-    // migrate the blocks. Lying about it (we used to hardcode 26.2's 4903) tells
-    // the fixer "already current" and it does nothing — so a 1.20.1 build's
-    // `grass` never becomes `short_grass` and lands as AIR instead.
+    // Stamp the version the build was made in, not ours: DataVersion tells the
+    // target server's DataFixer how far to migrate the blocks. A too-new value
+    // skips the migration, so a 1.20.1 build's `grass` would land as air
+    // instead of `short_grass`.
     DataVersion: nInt(g.dataVersion || DATA_VERSION),
   });
   return { nbt: writeNbt(root), blocks: blocks.length };
@@ -507,7 +506,7 @@ function downgradeSchematic(meta: SchematicMeta, targetDv: number): SchematicMet
       // BLOCK-ENTITY ITEMS use the modern stack shape from 1.20.5 on
       // ({id, count:int, components}) — a pre-1.20.5 server reading that
       // silently drops the item, so every downgraded dispenser/chest arrived
-      // EMPTY (live 2026-07-20: the mega farm's 352 water dispensers). Convert
+      // EMPTY. Convert
       // to the legacy shape: count(int)→Count(byte), components dropped
       // (enchants on container loot are lost; the item itself survives).
       if (targetDv < 3837) downgradeItemStacks(root);
@@ -525,11 +524,11 @@ function downgradeSchematic(meta: SchematicMeta, targetDv: number): SchematicMet
 
 // ---- redstone auto-update pass ----
 // `place template` writes blocks without update propagation, so circuits can
-// arrive frozen (owner report 2026-07-19: farm redstone dead on arrival) and
+// arrive frozen and
 // wires crossing TILE SEAMS never learn about the neighboring tile at all.
 // The cure is to re-fire updates over every component: clone-in-place with
 // `force` re-places each block "as if by setblock", which re-evaluates state.
-// Verified live 2026-07-20 on 1.20.1: harmless on a healthy circuit (torch/
+// Verified on 1.20.1: harmless on a healthy circuit (torch/
 // wire/lamp states unchanged, block entities preserved), and any component
 // that needed an update gets one. Only redstone-BEARING volumes are cloned —
 // a decorative build adds zero commands.
@@ -614,9 +613,7 @@ export function stagePlacement(serverId: string, name: string, x: number, y: num
   // A build from a NEWER Minecraft than this server cannot be placed. The
   // DataFixer only migrates data forward — it has no downgrade path — so every
   // block that does not exist on this server is read as AIR, silently, with no
-  // error at all. The 26.2 mansion on the 1.20.1 server would stamp with no
-  // stairs, no trapdoors, no signs and no plants, and the genie would report
-  // success. Refuse loudly instead of shipping a hollow house.
+  // error at all, and the build would land hollow. Refuse instead.
   const worldDv = worldDataVersion(serverId);
   // Entries imported BEFORE we recorded the source version have no meta.dataVersion.
   // Their tiles carry our old hardcoded 4903 stamp, which is what the server will
@@ -624,7 +621,7 @@ export function stagePlacement(serverId: string, name: string, x: number, y: num
   // refuses a 26.2 build on the 1.20.1 server.
   const schemDv = meta.dataVersion || tileDataVersion(meta);
   if (schemDv && worldDv && schemDv > worldDv) {
-    // AUTO-DOWNGRADE (2026-07-19): instead of refusing, convert — re-stamp the
+    // AUTO-DOWNGRADE: instead of refusing, convert — re-stamp the
     // DataVersion and map renamed/new block ids to this era's equivalents.
     // Safety comes from the machinery that already exists: the post-place
     // sample probes catch a hollow result honestly, and the undo snapshot

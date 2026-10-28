@@ -2,8 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { PATHS } from '../config.js';
-import { serverDir } from './servers.js';
-import { clientShelfDir } from './installer.js';
+import { serverDir, clientShelfDir } from './servers.js';
 import { rconCommand } from '../clients/rcon.js';
 
 // BOBBY FALLBACK EXPORT — Bobby (client mod) renders chunks beyond the

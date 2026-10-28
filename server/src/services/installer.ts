@@ -1,355 +1,282 @@
 import { createHash } from 'node:crypto';
-import {
-  existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync,
-  renameSync, unlinkSync, statSync,
-} from 'node:fs';
-import { join, basename, dirname } from 'node:path';
-import { chownToDirOwner } from './platform.js';
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, statSync } from 'node:fs';
+import { join, basename } from 'node:path';
+import { chownToDirOwner, writeFileAtomic } from './platform.js';
 import { PATHS } from '../config.js';
-import { serverDir } from './servers.js';
-import { detect } from './detect.js';
-import { craftyApi } from '../clients/crafty.js';
+import { serverDir, clientShelfDir } from './servers.js';
+import { detect, type Detection } from './detect.js';
 import * as modrinth from '../clients/modrinth.js';
 import * as curseforge from '../clients/curseforge.js';
 import type { ContentType, Version } from '../clients/modrinth.js';
 import { queueChange, listPending, applyPending, type PendingAction } from './pendingmods.js';
+import { ledgerEntries, updateLedger, type LedgerEntry } from './ledger.js';
+import { stage, stagedFiles, stagingPath, invalidate, assertNoRecovery, type Candidate, type StagedFile } from './packtxn.js';
+import { scanJars } from './jardeps.js';
 
-// The install engine: version-matched downloads, recursive REQUIRED-dependency
-// resolution, old-version dedup, and a ledger so installed jars stay
-// identifiable. Direct port of Add-PerfMods.ps1's Fetch with extra safety.
-
-interface LedgerEntry {
-  file: string;
-  projectId: string;
-  versionId: string;
-  versionNumber: string;
-  title: string;
-  source: 'modrinth' | 'curseforge';
-  sha1: string;
-  installedAt: string;
-  via?: 'direct' | 'dependency'; // dependency = auto-installed support mod
-  categories?: string[]; // Modrinth categories - drives auto-grouping
-  /** lives on the CLIENT SHELF (data/clientmods/<id>/), never in the server's
-      mods/ — in the exported pack, invisible to the server, zero boot risk */
-  clientOnly?: boolean;
-}
-type Ledger = Record<string, LedgerEntry[]>; // serverUuid -> entries
-
-function loadLedger(): Ledger {
-  try {
-    return JSON.parse(readFileSync(PATHS.ledgerFile, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-function saveLedger(l: Ledger): void {
-  mkdirSync(PATHS.data, { recursive: true });
-  writeFileSync(PATHS.ledgerFile, JSON.stringify(l, null, 2), 'utf8');
-}
-
-/** Flip a ledger entry to client-only after its jar was MOVED to the shelf
-    (preflight's client-crash self-heal) — uninstall and dedup resolve the
-    jar's directory through this flag, so a stale false would point them at a
-    mods/ path that no longer exists. No entry = hand-placed jar, nothing to fix. */
-export function markClientOnly(serverUuid: string, file: string): void {
-  const ledger = loadLedger();
-  const e = (ledger[serverUuid] ?? []).find((x) => x.file === file);
-  if (!e || e.clientOnly) return;
-  e.clientOnly = true;
-  saveLedger(ledger);
-}
-
-function targetDir(uuid: string, type: ContentType): string {
-  const dir = serverDir(uuid);
-  if (type === 'mod') return join(dir, 'mods');
-  if (type === 'plugin') return join(dir, 'plugins'); // Bukkit-family jars load from here, NOT mods/
-  if (type === 'datapack') return join(dir, 'world', 'datapacks');
-  return PATHS.downloads; // resourcepacks/shaders are client-side -> collection
-}
-
-/** Content that lands in the server folder (vs. the client downloads collection). */
-const SERVER_SIDE_TYPES: ContentType[] = ['mod', 'plugin', 'datapack'];
-const isServerType = (t: ContentType): boolean => SERVER_SIDE_TYPES.includes(t);
-
-/** Where THIS server's jars live. Bukkit-family servers have no mods/ folder at
- *  all — their jars load from plugins/ — so the installed list, toggle and
- *  delete all have to follow the loader instead of assuming mods/. */
-/** Client-only mods live OUTSIDE the server dir: the server can't load what
-    it can't see, so a client-only mod can never crash a boot. The pack export
-    reads them from here. */
-export function clientShelfDir(uuid: string): string {
-  return join(PATHS.data, 'clientmods', uuid);
-}
-
-function jarDir(uuid: string): string {
-  const dir = serverDir(uuid);
-  return modrinth.isPluginLoader(detect(dir, uuid).loader) ? join(dir, 'plugins') : join(dir, 'mods');
-}
-
-async function isRunning(uuid: string): Promise<boolean> {
-  try {
-    return (await craftyApi.getStats(uuid)).running;
-  } catch {
-    return false;
-  }
-}
+// The install engine: picks the right build for the server's MC version and
+// loader (releases first), resolves required dependencies (keeping any copy
+// that is already installed), refuses builds their authors mark incompatible
+// with something installed, and downloads with a checksum. Mods for modded
+// servers go into the server's candidate (packtxn.ts) and reach the live
+// folders only after a boot test. Plugins and datapacks install directly.
 
 export interface InstallResult {
   installed: { file: string; title: string; version: string; clientOnly?: boolean }[];
   skipped: { projectId: string; reason: string }[];
   warnings: string[];
   restartRequired: boolean;
-  /** a refusal the player must act on (e.g. the same mod is already installed
-      from the other source, and two copies would stop the server booting) */
+  /** a refusal the player must act on (incompatible or duplicate mod) */
   error?: string;
-  /** CurseForge authors can forbid API downloads (downloadUrl: null). That is
-      a hard wall — no panel can fetch the file. Surfaced as STRUCTURED data so
-      the UI can show a real "download it yourself" prompt with a link, instead
-      of burying it in a warning string the player scrolls past. */
+  /** CurseForge authors can forbid API downloads; these need a manual download */
   manualDownloads?: { title: string; url: string }[];
+  /** the mod change these files joined; they go live only after it passes */
+  candidate?: Candidate;
+  /** why this install went live without a boot test */
+  untested?: string;
 }
 
-/** Modrinth and CurseForge use DIFFERENT id spaces for the same mod (CF is
- *  numeric, Modrinth is base62), so a mod installed from one source is invisible
- *  to the other: it shows an "Install" button again, the dedup (which matches on
- *  project id) does not fire, and you end up with TWO jars of the same mod in
- *  mods/ — which Fabric and Forge both refuse to boot with ("duplicate mod").
- *  Titles are the only identity the two sources share, so normalise and compare. */
+export interface InstallOpts {
+  projectId: string;
+  versionId?: string;
+  type: ContentType;
+  /** accepted for older clients; installs no longer ask for confirmation */
+  force?: boolean;
+  /** write straight into the live folders: only for a server being created */
+  direct?: boolean;
+}
+
+/** One file the plan wants installed. */
+interface Planned {
+  url: string;
+  size?: number;
+  sha1?: string;
+  entry: LedgerEntry;
+  replaces?: string;
+}
+
+const MOD_LOADERS = new Set(['fabric', 'forge', 'neoforge']);
+
+function targetDir(uuid: string, type: ContentType): string {
+  const dir = serverDir(uuid);
+  if (type === 'mod') return join(dir, 'mods');
+  if (type === 'plugin') return join(dir, 'plugins'); // Bukkit-family jars load from plugins/
+  if (type === 'datapack') return join(dir, 'world', 'datapacks');
+  return PATHS.downloads; // resource and shader packs are client-side
+}
+
+/** Where this server's jars live: plugins/ on Bukkit-family servers, mods/ otherwise. */
+function jarDir(uuid: string): string {
+  const dir = serverDir(uuid);
+  return modrinth.isPluginLoader(detect(dir, uuid).loader) ? join(dir, 'plugins') : join(dir, 'mods');
+}
+
+async function isRunning(uuid: string): Promise<boolean> {
+  const { craftyApi } = await import('../clients/crafty.js');
+  return craftyApi.getStats(uuid).then((s) => s.running, () => false);
+}
+
+/** What is installed or already staged, by project id. A ledger entry whose
+    file is gone does not count. */
+function knownProjects(serverUuid: string): Map<string, LedgerEntry> {
+  const dirs = [jarDir(serverUuid), clientShelfDir(serverUuid), join(serverDir(serverUuid), 'world', 'datapacks')];
+  const known = new Map<string, LedgerEntry>();
+  for (const e of ledgerEntries(serverUuid)) {
+    if (dirs.some((d) => existsSync(join(d, e.file)))) known.set(e.projectId, e);
+  }
+  for (const f of stagedFiles(serverUuid)) if (f.entry) known.set(f.entry.projectId, f.entry);
+  return known;
+}
+
+/** Modrinth and CurseForge ids never match, so the same mod from the other
+    source shows up only by title. Two copies of one mod stop a server booting. */
 const titleKey = (t: string): string => t.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-function crossSourceDuplicate(serverUuid: string, title: string, projectId: string): LedgerEntry | null {
-  const key = titleKey(title);
-  return (
-    (loadLedger()[serverUuid] ?? []).find((e) => e.projectId !== projectId && titleKey(e.title) === key) ?? null
-  );
+class Refusal extends Error {}
+
+async function fetchFile(url: string, sha1?: string): Promise<Buffer> {
+  const res = await fetch(url, { headers: { 'user-agent': 'spawnpoint/1.0' }, redirect: 'follow' });
+  if (!res.ok) throw new Error(`download failed (${res.status})`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (sha1 && createHash('sha1').update(buf).digest('hex') !== sha1) throw new Error('download failed its checksum');
+  return buf;
 }
 
-// installs actively downloading — the batched preflight consults this so it
-// never dry-boots a HALF-INSTALLED folder (live 2026-08-02: a 17-mod spree
-// was judged while YungsApi was still in flight, FML saw it "[MISSING]" and
-// the gate convicted all 19 jars of a race condition)
-let installsInFlight = 0;
-let lastInstallDone = 0;
-/** busy = an install is downloading OR one finished moments ago — a user
-    mid-spree clicks installs seconds apart, and a dry-boot fired into one of
-    those gaps judges a folder that is still growing */
-export function installerBusy(): boolean {
-  return installsInFlight > 0 || Date.now() - lastInstallDone < 15_000;
-}
 
-export async function install(
-  serverUuid: string,
-  opts: { projectId: string; versionId?: string; type: ContentType; force?: boolean },
-): Promise<InstallResult | { needsConfirm: true; reason: string }> {
-  installsInFlight++;
-  try {
-    return await installInner(serverUuid, opts);
-  } finally {
-    installsInFlight--;
-    lastInstallDone = Date.now();
+
+/** Download a plan and either stage it (mods on modded servers) or write it
+    straight into the live folders. */
+async function commit(serverUuid: string, det: Detection, type: ContentType, plan: Planned[], direct: boolean, result: InstallResult, log: (m: string) => void): Promise<InstallResult> {
+  const viaCandidate = type === 'mod' && MOD_LOADERS.has(det.loader) && !direct;
+  const staged: { file: StagedFile; buf: Buffer }[] = [];
+  const written: LedgerEntry[] = [];
+  for (const p of plan) {
+    const clientOnly = !!p.entry.clientOnly;
+    let buf: Buffer;
+    try {
+      buf = await fetchFile(p.url, p.sha1);
+    } catch (e) {
+      result.skipped.push({ projectId: p.entry.title, reason: String((e as Error).message ?? e) });
+      continue;
+    }
+    result.installed.push({ file: p.entry.file, title: p.entry.title, version: p.entry.versionNumber, ...(clientOnly ? { clientOnly: true } : {}) });
+    if (viaCandidate) {
+      staged.push({ file: { file: p.entry.file, to: clientOnly ? 'shelf' : 'mods', replaces: p.replaces, entry: p.entry }, buf });
+    } else {
+      writeFileAtomic(join(clientOnly ? clientShelfDir(serverUuid) : targetDir(serverUuid, type), p.entry.file), buf);
+      if (p.replaces && p.replaces !== p.entry.file) {
+        for (const d of [targetDir(serverUuid, type), clientShelfDir(serverUuid)]) {
+          try { unlinkSync(join(d, p.replaces)); } catch { /* not there */ }
+        }
+      }
+      written.push(p.entry);
+    }
   }
+  // one synchronous step from the first staged byte to stage(): a running
+  // test sees the generation change before any file under it is replaced
+  if (staged.length) {
+    // a running test must not pass on bytes about to be replaced, even if a
+    // write below fails before stage() registers the batch
+    assertNoRecovery(serverUuid);
+    invalidate(serverUuid);
+    const known = new Set(stagedFiles(serverUuid).map((f) => f.file));
+    const written: string[] = [];
+    try {
+      for (const s of staged) {
+        writeFileAtomic(stagingPath(serverUuid, s.file.file), s.buf);
+        written.push(s.file.file);
+      }
+    } catch (e) {
+      // files this batch added, not ones it replaced, are orphans: remove them
+      for (const f of written) if (!known.has(f)) rmSync(stagingPath(serverUuid, f), { force: true });
+      throw e;
+    }
+    result.candidate = stage(serverUuid, staged.map((s) => s.file), log);
+  }
+  if (written.length) {
+    const names = new Set(written.map((e) => e.file));
+    const replaced = new Set(plan.map((p) => p.replaces).filter(Boolean));
+    updateLedger(serverUuid, (entries) => entries.filter((e) => !names.has(e.file) && !replaced.has(e.file)).concat(written));
+    if (type === 'mod' || type === 'plugin' || type === 'datapack') {
+      await chownToDirOwner(targetDir(serverUuid, type));
+      if (!direct) result.untested = type === 'mod' ? `Spawnpoint cannot boot-test ${det.loader} servers yet` : `${type}s are not boot-tested`;
+    }
+  }
+  return result;
 }
 
-async function installInner(
-  serverUuid: string,
-  opts: { projectId: string; versionId?: string; type: ContentType; force?: boolean },
-): Promise<InstallResult | { needsConfirm: true; reason: string }> {
+const noLog = (): void => {};
+
+export async function install(serverUuid: string, opts: InstallOpts, log: (m: string) => void = noLog): Promise<InstallResult> {
   const { type } = opts;
   const det = detect(serverDir(serverUuid), serverUuid);
-  const isServerContent = isServerType(type);
-
-  // The SAME mod from the OTHER source is a hard stop, not a warning: Modrinth and
-  // CurseForge ids never match, so the dedup (which keys on project id) would not
-  // fire and mods/ would end up holding two jars of one mod — which Fabric and
-  // Forge both refuse to boot with ("duplicate mod").
-  if (isServerContent) {
-    const proj = await modrinth.getProject(opts.projectId).catch(() => null);
-    const dup = proj ? crossSourceDuplicate(serverUuid, proj.title, opts.projectId) : null;
-    if (dup) {
-      return {
-        installed: [], skipped: [], warnings: [], restartRequired: false,
-        error: `"${proj!.title}" is already installed from ${dup.source === 'curseforge' ? 'CurseForge' : 'Modrinth'} as ${dup.file}. Installing it again from the other source would put TWO copies of the same mod in the folder and the server would refuse to start ("duplicate mod"). Delete the existing one in the Installed tab first.`,
-      };
-    }
-  }
-
-  if (isServerContent && !opts.force && (await isRunning(serverUuid))) {
-    return {
-      needsConfirm: true,
-      reason: 'Server is running. New files load on next restart; replacing a loaded mod may fail (file locked).',
-    };
-  }
-
-  const dir = targetDir(serverUuid, type);
-  mkdirSync(dir, { recursive: true });
-
+  const isServerContent = type === 'mod' || type === 'plugin' || type === 'datapack';
   const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: isServerContent };
-  const ledger = loadLedger();
-  const entries = (ledger[serverUuid] ??= []);
-  const visited = new Set<string>();
+  const known = knownProjects(serverUuid);
+  const filter =
+    type === 'mod' || type === 'plugin'
+      ? { mc: det.mc ?? undefined, loader: det.loader === 'unknown' ? undefined : det.loader }
+      : type === 'datapack' ? { mc: det.mc ?? undefined, loader: 'datapack' } : {};
+  const fits = (v: Version): boolean => (!filter.mc || v.game_versions.includes(filter.mc)) && (!filter.loader || v.loaders.includes(filter.loader));
+  const plan: Planned[] = [];
+  const seen = new Set<string>();
 
-  const fetchOne = async (projectId: string, pinnedVersionId?: string | null, isDep = false): Promise<void> => {
-    if (visited.has(projectId)) return;
-    visited.add(projectId);
-
-    let version: Version | undefined;
-    if (pinnedVersionId) {
-      try {
-        version = await modrinth.getVersion(pinnedVersionId);
-      } catch {
-        /* fall through to version search */
-      }
-    }
+  const visit = async (projectId: string, pinned: string | null | undefined, isDep: boolean): Promise<void> => {
+    if (seen.has(projectId) || (isDep && known.has(projectId))) return;
+    seen.add(projectId);
+    let version = pinned ? await modrinth.getVersion(pinned).catch(() => undefined) : undefined;
+    // a dependency pinned to a build for another MC version or loader is replaced by the best fitting one
+    if (version && isDep && !fits(version)) version = undefined;
+    version ??= modrinth.bestVersion(await modrinth.getVersions(projectId, filter).catch(() => []));
     if (!version) {
-      const filter =
-        type === 'mod' || type === 'plugin'
-          ? { mc: det.mc ?? undefined, loader: det.loader === 'unknown' ? undefined : det.loader }
-          : type === 'datapack'
-            ? { mc: det.mc ?? undefined, loader: 'datapack' }
-            : {};
-      const versions = await modrinth.getVersions(projectId, filter);
-      version = versions[0];
-    }
-    if (!version) {
-      result.skipped.push({
-        projectId,
-        reason: `no build for ${det.mc ?? '?'}/${det.loader}`,
-      });
+      result.skipped.push({ projectId, reason: `no build for ${det.mc ?? '?'}/${det.loader}` });
       return;
     }
-    visited.add(version.project_id);
-
+    seen.add(version.project_id);
+    if (isDep && known.has(version.project_id)) return; // keep the copy already installed
+    const existing = known.get(version.project_id);
+    if (existing?.versionId === version.id) {
+      result.skipped.push({ projectId, reason: 'already installed' });
+      return;
+    }
     const file = version.files.find((f) => f.primary) ?? version.files[0];
     if (!file) {
       result.skipped.push({ projectId, reason: 'version has no files' });
       return;
     }
-
     const proj = await modrinth.getProject(version.project_id).catch(() => null);
-    // CLIENT-ONLY DETECTION: Modrinth says the server can't use it → it goes to
-    // the client shelf, not mods/. Still listed, still exported, never loaded.
+    const title = proj?.title ?? version.name;
+    if (isServerContent && !existing) {
+      const dup = [...known.values()].find((e) => e.source === 'curseforge' && titleKey(e.title) === titleKey(title));
+      if (dup) throw new Refusal(`"${title}" is already installed from CurseForge as ${dup.file}. Two copies of one mod stop the server booting; delete that one first.`);
+    }
+    for (const dep of version.dependencies) {
+      const other = dep.dependency_type === 'incompatible' && dep.project_id ? known.get(dep.project_id) : undefined;
+      if (other) throw new Refusal(`${title} is marked incompatible with ${other.title} by its author.`);
+    }
+    // a mod Modrinth says the server cannot run goes to the client shelf
     const clientOnly = type === 'mod' && !!proj && proj.server_side === 'unsupported' && proj.client_side !== 'unsupported';
-    const destDir = clientOnly ? clientShelfDir(serverUuid) : dir;
-    mkdirSync(destDir, { recursive: true });
-
-    // dedup: remove older files of the SAME project (identified via ledger — no
-    // fuzzy name matching, so lithium never deletes fabric-api etc.)
-    // READ FROM ledger[serverUuid], NOT the captured `entries`: each fetchOne
-    // REPLACES ledger[serverUuid] with a filtered copy, so the captured array
-    // goes stale after the first mod — rebuilding from it silently DROPPED the
-    // parent mod's ledger entry whenever a dependency install followed it
-    // (found 2026-07-19: Oculus lost its entry when Embeddium came after).
-    for (const old of (ledger[serverUuid] ?? []).filter((e) => e.projectId === version!.project_id && e.file !== file.filename)) {
-      const oldPath = join(old.clientOnly ? clientShelfDir(serverUuid) : dir, old.file);
-      if (existsSync(oldPath)) {
-        try {
-          unlinkSync(oldPath);
-        } catch {
-          result.warnings.push(`old version locked, kept: ${old.file} (delete after restart)`);
-        }
-      }
-    }
-    // drop older files of the same project AND any prior entry for this exact
-    // file — reinstalling appended forever (13 Faithful rows, live 2026-08-02:
-    // the owner kept clicking because the UI showed nothing)
-    ledger[serverUuid] = (ledger[serverUuid] ?? []).filter((e) => e.projectId !== version!.project_id && e.file !== file.filename);
-
-    const dest = join(destDir, file.filename);
-    if (!existsSync(dest) || statSync(dest).size !== file.size) {
-      const res = await fetch(file.url, { headers: { 'user-agent': 'spawnpoint/1.0' } });
-      if (!res.ok) {
-        result.skipped.push({ projectId, reason: `download failed (${res.status})` });
-        return;
-      }
-      const buf = Buffer.from(await res.arrayBuffer());
-      const tmp = `${dest}.part`;
-      writeFileSync(tmp, buf);
-      try {
-        renameSync(tmp, dest);
-      } catch {
-        unlinkSync(tmp);
-        result.warnings.push(`${file.filename} is locked by the running server — stop it and retry`);
-        return;
-      }
-      await chownToDirOwner(dirname(dest)); // panel is root, the server is not — see platform.ts
-    }
-
-    ledger[serverUuid].push({
-      file: file.filename,
-      projectId: version.project_id,
-      versionId: version.id,
-      versionNumber: version.version_number,
-      title: proj?.title ?? version.name,
-      source: 'modrinth',
-      sha1: file.hashes.sha1,
-      installedAt: new Date().toISOString(),
-      via: isDep ? 'dependency' : 'direct',
-      categories: proj?.categories,
-      ...(clientOnly ? { clientOnly: true } : {}),
+    plan.push({
+      url: file.url, size: file.size, sha1: file.hashes.sha1, replaces: existing?.file,
+      entry: {
+        file: file.filename, projectId: version.project_id, versionId: version.id, versionNumber: version.version_number,
+        title, source: 'modrinth', sha1: file.hashes.sha1, installedAt: new Date().toISOString(),
+        via: isDep ? 'dependency' : 'direct', categories: proj?.categories, ...(clientOnly ? { clientOnly: true } : {}),
+      },
     });
-    result.installed.push({
-      file: file.filename,
-      title: proj?.title ?? version.name,
-      version: version.version_number,
-      ...(clientOnly ? { clientOnly: true } : {}),
-    });
-
-    // recurse into REQUIRED dependencies (mods/plugins — packs have none)
     if (type === 'mod' || type === 'plugin') {
       for (const dep of version.dependencies.filter((d) => d.dependency_type === 'required' && d.project_id)) {
-        await fetchOne(dep.project_id!, dep.version_id, true);
+        await visit(dep.project_id!, dep.version_id, true);
       }
     }
   };
 
-  await fetchOne(opts.projectId, opts.versionId);
-  saveLedger(ledger);
-  return result;
+  try {
+    await visit(opts.projectId, opts.versionId, false);
+    await refuseReverseIncompatible(serverUuid, plan);
+  } catch (e) {
+    if (e instanceof Refusal) return { ...result, error: e.message };
+    throw e;
+  }
+  return commit(serverUuid, det, type, plan, !!opts.direct, result, log);
+}
+
+/** An installed mod whose author marks a planned one incompatible blocks the plan too. */
+async function refuseReverseIncompatible(serverUuid: string, plan: Planned[]): Promise<void> {
+  const planned = new Set(plan.map((p) => p.entry.projectId));
+  const replacing = new Set(plan.map((p) => p.replaces).filter(Boolean));
+  const installed = [...knownProjects(serverUuid).values()].filter((e) => e.source === 'modrinth' && !replacing.has(e.file) && !planned.has(e.projectId));
+  if (!installed.length || !planned.size) return;
+  const versions = await modrinth.getVersionsBulk(installed.map((e) => e.versionId)).catch(() => []);
+  for (const v of versions) {
+    const clash = v.dependencies.find((d) => d.dependency_type === 'incompatible' && d.project_id && planned.has(d.project_id));
+    if (clash) {
+      const mine = installed.find((e) => e.versionId === v.id)?.title ?? v.name;
+      const theirs = plan.find((p) => p.entry.projectId === clash.project_id)?.entry.title ?? 'this mod';
+      throw new Refusal(`${mine} (installed) is marked incompatible with ${theirs} by its author.`);
+    }
+  }
 }
 
 export type ModGroup = 'performance' | 'support' | 'gameplay';
 
-/** CurseForge install: same ledger/dedup/dep-recursion contract as install().
-    Handles mods, datapacks, and client-side packs/shaders (-> downloads
-    collection). Modpacks go through installCurseforgeModpack instead. */
+/** CurseForge install: same contract as install(). CurseForge has no client/
+    server flag, so sides are borrowed from the Modrinth listing with the same slug. */
 export async function installCurseforge(
   serverUuid: string,
-  opts: { modId: string; fileId?: string; type?: ContentType; force?: boolean },
-): Promise<InstallResult | { needsConfirm: true; reason: string }> {
-  installsInFlight++;
-  try {
-    return await installCurseforgeInner(serverUuid, opts);
-  } finally {
-    installsInFlight--;
-    lastInstallDone = Date.now();
-  }
-}
-
-async function installCurseforgeInner(
-  serverUuid: string,
-  opts: { modId: string; fileId?: string; type?: ContentType; force?: boolean },
-): Promise<InstallResult | { needsConfirm: true; reason: string }> {
+  opts: { modId: string; fileId?: string; type?: ContentType; force?: boolean; direct?: boolean },
+  log: (m: string) => void = noLog,
+): Promise<InstallResult> {
   const type: ContentType = opts.type ?? 'mod';
   const det = detect(serverDir(serverUuid), serverUuid);
-  const isServerContent = isServerType(type);
-  if (isServerContent && !opts.force && (await isRunning(serverUuid))) {
-    return {
-      needsConfirm: true,
-      reason: 'Server is running. New files load on next restart; replacing a loaded mod may fail (file locked).',
-    };
-  }
-  const dir = targetDir(serverUuid, type);
-  mkdirSync(dir, { recursive: true });
-
+  const isServerContent = type === 'mod' || type === 'plugin' || type === 'datapack';
   const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: isServerContent };
-  const ledger = loadLedger();
-  const entries = (ledger[serverUuid] ??= []);
-  const visited = new Set<string>();
+  const known = knownProjects(serverUuid);
+  const plan: Planned[] = [];
+  const seen = new Set<string>();
 
-  const fetchOne = async (modId: string, pinnedFileId?: string, isDep = false): Promise<void> => {
-    if (visited.has(modId)) return;
-    visited.add(modId);
-
+  const visit = async (modId: string, pinnedFileId: string | undefined, isDep: boolean): Promise<void> => {
+    if (seen.has(modId) || (isDep && known.has(modId))) return;
+    seen.add(modId);
     const mod = await curseforge.getMod(modId).catch(() => null);
     if (!mod) {
       result.skipped.push({ projectId: modId, reason: 'project not found on CurseForge' });
@@ -357,142 +284,61 @@ async function installCurseforgeInner(
     }
     const files = await curseforge.getFiles(modId, {
       mc: det.mc ?? undefined,
-      // loader only constrains mods — packs/shaders/datapacks are loader-free
+      // only mods are loader-specific
       loader: type === 'mod' && det.loader !== 'unknown' ? det.loader : undefined,
     });
-    const file = pinnedFileId ? files.find((f) => String(f.id) === pinnedFileId) ?? files[0] : files[0];
+    const file = (pinnedFileId && files.find((f) => String(f.id) === pinnedFileId)) || curseforge.bestFile(files);
     if (!file) {
       result.skipped.push({ projectId: mod.name, reason: `no build for ${det.mc ?? '?'}/${det.loader}` });
       return;
     }
-    // CurseForge's API has no usable client/server-side flag, so a CF install
-    // of a CLIENT-ONLY mod (EMF/ETF, live 2026-07-21) used to land in the
-    // server's mods/ and die in the dry-boot ("invalid dist DEDICATED_SERVER")
-    // — while the Modrinth path shelved the same mod correctly. Borrow the
-    // sides from Modrinth by slug, exactly like the CF search already does.
-    let clientOnly = false;
-    if (type === 'mod' && mod.slug) {
-      try {
-        const { getProjects } = await import('../clients/modrinth.js');
-        const [cross] = await getProjects([mod.slug]);
-        clientOnly = !!cross && cross.server_side === 'unsupported' && cross.client_side !== 'unsupported';
-      } catch { /* CF-exclusive mod — no cross-listing, treat as server-side */ }
-    }
-    const destDir = clientOnly ? clientShelfDir(serverUuid) : dir;
-    if (clientOnly) mkdirSync(destDir, { recursive: true });
-    if (!file.downloadUrl) {
-      // CONFIRMED opt-out: CurseForge itself returns a null downloadUrl, which
-      // only happens when the author ticked "no third-party downloads". It is
-      // not a transient failure and no retry will help.
-      (result.manualDownloads ??= []).push({
-        title: mod.name,
-        url: mod.links?.websiteUrl ?? `https://www.curseforge.com/minecraft/mc-mods/${modId}`,
-      });
-      result.warnings.push(`${mod.name}: the author blocked API downloads — download the jar yourself`);
+    const existing = known.get(String(mod.id));
+    if (existing?.versionId === String(file.id)) {
+      result.skipped.push({ projectId: mod.name, reason: 'already installed' });
       return;
     }
-
-    // dedup older files of the same CF project via ledger identity
-    for (const old of entries.filter(
-      (e) => e.source === 'curseforge' && e.projectId === String(mod.id) && e.file !== file.fileName,
-    )) {
-      const oldPath = join(old.clientOnly ? clientShelfDir(serverUuid) : dir, old.file);
-      if (existsSync(oldPath)) {
-        try {
-          unlinkSync(oldPath);
-        } catch {
-          result.warnings.push(`old version locked, kept: ${old.file} (delete after restart)`);
-        }
-      }
+    if (isServerContent && !existing) {
+      const dup = [...known.values()].find((e) => e.source === 'modrinth' && titleKey(e.title) === titleKey(mod.name));
+      if (dup) throw new Refusal(`"${mod.name}" is already installed from Modrinth as ${dup.file}. Two copies of one mod stop the server booting; delete that one first.`);
     }
-    ledger[serverUuid] = ledger[serverUuid].filter(
-      (e) => e.source !== 'curseforge' || e.projectId !== String(mod.id) || e.file === file.fileName,
-    );
-
-    const dest = join(destDir, file.fileName);
-    if (!existsSync(dest)) {
-      const res = await fetch(file.downloadUrl, { headers: { 'user-agent': 'spawnpoint/1.0' } });
-      if (!res.ok) {
-        result.skipped.push({ projectId: mod.name, reason: `download failed (${res.status})` });
-        return;
-      }
-      const buf = Buffer.from(await res.arrayBuffer());
-      const tmp = `${dest}.part`;
-      writeFileSync(tmp, buf);
-      try {
-        renameSync(tmp, dest);
-      } catch {
-        unlinkSync(tmp);
-        result.warnings.push(`${file.fileName} is locked by the running server — stop it and retry`);
-        return;
-      }
-      await chownToDirOwner(dirname(dest)); // panel is root, the server is not — see platform.ts
+    for (const dep of file.dependencies) {
+      const other = dep.relationType === curseforge.RELATION.incompatible ? known.get(String(dep.modId)) : undefined;
+      if (other) throw new Refusal(`${mod.name} is marked incompatible with ${other.title} by its author.`);
     }
-
-    if (!ledger[serverUuid].some((e) => e.file === file.fileName)) {
-      ledger[serverUuid].push({
-        file: file.fileName,
-        projectId: String(mod.id),
-        versionId: String(file.id),
-        versionNumber: file.displayName,
-        title: mod.name,
-        source: 'curseforge',
-        sha1: file.hashes.find((h) => h.algo === 1)?.value ?? '',
-        installedAt: new Date().toISOString(),
-        via: isDep ? 'dependency' : 'direct',
-        categories: curseforge.mapCategories(mod.categories),
-        ...(clientOnly ? { clientOnly: true } : {}),
-      });
-      result.installed.push({ file: file.fileName, title: mod.name, version: file.displayName, ...(clientOnly ? { clientOnly: true } : {}) });
+    if (!file.downloadUrl) {
+      // the author ticked "no third-party downloads"; no retry will help
+      (result.manualDownloads ??= []).push({ title: mod.name, url: mod.links?.websiteUrl ?? `https://www.curseforge.com/minecraft/mc-mods/${modId}` });
+      result.warnings.push(`${mod.name}: the author blocked API downloads, so download the jar yourself`);
+      return;
     }
-
+    let clientOnly = false;
+    if (type === 'mod' && mod.slug) {
+      const [cross] = await modrinth.getProjects([mod.slug]).catch(() => []);
+      clientOnly = !!cross && cross.server_side === 'unsupported' && cross.client_side !== 'unsupported';
+    }
+    const sha1 = file.hashes.find((h) => h.algo === 1)?.value;
+    plan.push({
+      url: file.downloadUrl, sha1, replaces: existing?.file,
+      entry: {
+        file: file.fileName, projectId: String(mod.id), versionId: String(file.id), versionNumber: file.displayName,
+        title: mod.name, source: 'curseforge', sha1: sha1 ?? '', installedAt: new Date().toISOString(),
+        via: isDep ? 'dependency' : 'direct', categories: curseforge.mapCategories(mod.categories), ...(clientOnly ? { clientOnly: true } : {}),
+      },
+    });
     if (type === 'mod') {
-      for (const dep of file.dependencies.filter((d) => d.relationType === 3)) {
-        await fetchOne(String(dep.modId), undefined, true);
+      for (const dep of file.dependencies.filter((d) => d.relationType === curseforge.RELATION.required)) {
+        await visit(String(dep.modId), undefined, true);
       }
     }
   };
 
-  await fetchOne(opts.modId, opts.fileId);
-  saveLedger(ledger);
-  return result;
-}
-
-interface PerfManifest {
-  mods: { slug: string; match: string; optional?: boolean; note?: string }[];
-}
-
-/** Install the curated performance pack (Shared\perf-mods.json).
-    Mods with no build for this server's version/loader are skipped with a
-    warning — that's expected, not an error. */
-export async function installPerfPack(
-  serverUuid: string,
-  opts: { includeOptional?: boolean; force?: boolean } = {},
-): Promise<InstallResult | { needsConfirm: true; reason: string }> {
-  if (!opts.force && (await isRunning(serverUuid))) {
-    return {
-      needsConfirm: true,
-      reason: 'Server is running. The pack installs fine but loads on next restart; replacing a loaded mod may fail.',
-    };
+  try {
+    await visit(opts.modId, opts.fileId, false);
+  } catch (e) {
+    if (e instanceof Refusal) return { ...result, error: e.message };
+    throw e;
   }
-  const manifest = JSON.parse(
-    readFileSync(PATHS.perfManifest, 'utf8').replace(/^﻿/, ''),
-  ) as PerfManifest;
-
-  const combined: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: true };
-  for (const m of manifest.mods) {
-    if (m.optional && !opts.includeOptional) continue;
-    try {
-      const r = await install(serverUuid, { projectId: m.slug, type: 'mod', force: true });
-      if ('needsConfirm' in r) continue; // force:true makes this unreachable
-      combined.installed.push(...r.installed);
-      combined.skipped.push(...r.skipped);
-      combined.warnings.push(...r.warnings);
-    } catch (e) {
-      combined.warnings.push(`${m.slug}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  return combined;
+  return commit(serverUuid, det, type, plan, !!opts.direct, result, log);
 }
 
 export interface InstalledItem {
@@ -512,15 +358,6 @@ export interface InstalledItem {
   kind?: 'resourcepack' | 'shader';
 }
 
-// perf-pack membership by filename pattern (from Shared\perf-mods.json)
-function perfPatterns(): string[] {
-  try {
-    const m = JSON.parse(readFileSync(PATHS.perfManifest, 'utf8')) as { mods: { match: string }[] };
-    return m.mods.map((x) => x.match.toLowerCase());
-  } catch {
-    return [];
-  }
-}
 // CurseForge file fingerprint: MurmurHash2 (seed 1) over the file bytes with
 // whitespace (\t \n \r space) removed — that's CF's exact algorithm.
 function cfFingerprint(buf: Buffer): number {
@@ -559,11 +396,9 @@ const KNOWN_SUPPORT = ['fabric-api', 'collective', 'almanac', 'placebo', 'balm',
 function classify(
   file: string,
   via: 'direct' | 'dependency' | 'unknown',
-  perf: string[],
   categories?: string[],
 ): ModGroup {
   const f = file.toLowerCase();
-  if (perf.some((p) => f.includes(p))) return 'performance';
   // Modrinth's own taxonomy decides for anything new
   if (categories?.includes('optimization')) return 'performance';
   if (categories?.includes('library')) return 'support';
@@ -581,7 +416,7 @@ export async function listInstalled(serverUuid: string): Promise<InstalledItem[]
 
   const dir = jarDir(serverUuid);
   if (!existsSync(dir)) return [];
-  const ledger = loadLedger()[serverUuid] ?? [];
+  const ledger = ledgerEntries(serverUuid);
   const byFile = new Map(ledger.map((e) => [e.file, e]));
 
   const files = readdirSync(dir).filter((f) => f.endsWith('.jar') || f.endsWith('.jar.disabled'));
@@ -650,23 +485,22 @@ export async function listInstalled(serverUuid: string): Promise<InstalledItem[]
     }
 
     // persist identifications so we never re-hash these files
-    const l = loadLedger();
-    const existing = new Set((l[serverUuid] ?? []).map((e) => e.file));
-    const fresh = [...byFile.values()].filter((e) => e.installedAt === '' && !existing.has(e.file));
+    const fresh = [...byFile.values()].filter((e) => e.installedAt === '');
     if (fresh.length > 0) {
-      l[serverUuid] = [...(l[serverUuid] ?? []), ...fresh];
-      saveLedger(l);
+      updateLedger(serverUuid, (entries) => {
+        const have = new Set(entries.map((e) => e.file));
+        return entries.concat(fresh.filter((e) => !have.has(e.file)));
+      });
     }
   }
 
-  const perf = perfPatterns();
   // client-shelf items ride along: never in mods/, always in the export
   const shelf = clientShelfDir(serverUuid);
   const shelfItems: InstalledItem[] = existsSync(shelf)
     ? readdirSync(shelf)
         .filter((f) => f.endsWith('.jar'))
         .map((f) => {
-          const entry = byFile.get(f) ?? (loadLedger()[serverUuid] ?? []).find((e) => e.file === f);
+          const entry = byFile.get(f) ?? ledger.find((e) => e.file === f);
           return {
             file: f,
             enabled: true,
@@ -682,9 +516,8 @@ export async function listInstalled(serverUuid: string): Promise<InstalledItem[]
         })
     : [];
   // client ASSETS (resourcepacks/shaders) live in the synced pack, not in
-  // mods/ — they were invisible to this inventory, so installs looked like
-  // no-ops and the owner reinstalled Faithful 64x thirteen times looking for
-  // proof (live 2026-08-02). Surface them; deleteInstalled knows their paths.
+  // mods/, so list them here too or installs look like no-ops.
+  // deleteInstalled knows their paths.
   const assetItems: InstalledItem[] = [];
   const amMain = join(serverDir(serverUuid), 'automodpack', 'host-modpack', 'main');
   for (const [folder, kind] of [['resourcepacks', 'resourcepack'], ['shaderpacks', 'shader']] as const) {
@@ -718,7 +551,7 @@ export async function listInstalled(serverUuid: string): Promise<InstalledItem[]
       versionNumber: entry?.versionNumber ?? null,
       projectId: entry?.projectId ?? null,
       sizeMb: Math.round((statSync(join(dir, f)).size / 1e6) * 10) / 10,
-      group: classify(clean, via, perf, entry?.categories),
+      group: classify(clean, via, entry?.categories),
       via,
       source: entry?.source ?? null,
       pending: pendingByFile.get(clean),
@@ -740,93 +573,60 @@ export interface UpdateInfo {
 /** Compare every ledgered jar against the newest matching Modrinth build. */
 export async function checkUpdates(serverUuid: string): Promise<UpdateInfo[]> {
   const det = detect(serverDir(serverUuid), serverUuid);
-  const entries = loadLedger()[serverUuid] ?? [];
-  const updates: UpdateInfo[] = [];
-  for (const e of entries) {
-    try {
-      if (e.source === 'curseforge') {
-        const files = await curseforge.getFiles(e.projectId, {
-          mc: det.mc ?? undefined,
-          loader: det.loader === 'unknown' ? undefined : det.loader,
-        });
-        const latest = files[0];
-        if (latest && String(latest.id) !== e.versionId) {
-          const changelog = await curseforge
-            .getChangelog(e.projectId, latest.id)
-            .then((c) => c.slice(0, 1500))
-            .catch(() => undefined);
-          updates.push({
-            file: e.file,
-            title: e.title,
-            from: e.versionNumber,
-            to: latest.displayName,
-            projectId: e.projectId,
-            versionId: String(latest.id),
-            source: 'curseforge',
-            changelog,
-          });
-        }
-        continue;
-      }
-      const versions = await modrinth.getVersions(e.projectId, {
-        mc: det.mc ?? undefined,
-        loader: det.loader === 'unknown' ? undefined : det.loader,
-      });
-      const latest = versions[0];
-      if (latest && latest.id !== e.versionId) {
-        updates.push({
-          file: e.file,
-          title: e.title,
-          from: e.versionNumber,
-          to: latest.version_number,
-          projectId: e.projectId,
-          versionId: latest.id,
-          source: 'modrinth',
-          changelog: latest.changelog?.slice(0, 1500) ?? undefined,
-        });
-      }
-    } catch {
-      /* project gone or offline — skip */
+  const filter = { mc: det.mc ?? undefined, loader: det.loader === 'unknown' ? undefined : det.loader };
+  // an "update" is only ever newer than what is installed: a release
+  // preference or a pinned line must not offer a downgrade
+  const check = async (e: LedgerEntry): Promise<UpdateInfo | null> => {
+    if (e.source === 'curseforge') {
+      const files = await curseforge.getFiles(e.projectId, filter);
+      const latest = curseforge.bestFile(files);
+      const current = files.find((f) => String(f.id) === e.versionId);
+      if (!latest || String(latest.id) === e.versionId || (current && latest.fileDate <= current.fileDate)) return null;
+      const changelog = await curseforge.getChangelog(e.projectId, latest.id).then((c) => c.slice(0, 1500)).catch(() => undefined);
+      return { file: e.file, title: e.title, from: e.versionNumber, to: latest.displayName, projectId: e.projectId, versionId: String(latest.id), source: 'curseforge', changelog };
     }
+    const versions = await modrinth.getVersions(e.projectId, filter);
+    const latest = modrinth.bestVersion(versions);
+    const current = versions.find((v) => v.id === e.versionId);
+    if (!latest || latest.id === e.versionId || (current && latest.date_published <= current.date_published)) return null;
+    return { file: e.file, title: e.title, from: e.versionNumber, to: latest.version_number, projectId: e.projectId, versionId: latest.id, source: 'modrinth', changelog: latest.changelog?.slice(0, 1500) ?? undefined };
+  };
+  const entries = ledgerEntries(serverUuid);
+  const updates: UpdateInfo[] = [];
+  for (let i = 0; i < entries.length; i += 8) {
+    const batch = await Promise.all(entries.slice(i, i + 8).map((e) => check(e).catch(() => null)));
+    updates.push(...batch.filter((u): u is UpdateInfo => !!u));
   }
   return updates;
 }
 
-/** Install every available update (reuses the dedup/ledger logic). */
-export async function updateAll(
-  serverUuid: string,
-): Promise<{ updated: string[]; warnings: string[]; serverJars: string[] }> {
-  const updates = await checkUpdates(serverUuid);
-  const updated: string[] = [];
-  const warnings: string[] = [];
-  const serverJars: string[] = [];
-  for (const u of updates) {
-    const res =
-      u.source === 'curseforge'
-        ? await installCurseforge(serverUuid, { modId: u.projectId, fileId: u.versionId, force: true })
-        : await install(serverUuid, { projectId: u.projectId, versionId: u.versionId, type: 'mod', force: true });
-    if ('installed' in res && res.installed.length) {
-      updated.push(`${u.title} ${u.from} -> ${u.to}`);
-      warnings.push(...res.warnings);
-      serverJars.push(...res.installed.filter((x) => !x.clientOnly).map((x) => x.file));
-    }
-  }
-  return { updated, warnings, serverJars };
+/** A plugin update must land in plugins/, not mods/. */
+function contentTypeOf(serverUuid: string, file: string): ContentType {
+  return existsSync(join(serverDir(serverUuid), 'plugins', file)) ? 'plugin' : 'mod';
 }
 
-/** Windows will not let you rename or delete a file the running JVM has open, so
- *  every enable/disable/delete fails with EBUSY while the server is up. The raw
- *  error escaped as a 500 and the UI (whose toggle had no error handler) just
- *  did nothing at all — the click looked broken. Say what actually happened. */
-const LOCKED = (clean: string) =>
-  new Error(
-    `"${clean}" is open by the running server — Windows will not let it be renamed or deleted while the server is up. Stop the server, then try again.`,
-  );
+/** Install every available update; mods join the server's candidate. */
+export async function updateAll(serverUuid: string, log: (m: string) => void = noLog): Promise<{ updated: string[]; warnings: string[]; candidate?: Candidate }> {
+  const updated: string[] = [];
+  const warnings: string[] = [];
+  let candidate: Candidate | undefined;
+  for (const u of await checkUpdates(serverUuid)) {
+    const res = u.source === 'curseforge'
+      ? await installCurseforge(serverUuid, { modId: u.projectId, fileId: u.versionId, type: contentTypeOf(serverUuid, u.file) }, log)
+      : await install(serverUuid, { projectId: u.projectId, versionId: u.versionId, type: contentTypeOf(serverUuid, u.file) }, log);
+    if (res.installed.length) updated.push(`${u.title} ${u.from} -> ${u.to}`);
+    if (res.error) warnings.push(res.error);
+    warnings.push(...res.warnings);
+    candidate = res.candidate ?? candidate;
+  }
+  return { updated, warnings, candidate };
+}
 
 export function toggleInstalled(
   serverUuid: string,
   file: string,
 ): { enabled: boolean; pending?: PendingAction } {
+  assertNoRecovery(serverUuid);
   const dir = jarDir(serverUuid);
   const clean = basename(file); // no path traversal
   if (existsSync(join(clientShelfDir(serverUuid), clean))) {
@@ -837,6 +637,7 @@ export function toggleInstalled(
   const isOn = existsSync(jar);
   if (!isOn && !existsSync(disabled)) throw new Error(`${clean} not found`);
 
+  if (isOn) assertNotRequired(serverUuid, clean);
   try {
     if (isOn) {
       renameSync(jar, disabled);
@@ -856,9 +657,23 @@ export function toggleInstalled(
   }
 }
 
+/** Refuse to take out a jar that other installed mods require: nothing
+    boot-tests a removal, so this is the check that keeps it safe. */
+export function assertNotRequired(serverUuid: string, file: string): void {
+  const jars = [jarDir(serverUuid), clientShelfDir(serverUuid)].flatMap((d) =>
+    existsSync(d) ? readdirSync(d).filter((f) => f.endsWith('.jar')).map((f) => join(d, f)) : []);
+  if (!jars.some((p) => basename(p) === file)) return;
+  const before = new Set(scanJars(jars, true).missing);
+  const after = scanJars(jars.filter((p) => basename(p) !== file), true);
+  const needers = [...new Set(after.missing.filter((m) => !before.has(m)).flatMap((m) => after.requesters[m] ?? []))];
+  if (needers.length) throw new Error(`${file} is required by ${needers.join(', ')}; remove ${needers.length === 1 ? 'that' : 'those'} first`);
+}
+
 export function deleteInstalled(serverUuid: string, file: string): { pending?: PendingAction } {
+  assertNoRecovery(serverUuid);
   const dir = jarDir(serverUuid);
   const clean = basename(file);
+  assertNotRequired(serverUuid, clean);
   const amMain = join(serverDir(serverUuid), 'automodpack', 'host-modpack', 'main');
   for (const p of [
     join(dir, clean), join(dir, `${clean}.disabled`), join(clientShelfDir(serverUuid), clean),
@@ -869,17 +684,13 @@ export function deleteInstalled(serverUuid: string, file: string): { pending?: P
       try {
         unlinkSync(p);
       } catch (e) {
-        if (!/EBUSY|EPERM|EACCES/i.test(String((e as NodeJS.ErrnoException).code ?? e))) throw LOCKED(clean);
+        if (!/EBUSY|EPERM|EACCES/i.test(String((e as NodeJS.ErrnoException).code ?? e))) throw e;
         // locked by the running server — queue it instead of refusing (see pendingmods.ts)
         queueChange(serverUuid, clean, 'delete');
         return { pending: 'delete' };
       }
     }
   }
-  const ledger = loadLedger();
-  if (ledger[serverUuid]) {
-    ledger[serverUuid] = ledger[serverUuid].filter((e) => e.file !== clean);
-    saveLedger(ledger);
-  }
+  updateLedger(serverUuid, (entries) => entries.filter((e) => e.file !== clean));
   return {};
 }

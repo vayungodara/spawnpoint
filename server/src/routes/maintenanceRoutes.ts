@@ -4,7 +4,6 @@ import { autostopStatus, saveAutostop, type AutostopConfig } from '../services/a
 import { listConfigs, readConfig, writeConfig } from '../services/modconfigs.js';
 import { loadHud, saveHud, type HudConfig } from '../services/ingamehud.js';
 import { sweepCrashedClientMods } from '../services/clientsweep.js';
-import { getPerfMode, setPerfMode } from '../services/perfmode.js';
 import { loadGenie, saveGenie, genieBusy, injectWish, type GenieConfig } from '../services/chatgenie.js';
 import { scanAll, clean } from '../services/cleaner.js';
 import { listSlots, renameSlot, switchSlot, resetSlot, worldOpProgress } from '../services/worldslots.js';
@@ -154,13 +153,11 @@ export default async function maintenanceRoutes(app: FastifyInstance) {
   app.get('/api/chatgenie', async () => loadGenie());
   app.get('/api/chatgenie/busy', async () => genieBusy());
 
-  // localhost-only wish injection: the ONLY way to E2E-verify the genie without
-  // a player in-game (RCON say never reaches latest.log on either era —
-  // verified live, so the chat carrier physically cannot be driven remotely)
+  // test hook: queue a wish as if a player typed it (RCON `say` never reaches
+  // the chat log, so this is how the genie is tested without a player)
   app.post<{ Body: { serverId: string; player?: string; wish: string; secret?: boolean } }>(
     '/api/chatgenie/testwish',
     async (req, reply) => {
-      if (req.ip !== '127.0.0.1' && req.ip !== '::1') return reply.code(403).send({ error: 'localhost only' });
       if (!req.body?.serverId || !req.body?.wish) return reply.code(400).send({ error: 'serverId and wish required' });
       injectWish(req.body.serverId, req.body.player ?? loadGenie().players[0] ?? 'Player', String(req.body.wish).slice(0, 300), !!req.body.secret, (m) => app.log.info(m));
       return { ok: true };
@@ -168,16 +165,6 @@ export default async function maintenanceRoutes(app: FastifyInstance) {
   );
   app.put<{ Body: Partial<GenieConfig> }>('/api/chatgenie', async (req) => saveGenie(req.body ?? {}));
 
-  app.get('/api/perfmode', async () => getPerfMode());
-  app.put<{ Body: { loud: boolean } }>('/api/perfmode', async (req, reply) => {
-    try {
-      return await setPerfMode(!!req.body.loud);
-    } catch {
-      return reply.code(500).send({
-        error: 'powercfg was denied — the panel is not elevated right now. Use the "Loud Mode"/"Quiet Mode" bat on the PC, or reboot (the boot task relaunches the panel elevated).',
-      });
-    }
-  });
 
   app.post<{ Params: { id: string } }>('/api/servers/:id/sweep-crash', async (req) =>
     sweepCrashedClientMods(req.params.id),

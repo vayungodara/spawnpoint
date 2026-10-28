@@ -1,17 +1,25 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { renameSync, statSync, symlinkSync, linkSync, copyFileSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { renameSync, statSync, symlinkSync, linkSync, copyFileSync, unlinkSync, mkdirSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { cp, rm } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 
 const run = promisify(execFile);
 
-// One switch for the whole codebase. The panel historically ran only on
-// Windows (PowerShell, robocopy, taskkill, .exe java paths); every one of
-// those calls now lives behind a helper here so the same build runs on the
-// Linux box after the migration. The Windows branches are byte-identical to
-// the pre-port code — nothing changes until the OS does.
+// Every OS-specific call (PowerShell, robocopy, taskkill, .exe java paths on
+// Windows; coreutils on Linux and macOS) lives behind a helper here, so the
+// rest of the panel is platform-neutral.
 export const IS_WIN = process.platform === 'win32';
+
+/** Replace a file in one rename, so a crash leaves the old file or the new
+    one, never half of one. Concurrent writers each get a private part file. */
+export function writeFileAtomic(path: string, data: string | Buffer): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const part = `${path}.${randomBytes(4).toString('hex')}.part`;
+  writeFileSync(part, data);
+  renameSync(part, path);
+}
 
 /** True when something LISTENS on a local TCP port. */
 export async function portListening(port: number): Promise<boolean> {
@@ -55,15 +63,29 @@ export async function stageAndZipWorld(world: string, stageWorld: string, destZi
     await run('powershell', ['-NoProfile', '-Command', script], { maxBuffer: 10 * 1024 * 1024 });
     return;
   }
-  // rsync + zip come from the migration bootstrap (apt install rsync zip unzip)
-  // rsync does not create the destination's parent dirs (robocopy does)
-  await mkdir(stageWorld, { recursive: true });
-  await run('nice', ['-n', '10', 'rsync', '-a', '--delete', '--exclude', 'session.lock', `${world}/`, `${stageWorld}/`]);
-  await run('nice', ['-n', '10', 'zip', '-r', '-1', '-q', destZip, basename(stageWorld)], {
-    cwd: dirname(stageWorld),
-    maxBuffer: 10 * 1024 * 1024,
-  });
-  await run('rm', ['-rf', dirname(stageWorld)]);
+  await rm(stageWorld, { recursive: true, force: true });
+  await cp(world, stageWorld, { recursive: true, filter: (src) => basename(src) !== 'session.lock' });
+  try {
+    await zipTool(() => run('nice', ['-n', '10', 'zip', '-r', '-1', '-q', destZip, basename(stageWorld)], {
+      cwd: dirname(stageWorld),
+      maxBuffer: 10 * 1024 * 1024,
+    }));
+  } finally {
+    await rm(dirname(stageWorld), { recursive: true, force: true });
+  }
+}
+
+/** Run a zip/unzip command, naming the missing package if it is not installed. */
+async function zipTool<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    const err = e as { code?: unknown; stderr?: string };
+    if (err.code === 'ENOENT' || err.code === 127 || /No such file or directory/.test(err.stderr ?? '')) {
+      throw new Error('backups need the zip and unzip commands; install them (sudo apt install zip unzip) and try again');
+    }
+    throw e;
+  }
 }
 
 /** Zip a directory in place; archive root = the directory's own name
@@ -76,7 +98,7 @@ export async function zipDir(dir: string, destZip: string): Promise<void> {
     ], { maxBuffer: 10 * 1024 * 1024 });
     return;
   }
-  await run('zip', ['-r', '-1', '-q', destZip, basename(dir)], { cwd: dirname(dir), maxBuffer: 10 * 1024 * 1024 });
+  await zipTool(() => run('zip', ['-r', '-1', '-q', destZip, basename(dir)], { cwd: dirname(dir), maxBuffer: 10 * 1024 * 1024 }));
 }
 
 /** Extract a zip into destDir, overwriting (Expand-Archive -Force semantics). */
@@ -88,7 +110,7 @@ export async function unzipTo(zipPath: string, destDir: string): Promise<void> {
     ], { maxBuffer: 10 * 1024 * 1024 });
     return;
   }
-  await run('unzip', ['-o', '-q', zipPath, '-d', destDir], { maxBuffer: 10 * 1024 * 1024 });
+  await zipTool(() => run('unzip', ['-o', '-q', zipPath, '-d', destDir], { maxBuffer: 10 * 1024 * 1024 }));
   await chownToDirOwner(destDir);
 }
 
@@ -115,8 +137,7 @@ export async function chownToDirOwner(destDir: string): Promise<void> {
     // (mkdirSync recursive), and statting it learns nothing. The old code
     // stopped here as "already correct" and left root-owned dirs behind: a
     // fresh world/datapacks after a world reset kept world/ root-owned and
-    // the crafty-run server died on session.lock AccessDenied (live
-    // 2026-07-21). Walk UP to the first ancestor with a different owner —
+    // the crafty-run server died on session.lock AccessDenied. Walk UP to the first ancestor with a different owner —
     // the tree's real owner — and chown from the TOPMOST dir the panel owns,
     // so freshly-created intermediates (world/ itself) are fixed too.
     let top = destDir;
@@ -142,6 +163,26 @@ export function sandboxLink(src: string, dst: string): void {
   if (!IS_WIN) { symlinkSync(src, dst); return; }
   if (statSync(src).isDirectory()) { symlinkSync(src, dst, 'junction'); return; }
   try { linkSync(src, dst); } catch { copyFileSync(src, dst); }
+}
+
+/** A real file at dst with src's bytes: a hardlink when both sit on one
+    filesystem, a copy otherwise. Mod jars must never be symlinks: some mods
+    (AutoModpack among them) refuse to load from one. */
+export function linkOrCopy(src: string, dst: string): void {
+  try { linkSync(src, dst); } catch { copyFileSync(src, dst); }
+}
+
+/** rename(), falling back to copy-and-delete across filesystems. */
+export function moveFile(src: string, dst: string): void {
+  try {
+    renameSync(src, dst);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e;
+    // across filesystems: never leave a half-copied file at dst
+    copyFileSync(src, `${dst}.part`);
+    renameSync(`${dst}.part`, dst);
+    unlinkSync(src);
+  }
 }
 
 /** Kill a spawned child AND its whole process tree. On Windows, spawn's own

@@ -90,7 +90,7 @@ async function restore(st: RunState | null, log: (m: string) => void): Promise<v
   // machine booted means the panel merely restarted (deploy) — and the
   // stopped-but-marked case there is NOT a crash to heal, it's the ≤30s
   // stale window around an autostop: restoring from it resurrected a server
-  // the box had just put to sleep (live 2026-07-20, main started itself).
+  // the box had just put to sleep.
   const bootTime = Date.now() - os.uptime() * 1000;
   if (st.updatedAt && new Date(st.updatedAt).getTime() > bootTime + 60_000) {
     return; // panel restart, not a reboot — the servers are as they should be

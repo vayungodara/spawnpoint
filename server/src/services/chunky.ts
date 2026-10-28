@@ -67,10 +67,9 @@ interface PauseState {
   snapshot: Omit<ChunkyProgress, 'running' | 'paused'> | null;
 }
 
-/** The completed-run summary the UI shows instead of silently snapping back
-    to the start form (a finished pregen used to be indistinguishable from
-    "never ran"). Written the first time a task we watched running is gone
-    without being paused or cancelled. */
+/** The completed-run summary the UI shows, so a finished pregen is
+    distinguishable from one that never ran. Written the first time a task we
+    watched running is gone without being paused or cancelled. */
 export interface DoneRecord {
   at: string; //        when we first saw it finished
   startedAt: string;
@@ -202,8 +201,7 @@ const strip = (s: string) => s.replace(/§./g, '').trim();
 // A jar in mods/ is NOT a loaded mod — a server started before the install
 // answers every `chunky …` with the dispatcher's unknown-command error
 // (vanilla/fabric/forge: "Unknown or incomplete command"; Bukkit-family:
-// "Unknown command. Type \"/help\" for help."). Found live 2026-07-24: the
-// panel reported "pre-generating" while all five commands bounced this way.
+// "Unknown command. Type \"/help\" for help.").
 const UNKNOWN_CMD_RE = /unknown (?:or incomplete )?command/i;
 
 /** Locale-aware number: Chunky may print "17.75" or (German locale) "17,75".
@@ -369,8 +367,7 @@ export async function startPregen(
   const cfg = overrides ? saveChunkyConfig(id, overrides) : loadChunkyConfig(id);
 
   // harden Chunky's own config so a server restart RESUMES the task instead
-  // of silently killing it (live 2026-07-27: a panel restart at 2% orphaned
-  // the run and the owner flew straight back into raw worldgen). Chunky reads
+  // of silently killing it. Chunky reads
   // this file at boot, so writing it any time before the next restart works.
   try {
     const p = join(serverDir(id), 'config', 'chunky', 'config.json');
@@ -410,9 +407,8 @@ export async function startPregen(
       'chunky start',
     ]));
   }
-  // NEVER report a start the server didn't acknowledge (live 2026-07-24: all
-  // five commands bounced off a not-yet-loaded Chunky and the panel still said
-  // "pre-generating"). Truth = the commands were understood AND a task is now
+  // NEVER report a start the server didn't acknowledge (a not-yet-loaded
+  // Chunky bounces every command). Truth = the commands were understood AND a task is now
   // visible; a tiny radius can finish between the two probes, so a "Task
   // started" reply also counts.
   if (replies.some((r) => UNKNOWN_CMD_RE.test(strip(r)))) {

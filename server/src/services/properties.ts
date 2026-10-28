@@ -36,10 +36,9 @@ function unescapeValue(v: string): string {
 
 /** Escape a value the way java.util.Properties expects.
     Non-ASCII (§, emoji) → \uXXXX; and the structural characters a value must
-    never contain raw: a newline in an MOTD used to write a SECOND physical
-    line, injecting a whole extra property into server.properties. Emoji are
-    astral-plane: iterating code points but reading charCodeAt(0) emitted a
-    lone high surrogate and dropped the rest — encode both halves. */
+    never contain raw: a newline in an MOTD would inject a whole extra
+    property into server.properties. Emoji are astral-plane, so both UTF-16
+    halves are encoded. */
 function escapeValue(v: string): string {
   let out = '';
   for (const ch of v) {

@@ -13,6 +13,11 @@ command -v git >/dev/null 2>&1 || fail "git is required — install it (apt inst
 command -v curl >/dev/null 2>&1 || fail "curl is required — install it (apt install curl) and re-run"
 command -v node >/dev/null 2>&1 || fail "Node.js 22+ is required — https://nodejs.org or 'nvm install 22', then re-run"
 command -v npm >/dev/null 2>&1 || fail "npm is required (comes with Node.js 22+)"
+if [ "$(uname)" = Linux ]; then
+  for tool in zip unzip; do
+    command -v "$tool" >/dev/null 2>&1 || fail "$tool is required for world backups — install it (sudo apt install zip unzip) and re-run"
+  done
+fi
 NODE_MAJOR=$(node -v | sed 's/^v\([0-9]*\).*/\1/')
 [ "$NODE_MAJOR" -ge 22 ] 2>/dev/null || fail "Node.js $(node -v) is too old — Spawnpoint needs 22+ ('nvm install 22' is the quickest fix)"
 
@@ -81,8 +86,14 @@ for _ in $(seq 1 30); do
     say ""
     say "Spawnpoint is running (pid $PANEL_PID)."
     say ""
-    say "  Open  http://localhost:$PORT  to finish setup in the browser —"
-    say "  the first-run wizard connects Crafty with a pasted API key."
+    if [ -n "$CODE" ]; then
+      say "  Finish setup in your browser:"
+      say "    http://localhost:$PORT/setup#code=$CODE"
+      say "  From another device, use this machine's address instead of localhost;"
+      say "  the setup code is $CODE."
+    else
+      say "  Open http://localhost:$PORT"
+    fi
     if ! curl -fskS "https://localhost:8443" >/dev/null 2>&1; then
       say ""
       say "  Heads up: nothing is answering on https://localhost:8443, so Crafty"
@@ -90,9 +101,11 @@ for _ in $(seq 1 30); do
       say "  THROUGH Crafty — install it first (https://craftycontrol.com), then"
       say "  finish the wizard."
     fi
-    # NOTE: an `if`, not `[ … ] && say …` — under set -e a false test would
-    # end the script right here, swallowing the hints below
-    if [ -n "$CODE" ]; then say "  Setting up from another device? Setup code: $CODE"; fi
+    if [ "$(uname)" = Linux ] && [ -z "${DISPLAY:-}" ] && ! command -v xvfb-run >/dev/null 2>&1; then
+      say ""
+      say "  Optional: install xvfb (sudo apt install xvfb) so the client test can"
+      say "  render on this headless machine. Without it, rendering is not tested."
+    fi
     say ""
     say "  stop:    kill $PANEL_PID"
     say "  start:   SPAWNPOINT_ROOT=\"$ROOT\" node \"$DIR/server/dist/index.js\""

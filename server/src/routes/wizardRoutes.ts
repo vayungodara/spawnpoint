@@ -1,31 +1,22 @@
-import { FastifyInstance, FastifyRequest } from 'fastify';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import type { FastifyInstance } from 'fastify';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { Agent, request } from 'undici';
 import { PATHS, loadSettings, saveSettings } from '../config.js';
 import { chownToDirOwner } from '../services/platform.js';
-import { pinHash, cookieToken } from './settingsRoutes.js';
+import { hashPin, pinConfigured, sessionCookie, PIN_RULE, PIN_RULE_TEXT } from '../auth.js';
 
-// FIRST-RUN WIZARD — active exactly while Shared/crafty-token.txt is absent.
-// A configured install (the file exists) never sees any of this: /status says
-// {active:false} and the mutating route refuses. The goal is that a stranger's
-// first browser visit is one form, not a docs page: the panel logs into
-// Crafty's own /api/v2/auth/login ONCE with the admin credentials the user
-// already knows, mints its own API token, and writes the file itself — the
-// user never handles the word "token".
+// FIRST-RUN WIZARD: open until the panel has both a Crafty token and a PIN.
+// Step one connects Crafty (a pasted API key, or a one-time login that mints
+// one); step two sets the PIN. Both steps are the only unauthenticated
+// writes the panel accepts, so both demand the setup code the installer
+// printed. No address is trusted: behind a reverse proxy on the same machine
+// every visitor would look local.
 export function wizardActive(): boolean {
-  return !existsSync(PATHS.craftyTokenFile);
+  return !existsSync(PATHS.craftyTokenFile) || !pinConfigured();
 }
 
-// SETUP CLAIM CODE — the setup window is the one moment the panel accepts an
-// unauthenticated write, and it listens on 0.0.0.0. Without a claim, anyone
-// who can reach the port during that window could point the panel at a Crafty
-// they control and own the install. So: requests from the machine itself need
-// nothing (the overwhelmingly common case — you're at the box you just
-// installed on), and every REMOTE setup request must present the code that
-// install.sh printed. The code lives beside the other runtime state and is
-// deleted the moment setup completes.
 const CODE_FILE = join(PATHS.data, 'setup-code.txt');
 
 export function setupCode(): string {
@@ -33,9 +24,7 @@ export function setupCode(): string {
     const c = readFileSync(CODE_FILE, 'utf8').trim();
     if (c) return c;
   } catch { /* missing/unreadable — mint one below */ }
-  // 80 bits: this endpoint can be reachable from a LAN (or a tailnet) while
-  // setup is open, so the code has to survive sustained guessing on its own,
-  // not just because of the throttle below
+  // 80 bits: the code must survive sustained guessing, not just the throttle
   const code = randomBytes(10).toString('hex').toUpperCase();
   mkdirSync(PATHS.data, { recursive: true });
   // wx = first writer wins: two panel processes sharing a layout must not
@@ -71,12 +60,7 @@ function codeFailed(ip: string): void {
   codeAttempts.set(ip, a);
 }
 
-function isLocal(req: FastifyRequest): boolean {
-  return req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1';
-}
-
-function claimOk(req: FastifyRequest, given: string): boolean {
-  if (isLocal(req)) return true;
+function claimOk(given: string): boolean {
   const want = Buffer.from(setupCode());
   const got = Buffer.from(String(given ?? '').trim().toUpperCase());
   return want.length === got.length && timingSafeEqual(want, got);
@@ -122,21 +106,16 @@ function dispatcherFor(url: string, allowInsecure = false): Agent | undefined {
 }
 const CERT_ERR = /certificate|self.signed|SELF_SIGNED|DEPTH_ZERO|UNABLE_TO_VERIFY|ERR_TLS/i;
 
-/** True when a machine-wide Claude Code login exists — the genie can then run
-    on the subscription the owner already pays for, with no key to paste. */
-function claudeCliReady(): { installed: boolean; loggedIn: boolean } {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
-  const bins = [join(home, '.local', 'bin', 'claude'), '/usr/local/bin/claude', '/usr/bin/claude', '/opt/homebrew/bin/claude'];
-  const installed = bins.some((b) => existsSync(b))
-    || (process.env.PATH ?? '').split(/[:;]/).some((d) => d && existsSync(join(d, 'claude')));
-  const loggedIn = !!home && (existsSync(join(home, '.claude', '.credentials.json')) || !!process.env.ANTHROPIC_API_KEY);
-  return { installed, loggedIn };
+/** Whether the Claude Code CLI the genie runs is installed on this machine. */
+function claudeCliReady(): { installed: boolean } {
+  const dirs = [...(process.env.PATH ?? '').split(/[:;]/), '/usr/local/bin', '/usr/bin', '/opt/homebrew/bin'];
+  return { installed: dirs.some((d) => d && (existsSync(join(d, 'claude')) || existsSync(join(d, 'claude.cmd')))) };
 }
 
 let probeCache = { at: 0, ok: false };
 
 export default async function wizardRoutes(app: FastifyInstance) {
-  app.get('/api/wizard/status', async (req) => {
+  app.get('/api/wizard/status', async () => {
     if (!wizardActive()) return { active: false };
     const s = loadSettings();
     // the probe is cached: this route is unauthenticated during setup, and one
@@ -161,9 +140,8 @@ export default async function wizardRoutes(app: FastifyInstance) {
       craftyUrl: s.craftyUrl,
       craftyReachable,
       hasJdk,
-      pinSet: !!(s.pinHash || s.pin),
-      // a browser on the panel's own machine finishes setup with no code
-      needsCode: !isLocal(req),
+      craftyConnected: existsSync(PATHS.craftyTokenFile),
+      pinSet: pinConfigured(),
       claude: claudeCliReady(),
     };
   });
@@ -171,10 +149,10 @@ export default async function wizardRoutes(app: FastifyInstance) {
   app.post<{ Body: { username?: string; password?: string; token?: string; url?: string; code?: string; allowInsecure?: boolean } }>(
     '/api/wizard/crafty-login',
     async (req, reply) => {
-      if (!wizardActive()) return reply.code(403).send({ error: 'setup is already complete' });
-      const wait = isLocal(req) ? 0 : codeThrottled(req.ip);
-      if (wait) return reply.code(429).send({ error: `too many wrong setup codes — wait ${wait}s` });
-      if (!claimOk(req, String(req.body?.code ?? ''))) {
+      if (existsSync(PATHS.craftyTokenFile)) return reply.code(403).send({ error: 'Crafty is already connected' });
+      const wait = codeThrottled(req.ip);
+      if (wait) return reply.code(429).send({ error: `too many wrong setup codes, wait ${wait}s` });
+      if (!claimOk(String(req.body?.code ?? ''))) {
         codeFailed(req.ip);
         return reply.code(403).send({
           error: 'setup code required — it was printed by the installer (or run: cat <layout>/Spawnpoint/data/setup-code.txt on the panel machine)',
@@ -290,41 +268,35 @@ export default async function wizardRoutes(app: FastifyInstance) {
         return reply.code(409).send({ error: 'setup was already completed by another browser' });
       }
       await chownToDirOwner(dirname(PATHS.craftyTokenFile));
-      // the claim code stays valid until the PIN step below closes setup —
-      // a remote browser still needs it for /finish
+      // the setup code stays valid for the PIN step
+      if (!wizardActive()) rmSync(CODE_FILE, { force: true });
       return { ok: true, servers };
     },
   );
 
-  // FINISH — sets the PIN (and optional keys). This route exists because real
-  // API access is loopback-only until a PIN is configured: a remote browser
-  // finishing setup cannot reach PUT /api/settings yet, and the claim code is
-  // what stands in for the session it does not have. Accepted only while no
-  // PIN exists; afterwards Settings is the only way to change anything.
+  // FINISH: sets the PIN (and optional keys). The setup code stands in for
+  // the session the browser cannot have yet. Accepted only while no PIN
+  // exists; afterwards Settings is the only way to change anything.
   app.post<{ Body: { pin?: string; code?: string; curseforgeApiKey?: string; anthropicApiKey?: string } }>(
     '/api/wizard/finish',
     async (req, reply) => {
-      const s = loadSettings();
-      if (s.pinHash || s.pin) return reply.code(403).send({ error: 'this panel already has a PIN — change it in Settings' });
-      const wait = isLocal(req) ? 0 : codeThrottled(req.ip);
-      if (wait) return reply.code(429).send({ error: `too many wrong setup codes — wait ${wait}s` });
-      if (!claimOk(req, String(req.body?.code ?? ''))) {
+      if (pinConfigured()) return reply.code(403).send({ error: 'this panel already has a PIN; change it in Settings' });
+      const wait = codeThrottled(req.ip);
+      if (wait) return reply.code(429).send({ error: `too many wrong setup codes, wait ${wait}s` });
+      if (!claimOk(String(req.body?.code ?? ''))) {
         codeFailed(req.ip);
         return reply.code(403).send({ error: 'setup code required' });
       }
       const pin = String(req.body?.pin ?? '').trim();
-      if (!/^\d{4,8}$/.test(pin)) return reply.code(400).send({ error: 'PIN must be 4-8 digits' });
+      if (!PIN_RULE.test(pin)) return reply.code(400).send({ error: PIN_RULE_TEXT });
+      const s = loadSettings();
       s.pin = null;
-      s.pinHash = pinHash(pin);
+      s.pinHash = hashPin(pin);
       if (req.body?.curseforgeApiKey) s.curseforgeApiKey = String(req.body.curseforgeApiKey).trim() || null;
       if (req.body?.anthropicApiKey) s.anthropicApiKey = String(req.body.anthropicApiKey).trim() || null;
       saveSettings(s);
-      // setup is over — the claim code has no further purpose
-      try { writeFileSync(CODE_FILE, '', { mode: 0o600 }); } catch { /* best effort */ }
-      reply.header(
-        'set-cookie',
-        `sp_auth=${cookieToken(s.pinHash)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}`,
-      );
+      if (!wizardActive()) rmSync(CODE_FILE, { force: true });
+      reply.header('set-cookie', sessionCookie(s.pinHash));
       return { ok: true };
     },
   );

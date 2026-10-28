@@ -128,7 +128,7 @@ export async function getJvmHeap(
 export async function setJvmHeap(uuid: string, gb: number): Promise<{ ok: true; source: string }> {
   const dir = serverDir(uuid);
   const cmd = await craftyApi.getServer(uuid).then((s) => s.execution_command).catch(() => '');
-  const next = applyMemory(uuid, dir, cmd, gb);
+  const next = applyMemory(dir, cmd, gb);
   if (next !== cmd) await craftyApi.patchServer(uuid, { execution_command: next });
   const usesArgsFile = existsSync(join(dir, 'user_jvm_args.txt'));
   return { ok: true, source: usesArgsFile ? 'user_jvm_args.txt' : 'launch command' };

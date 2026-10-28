@@ -3,21 +3,19 @@ import { Navigate, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { PixelDefs, Pi } from '../components/PixelIcons'
 
-// FIRST-RUN WIZARD — served instead of the panel while the install has no
-// Crafty token (see server/src/routes/wizardRoutes.ts). Three steps, one
-// screen each: connect Crafty (the only required one), set a PIN, optional
-// keys. A configured install never routes here: Shell only redirects while
-// the server says the wizard is active, and this page bounces back the
-// moment it isn't.
+// FIRST-RUN WIZARD, shown until the panel has a Crafty token and a PIN (see
+// server/src/routes/wizardRoutes.ts). Three steps: connect Crafty, set a
+// PIN, optional keys. Both required steps need the setup code the installer
+// printed; its link (/setup#code=…) fills it in.
 
 type WizardStatus = {
   active: boolean
   craftyUrl?: string
   craftyReachable?: boolean
   hasJdk?: boolean
+  craftyConnected?: boolean
   pinSet?: boolean
-  needsCode?: boolean
-  claude?: { installed: boolean; loggedIn: boolean }
+  claude?: { installed: boolean }
 }
 
 const put = (body: Record<string, unknown>) =>
@@ -36,7 +34,9 @@ export default function Setup() {
     staleTime: 30_000,
   })
 
-  const [step, setStep] = useState(0)
+  const [stepPicked, setStep] = useState<number | null>(null)
+  // a reload after connecting Crafty resumes at the PIN step
+  const step = stepPicked ?? (wiz?.craftyConnected ? 1 : 0)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
@@ -47,12 +47,11 @@ export default function Setup() {
   const [url, setUrl] = useState('')
   const [user, setUser] = useState('')
   const [pass, setPass] = useState('')
-  const [code, setCode] = useState('')
+  const [code, setCode] = useState(() => new URLSearchParams(location.hash.slice(1)).get('code')?.toUpperCase() ?? '')
   const [serverCount, setServerCount] = useState<number | null>(null)
 
   // step 1 — pin
   const [pin, setPin] = useState('')
-  const [pinDone, setPinDone] = useState(false)
 
   // step 2 — optional keys
   const [cfKey, setCfKey] = useState('')
@@ -70,8 +69,8 @@ export default function Setup() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(
           mode === 'key'
-            ? { token: apiKey.trim(), url: url || undefined, code: code || undefined }
-            : { username: user, password: pass, url: url || undefined, code: code || undefined },
+            ? { token: apiKey.trim(), url: url || undefined, code }
+            : { username: user, password: pass, url: url || undefined, code },
         ),
       })
       const j = await r.json()
@@ -92,13 +91,12 @@ export default function Setup() {
       const r = await fetch('/api/wizard/finish', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ pin, code: code || undefined }),
+        body: JSON.stringify({ pin, code }),
       })
       if (!r.ok) {
         setErr(await r.json().then((j) => j.error).catch(() => null) ?? 'could not save the PIN')
         return
       }
-      setPinDone(true)
       setStep(2)
     } catch {
       setErr('the panel stopped responding — is it still running?')
@@ -107,24 +105,16 @@ export default function Setup() {
     }
   }
 
-  const finish = async (skipKeys: boolean) => {
+  const finish = async () => {
     setBusy(true)
     setErr('')
     try {
-      if (!skipKeys && (cfKey || aiKey)) {
-        const body = {
+      if (cfKey || aiKey) {
+        // setting the PIN signed this browser in, so the normal settings route works
+        const r = await put({
           ...(cfKey ? { curseforgeApiKey: cfKey } : {}),
           ...(aiKey ? { anthropicApiKey: aiKey } : {}),
-        }
-        // with a PIN set we hold a session cookie; without one the API is
-        // loopback-only, so the claim-code route carries the keys instead
-        const r = pinDone
-          ? await put(body)
-          : await fetch('/api/wizard/finish', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ ...body, code: code || undefined }),
-          })
+        })
         if (!r.ok) { setErr('could not save the keys — you can add them later in Settings'); return }
       }
       await qc.invalidateQueries()
@@ -214,26 +204,22 @@ export default function Setup() {
             >
               {mode === 'key' ? 'No API key handy? Log in once instead' : 'Have an API key? Paste it instead (recommended)'}
             </button>
-            {wiz?.needsCode && (
-              <>
-                <p className="text-xs opacity-70 mt-3 mb-2">
-                  You're setting up from another device, so paste the <strong>setup code</strong> the
-                  installer printed. (On the panel machine:{' '}
-                  <code className="font-mono">cat &lt;layout&gt;/Spawnpoint/data/setup-code.txt</code>)
-                </p>
-                <input
-                  value={code}
-                  onChange={(e) => { setErr(''); setCode(e.target.value.toUpperCase()) }}
-                  placeholder="Setup code"
-                  className="field w-full px-3 py-2.5 text-sm font-mono tracking-[0.2em]"
-                  autoComplete="off"
-                />
-              </>
-            )}
+            <p className="text-xs opacity-70 mt-3 mb-2">
+              The <strong>setup code</strong> proves you own this install. The installer and the panel log
+              print it (on the panel machine:{' '}
+              <code className="font-mono">cat &lt;layout&gt;/Spawnpoint/data/setup-code.txt</code>).
+            </p>
+            <input
+              value={code}
+              onChange={(e) => { setErr(''); setCode(e.target.value.toUpperCase()) }}
+              placeholder="Setup code"
+              className="field w-full px-3 py-2.5 text-sm font-mono tracking-[0.2em]"
+              autoComplete="off"
+            />
             {err && <div className="font-px text-[10px] text-redstone mt-3">{err.toUpperCase()}</div>}
             <button
               onClick={connect}
-              disabled={(mode === 'key' ? !apiKey.trim() : !user || !pass) || busy}
+              disabled={(mode === 'key' ? !apiKey.trim() : !user || !pass) || !code || busy}
               className="btn btn-emerald w-full py-2.5 text-sm mt-4"
             >
               {busy ? 'Connecting…' : 'Connect Crafty'}
@@ -247,25 +233,30 @@ export default function Setup() {
               Crafty connected{serverCount !== null ? ` — found ${serverCount} server${serverCount === 1 ? '' : 's'}` : ''}.
             </p>
             <p className="text-sm opacity-85 mb-4">
-              Now set a PIN. Anyone opening the panel from another device needs it; this browser
-              stays logged in.
+              Now set a PIN. Every browser needs it once every 30 days, this one included.
             </p>
             <input
               autoFocus
               value={pin}
-              onChange={(e) => { setErr(''); setPin(e.target.value.replace(/\D/g, '').slice(0, 8)) }}
-              onKeyDown={(e) => { if (e.key === 'Enter' && pin.length >= 4 && !busy) savePin() }}
+              onChange={(e) => { setErr(''); setPin(e.target.value.replace(/\D/g, '').slice(0, 12)) }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && pin.length >= 6 && !busy) savePin() }}
               type="password"
               inputMode="numeric"
-              placeholder="4-8 digits"
+              placeholder="6-12 digits"
               className="field w-full px-4 py-3 text-center text-2xl font-mono tracking-[0.5em]"
             />
+            {!code && (
+              <input
+                value={code}
+                onChange={(e) => { setErr(''); setCode(e.target.value.toUpperCase()) }}
+                placeholder="Setup code"
+                className="field w-full px-3 py-2.5 mt-2 text-sm font-mono tracking-[0.2em]"
+                autoComplete="off"
+              />
+            )}
             {err && <div className="font-px text-[10px] text-redstone mt-3">{err.toUpperCase()}</div>}
-            <button onClick={savePin} disabled={pin.length < 4 || busy} className="btn btn-emerald w-full py-2.5 text-sm mt-4">
+            <button onClick={savePin} disabled={pin.length < 6 || !code || busy} className="btn btn-emerald w-full py-2.5 text-sm mt-4">
               Set PIN
-            </button>
-            <button onClick={() => setStep(2)} disabled={busy} className="btn w-full py-2 text-xs mt-2 opacity-80">
-              Skip — the panel then answers only on this machine
             </button>
           </>
         )}
@@ -288,34 +279,22 @@ export default function Setup() {
             />
             <div className="hud mb-1">IN-GAME AI GENIE</div>
             <p className="text-xs opacity-70 mb-2">
-              Off by default — players type a wish in chat and the panel builds it. It runs on the
-              AI subscription you already pay for, or on an API key.
+              Off until you turn it on in Settings. Players type a wish in chat and the panel carries
+              it out. It runs Claude Code with a <strong>Claude token</strong> (run{' '}
+              <code className="font-mono">claude setup-token</code> anywhere Claude Code is installed)
+              or an <strong>Anthropic API key</strong>. Paste either one.
+              {wiz?.claude?.installed ? '' : ' The panel machine also needs Claude Code: npm i -g @anthropic-ai/claude-code.'}
             </p>
-            {wiz?.claude?.loggedIn ? (
-              <p className="font-px text-[10px] text-emerald mb-2">
-                ✓ CLAUDE SUBSCRIPTION DETECTED ON THIS MACHINE — NO KEY NEEDED
-              </p>
-            ) : (
-              <p className="text-xs opacity-70 mb-2">
-                <strong>Using a Claude subscription?</strong> On the panel machine run{' '}
-                <code className="font-mono">claude setup-token</code>
-                {wiz?.claude?.installed ? '' : ' (install the Claude Code CLI first)'} — the genie
-                picks it up automatically, nothing to paste here. Otherwise drop an API key below.
-              </p>
-            )}
             <input
               value={aiKey}
               onChange={(e) => setAiKey(e.target.value)}
               type="password"
-              placeholder="Anthropic API key (optional)"
+              placeholder="Claude token or Anthropic API key (optional)"
               className="field w-full px-3 py-2.5 text-sm"
               autoComplete="off"
             />
-            <p className="text-xs opacity-55 mt-2">
-              ChatGPT/Codex support is in progress — the genie speaks to any CLI engine.
-            </p>
             {err && <div className="font-px text-[10px] text-redstone mt-3">{err.toUpperCase()}</div>}
-            <button onClick={() => finish(false)} disabled={busy} className="btn btn-emerald w-full py-2.5 text-sm mt-4">
+            <button onClick={finish} disabled={busy} className="btn btn-emerald w-full py-2.5 text-sm mt-4">
               {cfKey || aiKey ? 'Save and enter the panel' : 'Enter the panel'}
             </button>
           </>

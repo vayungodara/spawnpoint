@@ -43,8 +43,8 @@ export default function Files() {
   // dragenter/dragleave fire for every child element crossed, so a plain
   // boolean flickers — count enters/leaves and show the overlay while > 0
   const [dragDepth, setDragDepth] = useState(0)
-  // an uploaded file the server recognized as a modpack — offer install /
-  // new-server instead of leaving it as a mystery zip
+  // an uploaded file the server recognized as a modpack — offer a new server
+  // from it instead of leaving it as a mystery zip
   const [packFile, setPackFile] = useState<({ path: string } & PackInfo) | null>(null)
   const [packJob, setPackJob] = useState<string | null>(null)
   const packJobQuery = useQuery({
@@ -57,22 +57,6 @@ export default function Files() {
   useEffect(() => {
     if (packJobQuery.data?.done) qc.invalidateQueries({ queryKey: ['servers'] })
   }, [packJobQuery.data?.done, qc])
-  const packInstall = useMutation({
-    mutationFn: async () => {
-      const r = await fetch(`/api/servers/${id}/packfile/install`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ path: packFile!.path }),
-      })
-      return (await r.json()) as { name?: string; installed?: number; skippedClientOnly?: number; error?: string }
-    },
-    onSuccess: (r) => {
-      if (r.error) return flash(`✗ ${r.error}`)
-      flash(`✓ ${r.name}: ${r.installed} files installed${r.skippedClientOnly ? `, ${r.skippedClientOnly} client-only skipped` : ''} — boot check runs in the background`)
-      setPackFile(null)
-      refresh()
-    },
-  })
   const packCreate = useMutation({
     mutationFn: async (name: string) => {
       const r = await fetch(`/api/servers/${id}/packfile/create-server`, {
@@ -272,14 +256,6 @@ export default function Files() {
                 <div className="flex gap-2 flex-wrap items-center">
                   <button
                     className="btn btn-emerald text-xs"
-                    disabled={packInstall.isPending}
-                    onClick={() => packInstall.mutate()}
-                    title="Pour this pack's server-side mods + configs into the current server"
-                  >
-                    {packInstall.isPending ? 'installing… (minutes)' : `Install into ${active.name}`}
-                  </button>
-                  <button
-                    className="btn text-xs"
                     disabled={packCreate.isPending}
                     onClick={() => {
                       const name = window.prompt('Name for the new server?', packFile.name)

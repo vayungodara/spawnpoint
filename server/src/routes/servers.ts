@@ -4,12 +4,11 @@ import { rconCommand } from '../clients/rcon.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { listServers, setActiveUuid, getActiveUuid, serverDir } from '../services/servers.js';
+import { listServers, setActiveUuid, getActiveUuid, serverDir, pinJavaFor } from '../services/servers.js';
 import { readProperties, patchProperties } from '../services/properties.js';
-import { setOverride } from '../services/detect.js';
+import { setOverride, detect } from '../services/detect.js';
 import { serverPhase } from '../services/phase.js';
 import { loadSettings } from '../config.js';
-import { getJoinAddress } from '../clients/playit.js';
 import { markRunning } from '../services/bootrestore.js';
 import { applyPending, listPending } from '../services/pendingmods.js';
 import { derivedRcon } from '../services/ports.js';
@@ -38,7 +37,7 @@ async function applyWhenDown(id: string, timeoutMs = 90_000): Promise<number> {
 }
 
 export default async function serverRoutes(app: FastifyInstance) {
-  app.get('/api/servers', async (req, reply) => {
+  app.get('/api/servers', async (_req, reply) => {
     try {
       return { servers: await listServers(), active: getActiveUuid() };
     } catch (e) {
@@ -85,8 +84,6 @@ export default async function serverRoutes(app: FastifyInstance) {
   app.delete<{ Params: { id: string }; Body: { confirmName?: string; skipBackup?: boolean } }>(
     '/api/servers/:id',
     async (req, reply) => {
-      const SERVER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!SERVER_UUID.test(req.params.id)) return reply.code(400).send({ error: 'bad server id' });
       const r = await deleteServer(req.params.id, String(req.body?.confirmName ?? ''), !!req.body?.skipBackup);
       if (!r.ok) return reply.code(400).send(r);
       if (getActiveUuid() === req.params.id) setActiveUuid(''); // empty file = no active server
@@ -141,6 +138,10 @@ export default async function serverRoutes(app: FastifyInstance) {
         } catch { /* no server.properties yet — first boot will create one */ }
       }
       const id = req.params.id;
+      if (req.body.action !== 'stop') {
+        const det = detect(serverDir(id), id);
+        await pinJavaFor(id, det.mc, det.loader).catch(() => false);
+      }
       const pending = listPending(id).length;
 
       // A RESTART with queued mod changes cannot use Crafty's restart_server:
@@ -206,12 +207,10 @@ export default async function serverRoutes(app: FastifyInstance) {
   );
 
   // Crafty runs on this same box, so hand the browser whatever host it used
-  // to reach the panel (Tailscale IP, LAN IP, hostname — all work). The old
-  // hardcoded Tailscale IP went stale the day the box was reinstalled.
+  // to reach the panel (Tailscale IP, LAN IP, hostname — all work)
   app.get('/api/crafty/url', async (req) => {
     const host = String(req.headers.host ?? '').split(':')[0] || 'localhost';
     return { url: loadSettings().craftyUrl.replace('localhost', host) };
   });
 
-  app.get('/api/playit/address', async () => ({ address: await getJoinAddress() }));
 }

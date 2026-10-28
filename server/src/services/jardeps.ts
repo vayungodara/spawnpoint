@@ -1,37 +1,36 @@
 import AdmZip from 'adm-zip';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { PATHS } from '../config.js';
-import { serverDir } from './servers.js';
 
-// STATIC DEP PREFLIGHT (2026-08-02, from the boot-test research): every mod
-// jar DECLARES its mandatory dependencies (fabric.mod.json `depends`,
-// mods.toml `[[dependencies]]`). Reading those takes <1s cached — versus a
-// 10-60s dry-boot that fails, gets its error text parsed, heals, and boots
-// AGAIN. This scan feeds the heal BEFORE the first boot. It NEVER rejects
-// anything on its own: version ranges are deliberately ignored and unknowns
-// resolve to "fine" — the dry-boot remains the only authority, this is just
-// the fast path to a complete folder.
+// Static dependency scan. Every mod jar declares its mandatory dependencies
+// (fabric.mod.json `depends`, mods.toml `[[dependencies]]`). Reading them
+// takes under a second, so missing ones are installed before the first boot
+// test instead of after a failed one. The scan never rejects anything: version
+// ranges are ignored and unknowns count as fine. The boot test decides.
 
 interface JarMeta {
   ids: string[];      // mod ids this jar satisfies (own id + provides + nested jar-in-jar ids)
   deps: string[];     // mandatory dep ids this jar demands
+  serverOnly?: boolean; // fabric.mod.json "environment": "server" (never sent to clients)
 }
 
-// ids the platform itself satisfies — never "missing"
+// ids the loader itself satisfies — never "missing". Fabric API is a mod
+// (its jar provides "fabric" and "fabric-api"), so it is not on this list.
 const BUILTIN = new Set([
   'minecraft', 'java', 'forge', 'neoforge', 'fabricloader', 'fabric-loader',
-  'fabric', 'fabric-api', 'quilt_loader', 'quilt_base', 'mixinextras', 'mods',
+  'quilt_loader', 'quilt_base', 'mixinextras', 'mods',
 ]);
 
-function parseFabricJson(buf: Buffer): { ids: string[]; deps: string[]; nested: string[] } {
+function parseFabricJson(buf: Buffer): { ids: string[]; deps: string[]; nested: string[]; serverOnly: boolean } {
   const j = JSON.parse(buf.toString('utf8')) as {
-    id?: string; provides?: string[]; depends?: Record<string, unknown>; jars?: { file: string }[];
+    id?: string; provides?: string[]; depends?: Record<string, unknown>; jars?: { file: string }[]; environment?: string;
   };
   return {
     ids: [j.id ?? '', ...(j.provides ?? [])].filter(Boolean),
     deps: Object.keys(j.depends ?? {}),
     nested: (j.jars ?? []).map((x) => x.file).filter(Boolean),
+    serverOnly: j.environment === 'server',
   };
 }
 
@@ -67,6 +66,7 @@ function scanJarBuffer(buf: Buffer, depth: number): JarMeta {
       const f = parseFabricJson(fab.getData());
       meta.ids.push(...f.ids);
       meta.deps.push(...f.deps);
+      if (f.serverOnly && depth === 0) meta.serverOnly = true;
       if (depth < 2) {
         for (const rel of f.nested) {
           const e = zip.getEntry(rel);
@@ -121,33 +121,49 @@ export interface StaticScan {
   missing: string[];
   /** which jars demanded each missing id — for honest log lines */
   requesters: Record<string, string[]>;
-  /** mod ids claimed by more than one jar — a signal, not junk (the patched-
-      architectury lesson): logged, never acted on */
+  /** mod ids claimed by more than one jar: logged, never acted on */
   duplicates: string[];
   scanned: number;
 }
 
-export function scanMissingDeps(serverId: string): StaticScan {
-  const modsDir = join(serverDir(serverId), 'mods');
-  const out: StaticScan = { missing: [], requesters: {}, duplicates: [], scanned: 0 };
-  if (!existsSync(modsDir)) return out;
-
+/** Declared metadata for one jar, cached by name and size. */
+function metaOf(path: string): JarMeta {
   const c = loadCache();
-  let dirty = false;
+  let key: string;
+  try { key = `${basename(path)}:${statSync(path).size}`; } catch { return { ids: [], deps: [] }; }
+  if (!c[key]) {
+    try { c[key] = scanJarBuffer(readFileSync(path), 0); } catch { c[key] = { ids: [], deps: [] }; }
+    cacheDirty = true;
+  }
+  return c[key];
+}
+let cacheDirty = false;
+function flushCache(): void {
+  if (!cacheDirty) return;
+  try {
+    mkdirSync(PATHS.data, { recursive: true });
+    writeFileSync(CACHE_FILE, JSON.stringify(cache), 'utf8');
+    cacheDirty = false;
+  } catch { /* the cache is an optimization, never an error */ }
+}
+
+/** True for jars that declare themselves server-only (AutoModpack never ships those). */
+export function isServerOnly(path: string): boolean {
+  const m = metaOf(path).serverOnly === true;
+  flushCache();
+  return m;
+}
+
+/** Missing and duplicate mod ids across an explicit set of jars. */
+/** `strict` keeps fabric/quilt submodule ids: a removal must not orphan them. */
+export function scanJars(paths: string[], strict = false): StaticScan {
+  const out: StaticScan = { missing: [], requesters: {}, duplicates: [], scanned: 0 };
   const satisfied = new Set<string>(BUILTIN);
   const idOwners = new Map<string, string[]>();
   const wants = new Map<string, string[]>();
-
-  for (const jar of readdirSync(modsDir).filter((f) => f.endsWith('.jar'))) {
-    const p = join(modsDir, jar);
-    let key: string;
-    try { key = `${jar}:${statSync(p).size}`; } catch { continue; }
-    let meta = c[key];
-    if (!meta) {
-      try { meta = scanJarBuffer(readFileSync(p), 0); } catch { meta = { ids: [], deps: [] }; }
-      c[key] = meta;
-      dirty = true;
-    }
+  for (const p of paths) {
+    const meta = metaOf(p);
+    const jar = basename(p);
     out.scanned++;
     for (const id of meta.ids) {
       satisfied.add(id);
@@ -155,30 +171,14 @@ export function scanMissingDeps(serverId: string): StaticScan {
     }
     for (const d of meta.deps) wants.set(d, [...(wants.get(d) ?? []), jar]);
   }
+  flushCache();
 
-  if (dirty) {
-    try {
-      mkdirSync(PATHS.data, { recursive: true });
-      // drop cache entries for jars that no longer exist (bounded growth)
-      const live = new Set(readdirSync(modsDir).filter((f) => f.endsWith('.jar')).map((f) => {
-        try { return `${f}:${statSync(join(modsDir, f)).size}`; } catch { return ''; }
-      }));
-      // keep other servers' entries: only prune keys that LOOK like this dir's
-      // stale versions (same name, different size) — cheap heuristic, the
-      // cache is disposable anyway
-      writeFileSync(CACHE_FILE, JSON.stringify(c), 'utf8');
-      void live;
-    } catch { /* cache is an optimization, never an error */ }
-  }
-
-  // fabric-api submodules ("fabric-resource-loader-v0") ship INSIDE the
-  // fabric-api / Forgified-Fabric-API jar in ways nested scanning can miss —
-  // proven false positive on FreshMC (forge + Connector). They are never a
-  // real hole: healing them isn't possible (no such standalone projects) and
-  // the dry-boot judges the truth anyway.
+  // fabric-api submodules ("fabric-resource-loader-v0") ship inside the
+  // fabric-api jar in ways nested scanning can miss. They have no standalone
+  // projects to install, and the boot test judges them anyway.
   const submodule = /^(fabric|quilt)(-[a-z0-9]+)+-v\d+$/;
   for (const [dep, requesters] of wants) {
-    if (!satisfied.has(dep) && !submodule.test(dep)) {
+    if (!satisfied.has(dep) && (strict || !submodule.test(dep))) {
       out.missing.push(dep);
       out.requesters[dep] = requesters.slice(0, 4);
     }

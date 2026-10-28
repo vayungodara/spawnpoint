@@ -12,10 +12,9 @@ import { tpsHistory } from './tpsmonitor.js';
 // everyone by default; each player opts in or out with /trigger hud
 // (membership in team sp_show).
 //
-// THE VERDICT IS TICK-DRIVEN. The old one compared process RSS against -Xmx,
-// which is not a health signal at all: a modded JVM idles ~1.5GB above heap,
-// and with Aikar's -Xms=-Xmx+AlwaysPreTouch the heap is FULLY committed at
-// boot — the HUD would scream STRESSED forever on a server ticking in 4ms.
+// THE VERDICT IS TICK-DRIVEN. Process RSS against -Xmx is not a health
+// signal: a modded JVM idles ~1.5GB above heap, and with Aikar's
+// -Xms=-Xmx+AlwaysPreTouch the heap is fully committed at boot.
 // Tick time is the one number that IS server performance; memory/CPU are
 // shown as info but judge nothing. Samples come from tpsmonitor (multi-source:
 // tick query / forge tps / bukkit tps / spark), refreshed every 20s.
@@ -199,8 +198,7 @@ function pumpToggle(cmds: string[], id: string, pinned: string[], online: string
 }
 
 function pumpBossbar(cmds: string[], id: string, s: Snapshot): void {
-  // NARROW on purpose: long bossbar names stretch under client minimaps
-  // (owner request 2026-07-18; RAM re-added same day, compact form). Fill bar
+  // NARROW on purpose: long bossbar names stretch under client minimaps. Fill bar
   // already carries tick-budget %.
   const ram = s.memBytes ? ` · ${(s.memBytes / 1e9).toFixed(1)}G` : '';
   const perf =
