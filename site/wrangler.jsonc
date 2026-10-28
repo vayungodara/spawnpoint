@@ -1,0 +1,9 @@
+// The landing page at https://spawnpoint.vayun.net, served as static assets
+// by a Cloudflare Worker. Deploy from this folder: npx wrangler@4 deploy
+{
+  "name": "spawnpoint-site",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./public" },
+  "routes": [{ "pattern": "spawnpoint.vayun.net", "custom_domain": true }],
+  "workers_dev": false
+}

@@ -1,81 +1,112 @@
 # Spawnpoint
 
-**The self-hosted Minecraft control panel where a broken pack can never reach your friends.**
+**Add mods to your Minecraft server, test them on a copy first, and give your friends exactly the version that passed.**
 
-[![Watch the 2-minute launch film](docs/media/launch-film-poster.png)](https://github.com/vayungodara/spawnpoint/raw/main/docs/media/launch-film.mp4)
+![Dashboard: console, TPS and the join address](docs/screenshots/dashboard.webp)
 
-*Click the image to watch the 2-minute launch film (9 MB mp4). A broken jar gets
-dragged in, boot-tested, and rolled back before anyone crashes. Then modpack
-installs, backups, and the in-game genie, all captured live.*
-
-![Live dashboard — console, TPS, join address, world slots](docs/screenshots/dashboard.png)
+Website: [spawnpoint.vayun.net](https://spawnpoint.vayun.net)
 
 Spawnpoint is a web panel you run on the machine that hosts your Minecraft
-servers. It fronts [Crafty Controller](https://craftycontrol.com/) (which owns
-the server processes) and adds everything around it: one-click mod/plugin
-installs from Modrinth + CurseForge, a config UI, Realms-style world slots,
-backups, and a **verification pipeline** no other panel has:
+servers. It works alongside [Crafty Controller](https://craftycontrol.com/),
+which starts and supervises the server processes. Spawnpoint adds mod and
+plugin installs from Modrinth and CurseForge, new servers from modpacks, a
+config editor, world slots, backups and a file manager. Mod installs and
+updates on Fabric, Forge and NeoForge servers come with three promises:
 
-1. **Dry-boot preflight.** Every mod install is boot-tested in a sandbox
-   before it counts. Missing dependencies are detected from the loader's own
-   error output and installed automatically. A mod that still can't boot is
-   rolled back, not left to crash the next restart.
-2. **Headless client boot test.** The pack is launched in a real headless
-   Minecraft client, so client-side crashes are caught server-side.
-3. **Multiplayer join gate.** A throwaway clone of your server is booted and
-   a real client actually joins it. If the join would kick your friends, you
-   find out first.
-4. **Join-kick self-heal.** When a gate identifies the offending mod, it is
-   quarantined, the pack regenerates, and the gate re-runs. You get a notice,
-   not a broken evening.
+- **Friends get exactly the tested version.** A change stays out of the
+  server and out of the friend pack until it passes, or until you approve
+  one that could not be fully tested. Only then does
+  [AutoModpack](https://modrinth.com/mod/automodpack) sync those exact files
+  to players.
+- **You see what was tested, skipped or uncertain.** Each change shows a
+  verdict per test (passed, failed or not tested) with the reason and the
+  loader's own error lines.
+- **You can roll back.** The files a change replaced are kept, and
+  *Undo last change* puts them back (the last five changes per server).
 
-Optional extras: an in-game AI "chat genie" (bring your own Anthropic API
-token) that executes natural-language wishes over RCON and is engineered to
-never claim success it can't verify, AutoModpack-based client sync so friends
-never manage pack files, TPS monitoring, a web file manager, scheduled
-restarts, and a storage cleaner.
+**Status: alpha.** Expect rough edges, and keep backups.
 
-## Screenshots
+## How mod changes are tested
 
-| | |
-|---|---|
-| ![Server fleet](docs/screenshots/fleet.png) | ![One-click mod installs](docs/screenshots/content.png) |
-| ![Config without editing files](docs/screenshots/config.png) | ![Web file manager](docs/screenshots/files.png) |
+Installs, updates and jars uploaded into `mods/` collect into a candidate
+for that server. A few seconds after the last change, the candidate is
+tested:
+
+1. **Dependency check.** Each jar's declared dependencies are read. Missing
+   ones are installed from Modrinth and join the candidate.
+2. **Server boot test.** A sandbox boots the server's own loader with the
+   candidate's mods (Fabric, Forge and NeoForge). If the loader names a
+   missing mod, it is installed and the test runs again.
+3. **Client test** (servers with AutoModpack). A real Minecraft client boots
+   with the files your friends would receive, then joins a throwaway server
+   with the same mods and a fresh world. This uses
+   [HeadlessMC](https://github.com/headlesshq/headlessmc) and supports Fabric
+   and Forge on Minecraft 1.20 and newer.
+
+A candidate that passes moves into place. One that fails is deleted and
+nothing live changes, but only after the same test passes on the current
+pack without it and the failure repeats; otherwise Spawnpoint does not
+blame the change. A change that could not be fully tested (the pack already
+fails, the test is unreliable, no JDK yet, an unsupported loader) waits for
+you: apply anyway, test again, or discard.
+
+Removing or disabling a mod is not boot-tested; it is refused while another
+installed mod depends on it.
+
+The client test needs a display. On a headless Linux machine, install `xvfb`
+(`sudo apt install xvfb`) so the client renders on a virtual screen. Without
+it the client runs with stubbed graphics: mod loading is tested, rendering is
+not, and the verdict says so. On macOS, Windows or a Linux desktop the test
+client opens as a small window for a few minutes. Either way the test runs on
+this machine's graphics, so it cannot vouch for every friend's GPU, driver or
+shader pack.
+
+## Other features
+
+- **AutoModpack client sync.** New modded servers get
+  [AutoModpack](https://modrinth.com/mod/automodpack), so friends install one
+  starter pack once and receive every later change on join.
+- **Chat genie** (optional, off until you add a credential). Players on your
+  list type `server <wish>` in chat; Claude Code turns the wish into server
+  commands and checks the result before reporting success. It needs a Claude
+  token or an Anthropic API key.
+- Nightly world backups (on by default; only when the world changed, newest
+  three kept), TPS and memory monitoring, scheduled restarts, an in-game
+  status bar, idle shutdown (off by default), chunk pre-generation, and a
+  storage cleaner.
 
 ## Requirements
 
-- Node.js 22+
-- [Crafty Controller](https://craftycontrol.com/) managing your servers
-- Any OS. On headless Linux the client/join gates run invisibly under `xvfb`.
-  On macOS/Windows (or a Linux desktop) the verification client opens as a
-  small window for a few minutes instead: same real client, same verdict.
-  A box with no display at all skips those two gates with an honest
-  "not verified" verdict; the server-side dry-boot always runs.
+- Node.js 22 or newer
+- [Crafty Controller](https://craftycontrol.com/) on the same machine
+- Linux, macOS or Windows. Java downloads automatically (Temurin) the first
+  time a server needs it.
+- On Linux, `zip` and `unzip` for world backups (`sudo apt install zip unzip`).
 
-## Quick start
+## Install
 
-Install [Crafty Controller](https://craftycontrol.com/) first — Spawnpoint
-manages your servers *through* it. Then:
+Install Crafty Controller first. Then:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install.sh | bash
 ```
 
-That checks Node 22+, creates the layout, builds, starts the panel on port
-**25570**, and prints the URL. Your first browser visit is a three-step
-wizard: connect Crafty by pasting a **Crafty API key** (best from a dedicated
-non-superuser account scoped to the servers this panel should manage, so
-Spawnpoint never holds anything that could unlock your admin account; or log
-in once and it mints a token for you), set a PIN, and optionally add keys.
-Java itself is zero-touch: the right Temurin JDK downloads automatically the
-first time a server needs one.
+The installer checks for Node 22, creates the layout under `~/minecraft`,
+builds the panel, starts it on port **25570**, and prints a setup link with a
+one-time setup code. The setup page asks for:
 
-**API keys required: none.** Modrinth browsing, dependency healing, boot
-testing, and client sync all work key-free. Optional: a free CurseForge key
-(adds their catalog) and an Anthropic key (enables the in-game genie).
+1. A **Crafty API key**. Create it in Crafty from a non-admin account that can
+   see the servers this panel should manage. (You can log in with a Crafty
+   username and password instead; the panel keeps the token Crafty returns
+   and does not store the password.)
+2. A **PIN** of 6 to 12 digits. Every browser needs it once every 30 days.
+3. Optional keys: CurseForge (adds their catalog) and a genie credential.
+
+Modrinth installs, dependency healing, the boot tests and client sync need
+no API keys.
 
 <details>
-<summary>Manual install instead</summary>
+<summary>Manual install</summary>
 
 ```bash
 git clone https://github.com/vayungodara/spawnpoint
@@ -85,35 +116,43 @@ npm run build
 SPAWNPOINT_ROOT=/path/to/your/layout node server/dist/index.js
 ```
 
-`SPAWNPOINT_ROOT` points at the directory containing `Crafty/servers`,
-`Shared/`, `Tools/`, and `Spawnpoint/` (see Layout below). The first-run
-wizard appears in the browser either way.
+`SPAWNPOINT_ROOT` is the folder that holds `Crafty/servers`, `Shared/`,
+`Tools/` and `Spawnpoint/`. The panel log prints the setup link on first
+start.
 </details>
 
-## Architecture
+## Security
 
-The full system design (the four verification gates, their invariants, the
-genie, client sync) is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+- Keep the panel on your LAN or a VPN such as Tailscale. Do not expose port
+  25570 to the internet.
+- Every API call except the health check, PIN unlock and the first-run
+  setup (which needs the one-time setup code) requires a PIN session or the
+  admin token. There is no
+  "trusted local address": a reverse proxy on the same machine would make
+  every visitor look local. PINs are stored as scrypt hashes, wrong guesses
+  are throttled per address and globally, and sessions expire after 30 days
+  or when the PIN changes.
+- The panel turns on RCON for each server it starts, on the game port plus
+  10000 with a random password. Minecraft binds RCON to every interface, so
+  forward only the game port, never the RCON port.
+- Scripts on the panel machine can use the admin token in
+  `<layout>/Spawnpoint/data/admin-token`:
+  `curl -H "Authorization: Bearer $(cat ~/minecraft/Spawnpoint/data/admin-token)" localhost:25570/api/servers`
+- The genie runs Claude Code with no tools, no MCP servers and a minimal
+  environment, as the `nobody` user when the panel runs as root. Its server
+  commands go over RCON. By default it cannot run `op`, `deop`, `ban`,
+  `kick`, `whitelist`, `stop` or `save-off`; set `"commandPolicy": "full"`
+  in `data/chatgenie.json` to allow everything except `stop` and `save-off`.
 
-## Layout
+## Project layout
 
-- `server/` — Fastify + TypeScript API; serves the built web app on :25570
-- `web/` — Vite + React + Tailwind frontend (pixel-art design system)
-- `data/` — all runtime state and secrets (settings, ledgers, session secret).
-  **Never committed.**
+- `server/`: Fastify and TypeScript API; serves the built web app on :25570
+- `web/`: Vite, React and Tailwind frontend
+- `site/`: the landing page, deployed as a Cloudflare Worker
+- `data/` (under the layout's `Spawnpoint/`): runtime state and secrets.
+  Never committed.
 
-## Configuration (`data/settings.json`)
-
-Created on first run. Notable optional fields:
-
-- `pinHash`: set a PIN from the Settings page to gate remote access
-  (localhost always bypasses; sessions are HMAC-signed cookies)
-- `curseforgeApiKey`: enables the CurseForge half of the content browser
-- `vercelToken` + `laneDomain`/`laneSrvTarget`/`laneRelayIp`/`laneBoxIp`:
-  optional "public lane" provisioning. Each server automatically gets a
-  `<name>.<your-domain>` address via a relay droplet + Vercel DNS SRV
-  records. Leave unset and servers are LAN/Tailscale-only.
-- `modrinthContact`: contact string appended to the Modrinth User-Agent
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how the parts fit together.
 
 ## Development
 
@@ -121,12 +160,3 @@ Created on first run. Notable optional fields:
 npm run dev:server   # API on :25570
 npm run dev:web      # Vite dev server, proxies /api
 ```
-
-## Security notes
-
-- Designed to sit behind Tailscale or a LAN. Do not expose the panel port to
-  the open internet.
-- Remote access is PIN-gated (hashed at rest, per-IP lockout, signed session
-  cookies). The genie has a `commandPolicy` setting: `no-admin` blocks
-  op/whitelist/ban-class commands for installs where wish access isn't fully
-  trusted.

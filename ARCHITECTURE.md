@@ -1,118 +1,126 @@
 # Spawnpoint architecture
 
-Spawnpoint is a Fastify + TypeScript API with a Vite/React frontend, sitting in
-front of [Crafty Controller](https://craftycontrol.com/). Crafty owns the
-Minecraft processes (start/stop/supervise); Spawnpoint owns everything around
-them — content, configuration, verification, backups, and the player-facing
-niceties. The panel is deliberately a *companion*, not a replacement: if you
-delete Spawnpoint tomorrow, your servers still run.
+Spawnpoint is a Fastify and TypeScript API with a Vite and React frontend. It
+runs next to [Crafty Controller](https://craftycontrol.com/): Crafty starts,
+stops and supervises the Minecraft processes, and Spawnpoint handles
+everything around them (content, configuration, testing, backups, in-game
+features). If you remove Spawnpoint, your servers keep running in Crafty.
 
 ```
-┌─────────────┐   HTTP    ┌──────────────┐   API+token   ┌────────────────┐
-│ web (React) │ ────────▶ │ server       │ ────────────▶ │ Crafty         │
-│ :25570      │           │ (Fastify)    │               │ Controller     │
-└─────────────┘           │              │   RCON        │  └─ MC servers │
-                          │              │ ────────────▶ │                │
-                          └──────────────┘               └────────────────┘
+┌─────────────┐   HTTP    ┌──────────────┐   API + token   ┌────────────────┐
+│ web (React) │ ────────▶ │ server       │ ──────────────▶ │ Crafty         │
+│ :25570      │           │ (Fastify)    │                 │ Controller     │
+└─────────────┘           │              │   RCON          │  └─ MC servers │
+                          │              │ ──────────────▶ │                │
+                          └──────────────┘                 └────────────────┘
 ```
 
-## Layout
+## Code layout
 
-- `server/src/routes/` — HTTP surface, one file per area
-- `server/src/services/` — all real logic; routes stay thin
-- `server/src/clients/` — Crafty API client (token from `Shared/crafty-token.txt`)
-- `web/src/pages/` — panel UI
-- `data/` — runtime state, ledgers, and secrets; never committed
+- `server/src/index.ts`: app setup, the auth hook, background watchers
+- `server/src/auth.ts`: PIN hashing, sessions, the admin token, throttling
+- `server/src/routes/`: HTTP routes, one file per area; routes stay thin
+- `server/src/services/`: the logic
+- `server/src/clients/`: Crafty, Modrinth, CurseForge and RCON clients
+- `web/src/pages/`: one file per panel page; pages other than Servers load
+  on first visit
+- `data/` (under the layout's `Spawnpoint/`): runtime state and secrets
 
-## The verification pipeline
+## Access
 
-The core idea: **a change to a server is unproven until a real Minecraft
-process has survived it.** Four gates, cheapest first:
+Every `/api` route needs a PIN session cookie or the admin token
+(`data/admin-token`), except `/api/health`, `/api/auth`, `/api/auth/check`
+and the setup wizard. The check runs once, in an `onRequest` hook, on the
+matched route rather than the raw URL. The same hook refuses cookie-carrying
+writes from another origin and rejects any `/api/servers/:id` request whose
+id is not a UUID, since ids become folder paths. File routes resolve real
+paths and refuse anything outside the server folder.
 
-1. **Static dependency scan** (`jardeps.ts`) — every jar's declared mandatory
-   dependencies (fabric.mod.json, mods.toml, nested jar-in-jar) are parsed in
-   ~1s. Missing ids are resolved against Modrinth and installed *before* the
-   first boot test. This gate never rejects on its own — it only heals; the
-   boot test remains the authority.
-2. **Server dry-boot** (`preflight.ts`) — installs are batched, then the whole
-   batch is boot-tested in a sandbox copy with the real loader. Failures are
-   parsed from the loader's own error output; the named culprit is rolled
-   back (or, if the loader blames a client-only mod, that jar is shelved to
-   the client-side pack and the batch retries).
-3. **Headless client boot** (`launchgate.ts`) — the full pack is launched in a
-   real headless Minecraft client, catching client-side crashes server-side.
-4. **Multiplayer join gate** — a throwaway clone of the server is booted and a
-   real client actually joins it, because some mods only break at the moment
-   a player connects. A join kick names its culprit; the panel quarantines
-   it, rebuilds the pack, and re-runs every gate.
+The setup wizard is open until the panel has a Crafty token and a PIN. Its
+two write routes need the setup code printed by the installer and the panel
+log.
 
-Two invariants keep the gates honest:
+## Mod changes are transactions (`packtxn.ts`)
 
-- **Sync-after-verdict.** The client modpack (AutoModpack) is synchronized to
-  players only *after* a verdict — a pass ships the jars, a rollback ships
-  the removals. Never at install time: an unproven jar that reaches a
-  player's client and crashes it at boot cannot be fixed remotely, because
-  the crash happens before the sync mod can run.
-- **Verdict fidelity.** Boot tests use fast-boot JVM flags that change speed,
-  never behavior (tiered-compilation cap, parallel GC). Anything that could
-  make the test lie — skipping bytecode verification, sandbox-only
-  performance mods — is rejected on principle.
+Installs, updates, dependency fixes and jars uploaded into `mods/` do not
+write to the server. They download into one candidate per server
+(`data/candidates/<id>/`). Twelve seconds after the last addition, the
+candidate is tested:
 
-Gates wait until zero players are online across all servers (checked twice,
-minutes apart, re-checked before the join phase), and a manifest hash lets an
-unchanged pack skip re-gating entirely.
+1. **Dependency scan** (`jardeps.ts`): reads each jar's declared mandatory
+   dependencies (`fabric.mod.json`, `mods.toml`, nested jars). Missing ids
+   are installed from Modrinth into the candidate.
+2. **Server boot test** (`preflight.ts`): a sandbox gets the server's loader
+   and libraries, hard links (or copies) of the candidate's jars, and
+   `eula=false`. The loader resolves dependencies, applies mixins and runs
+   mod initialisers, then stops at the EULA check. Missing ids named by the
+   loader are installed and the test repeats; a client-only mod that crashes
+   the server is moved to the client shelf.
+3. **Client test** (`launchgate.ts`, AutoModpack servers, Fabric and Forge):
+   HeadlessMC boots the matching Minecraft version and loader version with
+   the files a player would receive, then quick-plays into a throwaway copy
+   of the server on port 25999. A crash, a failed join or a kick fails the
+   test.
+
+Each test returns `passed`, `failed` or `unverified`:
+
+- All passed: the candidate is applied. Replaced files move to
+  `data/revisions/<id>/<txn>/` (five kept), staged files move into `mods/`
+  or the client shelf, the install ledger is updated, and only then is the
+  AutoModpack pack regenerated.
+- Failed: before blaming the change, the same test runs on the live set
+  without it. If the live set passes, the candidate is deleted and recorded
+  in the rejection history. If the live set fails too, the change was not
+  the cause and the candidate waits for the owner.
+- Unverified (no JDK yet, unsupported loader, the test client could not
+  start, the join could not run): the candidate waits for the owner to
+  apply or discard it.
+
+Removing or disabling a jar is not boot-tested; instead it is refused when
+another installed mod declares it as a dependency.
+
+Client tests wait while anyone is online on any server, and run one at a
+time under `nice`.
+
+### Display modes for the client test
+
+- `xvfb`: Linux with `xvfb-run` installed renders on a virtual display.
+- `window`: macOS, Windows or a Linux desktop open a small real window.
+- `headless`: anything else runs with HeadlessMC's stubbed LWJGL. Mod
+  loading, mixins and init are tested; rendering is not, and the verdict
+  says so.
 
 ## Client sync
 
-AutoModpack is provisioned automatically on modded servers: server-side jars,
-a per-loader client comfort kit (performance mods, conflict-aware), and
-client assets. Resource packs and shaders are first-class content: they land
-in the host pack, sync to clients, and are force-copied to the client's real
-folders so they appear in the vanilla UI.
+New modded servers get AutoModpack (pinned to its 4.x release line, since
+client and server must run the same line) and a config that requires it on
+clients. Client-only mods live on a shelf (`data/clientmods/<id>/`);
+`publishPack` mirrors the shelf into AutoModpack's extras folder and asks
+the server to regenerate the pack. The starter pack a friend imports carries
+the server's own AutoModpack build and loader version.
 
-## The chat genie (optional)
+## Chat genie (optional)
 
-An in-game AI concierge: players type a wish in chat, the genie translates it
-into commands, executes them over RCON, then **reads the world back to verify
-before claiming success**. Design points:
+Players on the genie list type `server <wish>` in chat. The panel runs
+Claude Code (`claude -p`) with no tools, no MCP servers and a whitelisted
+environment, as `nobody` when the panel runs as root. The model replies in
+a line protocol (commands, `SAY`, `DONE`); the panel runs the commands over
+RCON, reads the world back, and challenges a `DONE` that the evidence does
+not support. Admin commands are blocked unless `commandPolicy` is `full`.
+The genie only runs (and keeps a warm process) while it is enabled, has a
+credential, and a player is online on an opted-in server.
 
-- The engine is a CLI subprocess (Claude Code), spoken to over a strict text
-  protocol — which is what makes alternative engines pluggable.
-- Two model tiers: a fast default, with escalation to a stronger model for
-  wishes that need planning.
-- Bounded memory: per-server notes, episodic memory (top matches injected),
-  and a remedies ledger — all size-capped so prompts stay flat over time.
-- Off by default. Bring your own subscription token or API key.
+## Background watchers
 
-## Self-guarding operations
+Started once in `index.ts`: idle shutdown, in-game status bar, automatic
+backups, the genie, death insurance, the dependency doctor (reads crash
+logs and fixes missing dependencies through a candidate), player triggers,
+scheduled tasks, TPS sampling, the chunk pre-generation watcher, crash
+recovery after a reboot, and a Crafty watchdog. Crafty calls are cached
+briefly (server list 10 s, stats 2 s) and shared between watchers.
 
-- Deploys go through `POST /api/admin/exit`, which **refuses (409)** while a
-  genie wish, server-creation job, launch gate, preflight batch, or mod
-  download is in flight.
-- A daily janitor removes orphaned public-address lanes, provisions missing
-  ones, and repairs file-ownership drift in server directories.
-- Failure classes get self-healing watchers rather than user-facing noise.
+## Self-guarding restarts
 
-## Public addresses (optional)
-
-With a relay host and DNS credentials configured, every server automatically
-gets a public `name.your-domain` join address (SRV records, no port to
-remember). Without them, servers are LAN/VPN-only and everything else works.
-
-## Cross-platform honesty
-
-The gates need a display, and there are three answers to that:
-
-- **Headless Linux + `xvfb-run`** — the client boots invisibly in a virtual
-  framebuffer.
-- **macOS / Windows / a Linux desktop** — *visible-window mode*: the real
-  verification client opens as a small window on the desktop for a few
-  minutes, announced in the panel log so nobody closes it mid-verdict. Same
-  client, same fidelity, purely cosmetic cost.
-- **A display-less box that isn't Linux** — the client and join gates **skip
-  with an honest "not verified" verdict** rather than pretending to pass.
-  The static scan and server dry-boot run everywhere regardless.
-
-A stubbed-GL "headless anywhere" mode was considered and rejected: stubbed
-rendering can mask or invent render-init crashes, which makes the test lie —
-the same reason the boot gates refuse `-Xverify:none`.
+`POST /api/admin/exit` (used by deploy scripts) refuses with 409 while a
+wish, a server creation or a candidate test is running, unless the body has
+`"force": true`.
