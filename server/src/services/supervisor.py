@@ -13,6 +13,7 @@ import queue
 import secrets
 import shlex
 import signal
+import socketserver
 import subprocess
 import sys
 import threading
@@ -449,9 +450,11 @@ def main():
         if value.get("auto_start"):
             value["desired"] = True
             save(value)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # HTTPServer reverse-resolves its numeric bind address; loopback IPC must
+    # not depend on DNS or mDNS being available before it becomes ready.
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
-    atomic(HOME / "endpoint.json", {"port": server.server_port, "token": TOKEN})
+    atomic(HOME / "endpoint.json", {"port": server.server_address[1], "token": TOKEN})
     threading.Thread(target=server.serve_forever, daemon=True).start()
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, lambda *_: EXIT.set())

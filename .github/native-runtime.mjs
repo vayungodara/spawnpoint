@@ -72,7 +72,14 @@ async function startOwner() {
     } else if (process.platform === 'linux') system('start');
     else if (process.platform === 'win32') command('sc.exe', 'start', 'SpawnpointSupervisor');
     else command('launchctl', 'bootstrap', 'gui/' + process.getuid(), join(homedir(), 'Library/LaunchAgents/com.spawnpoint.supervisor.plist'));
-  } else owner = spawn(python, ['server/dist/services/supervisor.py'], { stdio: 'ignore' });
+  } else owner = spawn(python, ['-c', `
+import os, runpy, socket, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+def unavailable(*args):
+    raise AssertionError('loopback IPC must not perform reverse DNS')
+socket.gethostbyaddr = unavailable
+runpy.run_path(sys.argv[1], run_name='__main__')
+`, resolve('server/dist/services/supervisor.py')], { stdio: 'ignore' });
   await until(async () => (await supervisor('health')).ok, 'owner health timeout');
 }
 async function stopOwner() {
@@ -117,6 +124,7 @@ async function ready() {
 try {
   await startPanel();
   await startOwner();
+  if (!service) check('authenticated loopback IPC becomes ready without reverse DNS', (await supervisor('health')).pid === owner.pid);
   if (service && process.platform === 'darwin') {
     previousAgent = (await supervisor('health')).pid;
     console.log('LaunchAgent owner before reinstall:', previousAgent);
@@ -156,6 +164,9 @@ try {
   check('prepared and recovering imports never adopt an unrelated destination', !existsSync(join(runtime, 'servers', transferId + '.json'))
     && readFileSync(join(sourcePath, 'world/sentinel'), 'utf8') === 'original world' && readFileSync(join(destination, 'unrelated'), 'utf8') === 'another directory');
   rmSync(destination, { recursive: true });
+  // The completed conflict probe fenced that unrelated disposable inode.
+  // Dispose of its alias too before reusing the path for a different inode.
+  if (process.platform === 'win32') rmSync(join(root, 'Servers', '.' + transferId + '.spawnpoint-runtime.lock'), { force: true });
   const outside = join(root, 'outside-world'); mkdirSync(outside); writeFileSync(join(outside, 'sentinel'), 'external world');
   for (const phase of ['prepared', 'committing']) {
     transfer.phase = phase; writeFileSync(join(runtime, 'transfers', transferId + '.json'), JSON.stringify(transfer));

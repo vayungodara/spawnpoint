@@ -2,7 +2,7 @@
 // promotion proof uses .github/setup-integration.mjs and the panel API.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, renameSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, renameSync, statSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -99,19 +99,58 @@ try {
   await fenceClosed;
   running = undefined;
   check('a completed mutation releases its fence', run().status === 0 && existsSync(join(dir, 'started')));
-  const movable = join(dir, 'movable'), moved = join(dir, 'native');
+  const sourceParent = join(dir, 'crafty'), destinationParent = join(dir, 'native');
+  mkdirSync(sourceParent);
+  mkdirSync(destinationParent);
+  const movable = join(sourceParent, 'server'), moved = join(destinationParent, 'server');
   mkdirSync(movable);
-  running = spawn(python, [script, '--fence', movable], { cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] });
+  running = spawn(python, [script, '--fence', movable], { cwd: dir, stdio: ['pipe', 'pipe', 'inherit'] });
   const transferClosed = once(running, 'close');
-  await once(running.stdout, 'data');
+  await Promise.race([once(running.stdout, 'data'), transferClosed.then(([code]) => { throw new Error(`transfer fence exited before readiness: ${code}`); })]);
+  const fenceIdentity = statSync(join(movable, '.spawnpoint-runtime.lock'), { bigint: true });
+  check('a stopped transfer excludes a concurrent stopped acquisition', run(['--fence', movable]).status !== 0);
   renameSync(movable, moved);
   const movedFence = () => spawnSync(python, [script, '--fence'], { cwd: moved, input: '', encoding: 'utf8', timeout: 10000 });
   check('a stopped transfer retains the exclusive fence through directory relocation', movedFence().status !== 0);
+  if (process.platform === 'win32') {
+    const canonical = join(moved, '.spawnpoint-runtime.lock'), replacement = join(dir, 'replacement.lock');
+    writeFileSync(replacement, 'unrelated fence');
+    assert.throws(() => rmSync(canonical));
+    assert.throws(() => renameSync(replacement, canonical));
+    const identity = statSync(canonical, { bigint: true });
+    check('a held transfer refuses canonical removal or replacement and preserves file identity', identity.ino === fenceIdentity.ino && identity.dev === fenceIdentity.dev);
+  }
   running.stdin.end();
   await transferClosed;
   running = undefined;
   check('a relocated directory releases the same fence after transfer', movedFence().status === 0);
   if (process.platform === 'win32') {
+    running = spawn(python, [script, '--fence'], { cwd: moved, stdio: ['pipe', 'pipe', 'inherit'] });
+    const canonicalClosed = once(running, 'close');
+    await Promise.race([once(running.stdout, 'data'), canonicalClosed.then(([code]) => { throw new Error(`canonical fence exited before readiness: ${code}`); })]);
+    check('an unchanged canonical guard excludes acquisition through an external alias', run(['--fence', moved]).status !== 0);
+    running.stdin.end();
+    await canonicalClosed;
+    running = spawn(python, [script, '--fence', moved], { cwd: dir, stdio: ['pipe', 'pipe', 'inherit'] });
+    const aliasClosed = once(running, 'close');
+    await Promise.race([once(running.stdout, 'data'), aliasClosed.then(([code]) => { throw new Error(`alias fence exited before readiness: ${code}`); })]);
+    check('a destination alias retains exclusive fencing', movedFence().status !== 0);
+    running.kill('SIGKILL');
+    await aliasClosed;
+    running = undefined;
+    check('a killed alias holder releases its fence for a later stopped acquisition', run(['--fence', moved]).status === 0 && movedFence().status === 0);
+    mkdirSync(movable);
+    const reused = join(movable, '.spawnpoint-runtime.lock');
+    writeFileSync(reused, 'new source identity');
+    check('a reused source path refuses its stale alias without replacing either fence', run(['--fence', movable]).status !== 0
+      && readFileSync(reused, 'utf8') === 'new source identity' && statSync(join(moved, '.spawnpoint-runtime.lock'), { bigint: true }).ino === fenceIdentity.ino);
+    const wrong = join(sourceParent, 'wrong');
+    mkdirSync(wrong);
+    writeFileSync(join(wrong, '.spawnpoint-runtime.lock'), 'canonical identity');
+    linkSync(join(dir, 'replacement.lock'), join(sourceParent, '.wrong.spawnpoint-runtime.lock'));
+    check('a wrong existing alias refuses without modifying either file', run(['--fence', wrong]).status !== 0
+      && readFileSync(join(wrong, '.spawnpoint-runtime.lock'), 'utf8') === 'canonical identity'
+      && readFileSync(join(dir, 'replacement.lock'), 'utf8') === 'unrelated fence');
     const identityChecks = spawnSync(python, ['-c', `
 import importlib.util, json, pathlib, subprocess, sys, _winapi
 from unittest.mock import patch

@@ -61,6 +61,11 @@ Windows additionally uses a per-server nested Job from the revision guard.
 On Unix, a force kill restarts the whole service so no descendant retains a
 runtime fence. Other desired servers recover through their durable budgets.
 
+On Windows, stopped mutations hold the same fence inode through a stable
+hard-link alias outside the server directory, so a fenced import can rename
+the directory. This requires same-volume hard-link support. Missing identity
+or a stale alias refuses mutation rather than replacing either fence link.
+
 Intent and boot attempts are atomic per-server records. Automatic recovery
 allows three starts in ten minutes, with ten seconds between retries. Explicit
 Stop persists before sending stdin. Per-server autostart applies on service

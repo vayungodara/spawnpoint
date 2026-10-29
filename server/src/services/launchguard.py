@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import sys
 
@@ -33,12 +34,33 @@ def lock_runtime(root, relocating=False):
         # Share mode zero excludes other opens for as long as either Java
         # or this guard holds the inherited handle. The identity barrier
         # below also covers handle rundown before exit is signaled.
-        # A stopped transfer may rename the enclosing directory, never the
-        # fence inode. Share-delete still excludes every read/write opener.
-        handle = _winapi.CreateFile(str(root / ".spawnpoint-runtime.lock"), 0xC0000000, 4 if relocating else 0, 0, 4, 0x80, 0)
+        path = root / ".spawnpoint-runtime.lock"
+        flags = 0x200080 if relocating else 0x80  # OPEN_REPARSE_POINT for transfers
+        handle = _winapi.CreateFile(str(path), 0xC0000000, 0, 0, 4, flags, 0)
         stream = os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDWR), "a+b")
-        os.set_inheritable(stream.fileno(), True)
         try:
+            if relocating:
+                initial = os.fstat(stream.fileno())
+                if not stat.S_ISREG(initial.st_mode) or initial.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError("the runtime fence is not a regular file")
+                stream.close()
+                # Windows forbids renaming an ancestor of an open file, even
+                # with share-delete. Open the same inode through an external
+                # link; sharing restrictions still exclude unchanged guards.
+                # Keep this bounded, stable alias after release or a crash.
+                alias = root.parent / ("." + root.name + ".spawnpoint-runtime.lock")
+                try:
+                    os.link(path, alias)
+                except FileExistsError:
+                    pass
+                handle = _winapi.CreateFile(str(alias), 0xC0000000, 0, 0, 3, flags, 0)
+                stream = os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDWR), "a+b")
+                held, canonical = os.fstat(stream.fileno()), path.lstat()
+                if (any(not stat.S_ISREG(info.st_mode) or not info.st_ino
+                        or info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT for info in (held, canonical))
+                        or not os.path.samestat(held, canonical)):
+                    raise ValueError("the runtime fence alias needs owner recovery")
+            os.set_inheritable(stream.fileno(), True)
             # Windows closes inherited handles before signaling process exit.
             # Bridge that rundown interval with the exact persisted identity;
             # PID reuse must not fence an unrelated later process.
