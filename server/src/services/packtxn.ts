@@ -407,8 +407,8 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       const gen = generation.get(id) ?? 0;
       status('checking declared dependencies');
       let set = candidateSet(id, c);
-      const fabric = detect(serverDir(id), id).loader === 'fabric';
-      if (fabric) {
+      const solvedLoader = ['fabric', 'forge'].includes(detect(serverDir(id), id).loader);
+      if (solvedLoader) {
         status('solving the complete server and friend pack');
         const { solveCandidate } = await import('./installer.js');
         const solved = await solveCandidate(id, [], log);
@@ -439,7 +439,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       const sealed = sealedSet(id, revision);
       set = sealed;
       const witness = c.solver?.status === 'ok' ? c.solver : c.solver?.status === 'inconclusive' ? c.solver.tentative : undefined;
-      if (fabric) {
+      if (solvedLoader) {
         const paths = [...new Set([...set.serverJars, ...set.client.filter((f) => f.rel.startsWith('mods/') && f.rel.endsWith('.jar')).map((f) => f.src)])];
         let matches = !!witness && paths.length === witness.plan.length;
         for (const path of paths) {
@@ -473,7 +473,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
         if (stale()) continue;
         // the loader names missing mod ids: install them and test again
         const named = missingFromExcerpt(server.excerpt ?? []).filter((m) => !healed.has(m));
-        if (!fabric && named.length && named.length <= 4) {
+        if (!solvedLoader && named.length && named.length <= 4) {
           named.forEach((m) => healed.add(m));
           status(`installing missing dependencies: ${named.join(', ')}`);
           if ((await healMissing(id, named)).length) continue;
@@ -677,7 +677,7 @@ function activate(id: string, c: Candidate, log: (m: string) => void, approved =
     const touches = touchesServer(id, c);
     const wait = !applying || await isRunningSafe(id);
     if (!c.revision || !c.baseline) throw new Error('this change has no revision lock; test it again');
-    if (readLock(id, c.revision).loader === 'fabric' && revisionReport(id, c.revision).tests.solver?.result !== 'passed') {
+    if (['fabric', 'forge'].includes(readLock(id, c.revision).loader) && revisionReport(id, c.revision).tests.solver?.result !== 'passed') {
       throw new Error('the exact revision solver inventory check must pass before approval or promotion; test this change again');
     }
     await verifyRevision(id, c.revision);

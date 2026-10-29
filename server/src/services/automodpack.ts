@@ -6,9 +6,11 @@ import { serverDir, clientShelfDir } from './servers.js';
 import { detect, loaderVersion } from './detect.js';
 import { chownToDirOwner, writeFileAtomic } from './platform.js';
 import { rconCommand, withRcon } from '../clients/rcon.js';
+import { craftyApi } from '../clients/crafty.js';
 import * as modrinth from '../clients/modrinth.js';
 import { PATHS } from '../config.js';
-import { assertUnsealed, revisionState, verifyActiveRevision, writeLaunchGate } from './revisions.js';
+import { assertUnsealed, revisionState, verifyActiveRevision, withStoppedRevision, writeLaunchGate } from './revisions.js';
+import { stopAndWait } from './maintenance.js';
 
 // AutoModpack syncs a server's mods to every client that joins. It reads two
 // folders: the server's mods/ and automodpack/host-modpack/main/ (client-only
@@ -39,8 +41,8 @@ export function holdHosting(id: string): void {
 }
 /** Make a verified pack visible. Keep hosting OFF in the startup config:
     even an external Crafty start cannot publish an unverified future boot.
-    The reload is asynchronous in AutoModpack, so its log acknowledgement is
-    required before starting the host. */
+    AutoModpack's async feedback must go to the console: RCON returns before
+    completion and does not log feedback with broadcast-rcon-to-ops=false. */
 export async function releaseHosting(id: string, verify: () => Promise<void>): Promise<void> {
   const hold = hostingHold(id);
   if (!hold) return;
@@ -50,11 +52,16 @@ export async function releaseHosting(id: string, verify: () => Promise<void>): P
   await withRcon(id, async (send) => {
     mkdirSync(mutex); // shared with the required pre-JVM launch guard
     writeFileAtomic(join(mutex, 'owner.json'), JSON.stringify({ pid: process.pid }));
-    const offset = existsSync(logPath) ? readFileSync(logPath, 'utf8').length : 0;
-    const acknowledgement = async (re: RegExp): Promise<void> => {
+    const command = async (cmd: string, success: RegExp): Promise<void> => {
+      const offset = readFileSync(logPath, 'utf8').length;
+      await craftyApi.sendStdin(id, cmd);
       for (let i = 0; ; i++) {
-        const tail = existsSync(logPath) ? readFileSync(logPath, 'utf8').slice(offset) : '';
-        if (re.test(tail)) return;
+        const lines = readFileSync(logPath, 'utf8').slice(offset).split(/\r?\n/);
+        // Exact console feedback only; chat and intermediate Netty host logs
+        // cannot certify completion. Forge adds its logger name after INFO.
+        const messages = lines.flatMap((line) => /^\[[^[\]\r\n]+\] \[[^[\]\r\n]+\/INFO\](?: \[[^[\]\r\n]*\])?: (.*)$/.exec(line)?.slice(1) ?? []);
+        if (messages.some((message) => success.test(message))) return;
+        if (messages.some((message) => /^(?:Error while reloading config file!|Couldn't start server!)$/.test(message))) throw new Error('AutoModpack refused the publication command');
         if (i >= 30) throw new Error('AutoModpack did not acknowledge the publication command');
         await new Promise((r) => setTimeout(r, 1000));
       }
@@ -62,28 +69,38 @@ export async function releaseHosting(id: string, verify: () => Promise<void>): P
     try {
       await send('list'); // this connection cannot migrate to a later boot
       await verify();
-      writeFileAtomic(path, hold.original);
-      await send('automodpack config reload');
-      await acknowledgement(/AutoModpack server config reloaded!/);
-      writeFileAtomic(path, hold.paused);
-      await send('automodpack host start');
-      await acknowledgement(/Modpack hosting started!|Modpack hosting is already running!|Hosting modpack on Minecraft port/);
       await send('list');
-    } finally {
+      writeFileAtomic(path, hold.original);
+      await command('automodpack config reload', /^AutoModpack server config reloaded!$/);
+      await send('list');
+      writeFileAtomic(path, hold.paused);
+      await command('automodpack host start', /^Modpack hosting (?:started!|is already running!)$/);
+      await send('list');
       writeFileAtomic(path, hold.paused);
       rmSync(mutex, { recursive: true });
+    } catch (error) {
+      // A timed-out reload can still save enabled bytes or start hosting.
+      // Do not retry in this JVM or release its fence until it is gone.
+      await abortHosting(id);
+      throw error;
     }
+  });
+}
+async function abortHosting(id: string): Promise<void> {
+  if (!await stopAndWait(id)) throw new Error('publication remains fenced: the previous JVM did not stop');
+  await withStoppedRevision(id, async () => {
+    holdHosting(id);
+    rmSync(join(serverDir(id), '.spawnpoint-publication'), { recursive: true });
   });
 }
 /** Only a known-dead panel publisher's mutex can be reclaimed automatically.
     An unidentified guard stays fail-closed rather than racing a live launch. */
-export function recoverHosting(id: string): void {
+export async function recoverHosting(id: string): Promise<void> {
   const mutex = join(serverDir(id), '.spawnpoint-publication');
   if (!existsSync(join(mutex, 'owner.json'))) return;
   const { pid } = JSON.parse(readFileSync(join(mutex, 'owner.json'), 'utf8'));
   try { process.kill(pid, 0); return; } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e; }
-  holdHosting(id);
-  rmSync(mutex, { recursive: true });
+  await abortHosting(id);
 }
 
 function amDir(serverId: string): string {

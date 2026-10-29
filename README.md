@@ -32,21 +32,22 @@ Installs, updates and jars uploaded into `mods/` collect into a candidate
 for that server. A few seconds after the last change, the candidate is
 tested:
 
-1. **Whole-pack dependency check** (Fabric). The solver reads native jar
-   metadata, including aliases, nested libraries and client-only constraints.
+1. **Whole-pack dependency check** (Fabric and certified Forge versions).
+   The solver reads native jar metadata, nested libraries and side constraints.
    It checks compatible version histories against your Minecraft, loader and
    Java versions, keeping existing versions where possible. Requested mods
    stay in the pack, and an exact version request stays pinned. Downloads
    must match their declared hashes and size before they join the candidate.
-2. **Server boot test.** A sandbox boots the server's own Fabric loader with
-   the candidate's mods. Metadata compatibility is not a substitute for
-   this test: runtime and mixin failures still stop the change.
+2. **Server boot test.** A sandbox boots the server's own loader with the
+   candidate's mods. Forge must finish starting in a fresh disposable world,
+   because its EULA check happens before mod initialization. Runtime and
+   mixin failures still stop the change.
 3. **Client test** (servers with AutoModpack). A real Minecraft client boots
    with the files your friends would receive, then joins a throwaway server
    with the same mods and a fresh world. This uses
    [HeadlessMC](https://github.com/headlesshq/headlessmc) on Minecraft 1.20
-   and newer. The Fabric join also runs
-   AutoModpack's own handshake and checks that the client ends up with
+   and newer. The Fabric and certified Forge joins also run
+   AutoModpack's own handshake and check that the client ends up with
    exactly the tested files.
 
 A candidate that fails is deleted and nothing live changes, but only after
@@ -55,8 +56,9 @@ repeats; otherwise Spawnpoint does not blame the change. A change that
 could not be fully tested (the pack already fails, the test is unreliable,
 no JDK yet, not enough free memory, an unsupported loader) waits for you:
 approve the test gaps, test again, or discard. Unsupported launch recipes
-and failed hash checks cannot be waived. Forge and NeoForge are not yet
-supported by locked revisions.
+and failed hash checks cannot be waived. Locked Forge revisions currently
+support Minecraft 1.20.1 with Forge 47.4.28. Other Forge versions and NeoForge
+are not yet supported by locked revisions.
 
 Before the first revision, you must approve a required Crafty launch guard
 and managed AutoModpack publication. The guard checks the locked files and
@@ -64,6 +66,14 @@ Java before every start, including starts from Crafty itself. It also keeps
 a start from racing a pack swap. This requires Python 3 on the Crafty host.
 The current Fabric recipe supports an explicit Tools Java path, heap flags,
 and `-jar fabric.jar nogui`; custom launch recipes are refused.
+The Forge recipe uses the official installer's unchanged argument file and
+optional heap-only `user_jvm_args.txt`. Forge AutoModpack support requires the
+unmodified 4.0.7 build for 1.20.1, an `automodpack*.jar` filename and an explicit
+managed-publication config with self-updating disabled. Unknown custom mod
+discovery remains inconclusive, never a feasible plan.
+Forge AutoModpack 4.0.7 cannot publish an empty pack. Restoring a pack that
+contains only the AutoModpack bootstrap stops with publication refused.
+Spawnpoint does not serve the stale manifest or restore the world.
 
 Each revision locks Minecraft, the loader and its version, Java, and every
 pack-owned file's path, side, SHA-512, size and source IDs. Requested mods

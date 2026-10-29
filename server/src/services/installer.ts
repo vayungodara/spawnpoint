@@ -16,8 +16,9 @@ import { stage, stagedFiles, stagingPath, invalidate, assertModsWritable, assert
 import { scanJars } from './jardeps.js';
 import { assertUnsealed, revisionState, hashes } from './revisions.js';
 import { NetworkCatalog } from './solver/catalog.js';
-import { solve, type Pin, type SolveResult } from './solver/index.js';
+import { modIds, solve, type Pin, type SolveResult } from './solver/index.js';
 import { readFabricJar } from './solver/fabric.js';
+import { FORGE_PROFILES, readForgeJar } from './solver/forge.js';
 
 // The install engine: picks the right build for the server's MC version and
 // loader (releases first), resolves required dependencies (keeping any copy
@@ -205,7 +206,9 @@ export function solveCandidate(
       const det = detect(serverDir(id), id);
       const loader = loaderVersion(serverDir(id), det);
       const java = javaFor(det.mc, det.loader);
-      if (det.loader !== 'fabric' || !det.mc || !loader || !java) throw new Error('The solver needs known Minecraft, Fabric loader and Java versions');
+      if ((det.loader !== 'fabric' && det.loader !== 'forge') || !det.mc || !loader || !java) throw new Error('The solver needs known Minecraft, supported loader and Java versions');
+      const profile = det.loader === 'forge' ? FORGE_PROFILES[`${det.mc}-${loader}`] : undefined;
+      if (det.loader === 'forge' && !profile) throw new Error('This Forge runtime metadata profile is not certified');
       const snapshot = async () => {
         const changes = stagedFiles(id);
         const inventory = async (files: StagedFile[], entries: LedgerEntry[]) => {
@@ -233,16 +236,17 @@ export function solveCandidate(
       const pinsByPath = new Map<string, Pin>();
       const idsByPath = new Map<string, string[]>();
       for (const row of [...before.live, ...before.rows]) {
-        const meta = readFabricJar(readFileSync(row.path));
-        idsByPath.set(row.path, meta.ids);
+        const meta = det.loader === 'forge' ? readForgeJar(readFileSync(row.path), basename(row.path), { mc: det.mc, forge: loader }) : readFabricJar(readFileSync(row.path));
+        const ids = modIds(meta);
+        idsByPath.set(row.path, ids);
         const entry = row.entry;
         if (entry && entry.sha1.toLowerCase() !== row.sha1) throw new Error(`Installed bytes disagree with the source ledger for ${entry.file}`);
         const prefix = entry?.source === 'curseforge' ? 'cf:' : '';
-        const projectId = entry ? prefix + entry.projectId : `local:${meta.ids[0]}`;
+        const projectId = entry ? prefix + entry.projectId : `local:${ids[0] ?? ('loader' in meta ? meta.module : '')}`;
         const versionId = entry ? prefix + entry.versionId : `local:${row.sha512}`;
         const file = basename(row.path);
-        const version: Version = { id: versionId, project_id: projectId, name: entry?.title ?? meta.name ?? file,
-          version_number: meta.version, game_versions: [det.mc], loaders: ['fabric'], version_type: 'release',
+        const version: Version = { id: versionId, project_id: projectId, name: entry?.title ?? ('name' in meta ? meta.name : undefined) ?? file,
+          version_number: 'loader' in meta ? meta.mods[0]?.version ?? meta.jarVersion : meta.version, game_versions: [det.mc], loaders: [det.loader], version_type: 'release',
           date_published: entry?.installedAt || '1970-01-01T00:00:00Z', downloads: 0, dependencies: [],
           files: [{ filename: file, url: '', primary: true, size: row.size, hashes: { sha1: row.sha1, sha512: row.sha512 } }] };
         local.set(versionId, { version, path: row.path, clientOnly: row.clientOnly });
@@ -251,7 +255,7 @@ export function solveCandidate(
         pinsByPath.set(row.path, pin);
         if (before.live.includes(row)) installed.push(pin);
       }
-      catalog = new NetworkCatalog({ mc: det.mc, loader: 'fabric' }, local);
+      catalog = new NetworkCatalog({ mc: det.mc, loader: det.loader, loaderVersion: loader }, local);
       // Removal/disable proposals stay removed; the solver may not silently
       // reinstall a library that the owner has explicitly taken out.
       const removedNames = new Set(before.changes.filter((f) => (f.remove && !f.automatic) || f.file.endsWith('.disabled')).map((f) => f.replaces ?? f.file));
@@ -278,7 +282,7 @@ export function solveCandidate(
         const projectId = request.projectId.startsWith('cf:') ? request.projectId : (await modrinth.getProject(request.projectId)).id;
         requests.set(projectId, { ...request, projectId, requested: requests.get(projectId)?.requested === true || request.requested !== false });
       }
-      const solved = await solve({ mc: det.mc, loader: 'fabric', loaderVersion: loader, java: javaVersion,
+      const solved = await solve({ mc: det.mc, loader: det.loader, loaderVersion: loader, java: javaVersion, languageVersions: profile?.languages,
         installed, add: [...requests.values()], remove, exclude: removed.map((row) => idsByPath.get(row.path)![0]), side: 'both' }, catalog, { maxMs: 60_000 });
       result.solver = solved;
       const selection = solved.status === 'ok' ? solved : solved.status === 'inconclusive' ? solved.tentative : undefined;
@@ -338,7 +342,7 @@ export function solveCandidate(
 export async function install(serverUuid: string, opts: InstallOpts, log: (m: string) => void = noLog): Promise<InstallResult> {
   const { type } = opts;
   const det = detect(serverDir(serverUuid), serverUuid);
-  if (type === 'mod' && det.loader === 'fabric' && !opts.direct) return solveCandidate(serverUuid,
+  if (type === 'mod' && (det.loader === 'fabric' || det.loader === 'forge') && !opts.direct) return solveCandidate(serverUuid,
     [{ projectId: opts.projectId, versionId: opts.versionId, requested: !opts.dependency }], log);
   const isServerContent = type === 'mod' || type === 'plugin' || type === 'datapack';
   const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: isServerContent };
@@ -438,7 +442,7 @@ export async function installCurseforge(
 ): Promise<InstallResult> {
   const type: ContentType = opts.type ?? 'mod';
   const det = detect(serverDir(serverUuid), serverUuid);
-  if (type === 'mod' && det.loader === 'fabric' && !opts.direct) return solveCandidate(serverUuid,
+  if (type === 'mod' && (det.loader === 'fabric' || det.loader === 'forge') && !opts.direct) return solveCandidate(serverUuid,
     [{ projectId: `cf:${opts.modId}`, versionId: opts.fileId ? `cf:${opts.fileId}` : undefined }], log);
   const isServerContent = type === 'mod' || type === 'plugin' || type === 'datapack';
   const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: isServerContent };

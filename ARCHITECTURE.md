@@ -47,8 +47,9 @@ write to the server. They download into one candidate per server
 (`data/candidates/<id>/`). Twelve seconds after the last addition, the
 candidate is tested:
 
-1. **Whole-pack solver** (`solver/`, Fabric): reads native dependency ranges,
-   breaks, provides aliases, nested jars and environment scopes. The catalog
+1. **Whole-pack solver** (`solver/`, Fabric and certified Forge profiles):
+   reads native dependency ranges, breaks, provides aliases, nested jars and
+   environment scopes. The catalog
    loads complete compatible Modrinth or paginated CurseForge domains and
    verifies artifact hashes and size. The bounded search minimizes changes
    to the original live inventory while retaining requested projects and
@@ -58,22 +59,27 @@ candidate is tested:
    sealed inventory must match the complete solver witness. Approval and
    promotion both require this check to pass for that exact revision.
    Owner consent cannot override an inventory mismatch.
-2. **Server boot test** (`preflight.ts`): a sandbox gets the locked Fabric
-   loader, libraries, configs, copies of the candidate's jars, and
-   `eula=false`. The loader resolves dependencies, applies mixins and runs
-   mod initialisers, then stops at the EULA check. A client-only mod that
+2. **Server boot test** (`preflight.ts`): a sandbox gets the locked loader,
+   libraries, configs and copies of the candidate's jars. Fabric uses
+   `eula=false`, resolves dependencies, applies mixins and runs mod
+   initialisers before the EULA check. Forge initializes after that check,
+   so it must reach `Done` in a fresh flat world on a loopback-only ephemeral
+   port, then stop before configs are captured. A client-only mod that
    crashes the server can be moved to the client shelf and retested. Fabric
-   no longer guesses missing dependencies from crash text. Other loaders
-   retain the legacy dependency scan and repair path, but are not supported
-   by locked revisions yet.
-3. **Client test** (`launchgate.ts`, Fabric AutoModpack revisions):
+   and Forge no longer guess missing dependencies from crash text. Other
+   loaders retain the legacy dependency scan and repair path, but are not
+   supported by locked revisions yet.
+3. **Client test** (`launchgate.ts`, Fabric and certified Forge AutoModpack revisions):
    HeadlessMC boots the matching Minecraft version and loader version with
    the files a player would receive, then quick-plays into a throwaway copy
    of the server on port 25999. A crash, a failed join or a kick fails the
-   test. On Fabric AutoModpack servers the join also runs AutoModpack's handshake
+   test. On supported AutoModpack servers the join also runs AutoModpack's handshake
    against the throwaway server (trusting only its certificate) and compares
    the files the client ends up with against the tested set by path, size
-   and SHA-1. No handshake evidence means `unverified`, never `passed`.
+   and SHA-1. After the handshake, SHA-512 checks cover both client locations,
+   the bootstrap jar and unexpected executable inputs. The observed game JVM
+   must use the locked Java executable, even when HeadlessMC has other cached
+   JREs. No handshake evidence means `unverified`, never `passed`.
 
 The catalog's mod-id provider index is partial: observed jar metadata, slug
 lookups and search hits discover candidates but cannot prove absence. The
@@ -129,8 +135,11 @@ observed rollback baseline is explicitly not a client-certified revision.
 
 The owner must first approve the mandatory Crafty launch guard and managed
 publication. Locked revisions currently accept Fabric's explicit Tools Java
-command with heap flags and `-jar fabric.jar nogui`. Unsupported loaders and
-custom recipes are refused before adoption, not treated as verified.
+command with heap flags and `-jar fabric.jar nogui`, or the certified Forge
+1.20.1/47.4.28 installer's exact OS argument file and heap-only user arguments.
+Forge seals `defaultconfigs/` and refuses custom `defaultConfigPath` values.
+Unsupported loaders and custom recipes are refused before adoption, not
+treated as verified.
 Direct config, pack, import or runtime edits cannot bypass an active lock.
 World restore remains a separate owner-approved operation.
 
@@ -211,9 +220,14 @@ On a locked revision, hosting stays off in the on-disk startup configuration.
 After fresh boot proof, `packCheck` compares the manifest with the promoted
 client inventory and SHA-512-checks the actual served bytes, including shelf
 mirrors. Only then does `releaseHosting` reload the enabled configuration and
-start the host through one non-reconnecting RCON session, waiting for log
-acknowledgements. A shared publication mutex prevents a concurrent direct
-start from exposing an unverified pack. Failure rolls the pack back.
+start the host through Crafty's console, waiting for each command's terminal
+log acknowledgement. RCON returns before AutoModpack's asynchronous commands
+finish, and disabled RCON broadcasts hide their later feedback. One open,
+non-reconnecting RCON session checks that publication stays on the same boot.
+A shared publication mutex prevents a concurrent direct start from exposing
+an unverified pack. On ambiguous completion or publisher death, recovery
+stops the old JVM and acquires its lifetime fence before restoring paused
+bytes and releasing the mutex. Failure rolls the pack back.
 
 ## Chat genie (optional)
 

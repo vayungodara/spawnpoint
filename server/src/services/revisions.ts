@@ -12,6 +12,7 @@ import { clientShelfDir, javaFor, serverDir } from './servers.js';
 import { ledgerEntries, type LedgerEntry } from './ledger.js';
 import { writeFileAtomic } from './platform.js';
 import { hostingHold } from './automodpack.js';
+import { parse } from 'smol-toml';
 
 // A lock is an inventory, never a fresh interpretation of the current pack.
 // Snapshots own real copies. Test JVMs and live folders never share writable
@@ -57,7 +58,7 @@ export interface RevisionInput {
   entry?: LedgerEntry;
 }
 const run = promisify(execFile);
-export const PACK_ROOTS = ['mods', 'config', 'kubejs', 'emotes', 'libraries', 'versions', '.fabric/server'];
+export const PACK_ROOTS = ['mods', 'config', 'defaultconfigs', 'kubejs', 'emotes', 'libraries', 'versions', '.fabric/server'];
 const root = (id: string): string => { serverDir(id); return join(PATHS.data, 'locked-revisions', id); };
 export const revisionDir = (id: string, revision: string): string => {
   if (!/^[a-zA-Z0-9_-]+$/.test(revision)) throw new Error('invalid revision');
@@ -75,7 +76,7 @@ export function packPath(path: string, location: LockedFile['location']): string
   safePath(path);
   if (!['server', 'shelf', 'extra'].includes(location)) throw new Error('invalid pack location');
   const roots = location === 'server' ? PACK_ROOTS : location === 'shelf' ? ['mods'] : ['mods', 'config', 'kubejs', 'emotes', 'resourcepacks', 'shaderpacks'];
-  const special = location === 'server' && ['fabric.jar', '.spawnpoint-launch.py', 'automodpack/automodpack-server.json'].includes(path);
+  const special = location === 'server' && ['fabric.jar', 'user_jvm_args.txt', '.spawnpoint-launch.py', 'automodpack/automodpack-server.json'].includes(path);
   if (!special && !roots.some((root) => path.startsWith(`${root}/`))) throw new Error(`not a pack-owned path: ${location}/${path}`);
   if (location === 'shelf' && path !== `mods/${basename(path)}`) throw new Error('shelf files must be direct mods/ children');
   return path;
@@ -229,6 +230,8 @@ export async function sealRevision(id: string, revision: string, inputs: Revisio
         requested: input.entry?.via !== 'dependency',
       });
     }
+    const sealed = await launchSpec(id, join(part, 'files', 'server'));
+    if (sealed.command !== command || JSON.stringify(sealed.argv) !== JSON.stringify(argv) || sealed.det.mc !== det.mc || sealed.det.loader !== det.loader || sealed.loader !== loader) throw new Error('launch inputs changed while sealing the revision');
     files.sort((a, b) => `${a.location}/${a.path}`.localeCompare(`${b.location}/${b.path}`));
     const identity = (f: LockedFile): string => f.source.projectId ? `${f.source.kind}:${f.source.projectId}` : `${f.location}/${f.path}`;
     const lock: RevisionLock = { schema: 1, id: revision, minecraft: det.mc, loader: det.loader, loaderVersion: loader, java, command, arguments: argv.slice(1), files,
@@ -245,19 +248,56 @@ export async function sealRevision(id: string, revision: string, inputs: Revisio
 }
 /** One validator for adoption and sealing: refuse unsupported recipes before
     changing Crafty. Arbitrary agents, @files and --universe can escape tests. */
-async function launchSpec(id: string) {
-  const det = detect(serverDir(id), id);
-  const loader = loaderVersion(serverDir(id), det);
+async function launchSpec(id: string, dir = serverDir(id)) {
+  const det = detect(dir, id);
+  const loader = loaderVersion(dir, det);
   if (!det.mc || !loader) throw new Error('Minecraft and loader versions must be known before sealing a revision');
-  if (det.loader !== 'fabric') throw new Error('locked revision testing currently supports Fabric only');
+  if (det.loader !== 'fabric' && !(det.loader === 'forge' && det.mc === '1.20.1' && loader === '47.4.28')) throw new Error('locked revisions support Fabric and the certified Forge 1.20.1 / 47.4.28 recipe');
   const command = (await craftyApi.getServer(id)).execution_command;
   const javaCommand = command.startsWith(GUARD) ? command.slice(GUARD.length) : command;
   const executable = /^"([^"]+)"|^(\S+)/.exec(javaCommand)?.slice(1).find(Boolean);
   if (!executable || executable !== javaFor(det.mc, det.loader)) throw new Error('the server and test must use the same explicit Tools/ Java runtime');
   const parsed = await run(process.platform === 'win32' ? 'python' : 'python3', ['-c', 'import json,shlex,sys; print(json.dumps(shlex.split(sys.argv[1])))', javaCommand]);
-  const argv = JSON.parse(parsed.stdout) as string[];
-  const jar = argv.indexOf('-jar');
-  if (argv[0] !== executable || jar < 1 || argv.slice(1, jar).some((a) => !/^-Xm[sx]\d+[kKmMgG]$/.test(a)) || argv.slice(jar).join(' ') !== '-jar fabric.jar nogui') throw new Error('unsupported Fabric launch recipe; revision tests require only heap flags and -jar fabric.jar nogui');
+  let argv = JSON.parse(parsed.stdout) as string[];
+  const heap = (arg: string): boolean => /^-Xm[sx]\d+[kKmMgG]$/.test(arg);
+  if (det.loader === 'fabric') {
+    const jar = argv.indexOf('-jar');
+    if (argv[0] !== executable || jar < 1 || argv.slice(1, jar).some((a) => !heap(a)) || argv.slice(jar).join(' ') !== '-jar fabric.jar nogui') throw new Error('unsupported Fabric launch recipe; revision tests require only heap flags and -jar fabric.jar nogui');
+  } else {
+    const fml = join(dir, 'config', 'fml.toml');
+    if (existsSync(fml)) {
+      const config = parse(readFileSync(fml, 'utf8'));
+      if (config.defaultConfigPath !== undefined && config.defaultConfigPath !== 'defaultconfigs') throw new Error('Forge defaultConfigPath overrides are not supported by locked revisions');
+    }
+    const autoModpack = join(dir, 'automodpack', 'automodpack-server.json');
+    const mods = join(dir, 'mods');
+    const hasAutoModpack = existsSync(mods) && readdirSync(mods).some((file) => /^automodpack.*\.jar$/i.test(file));
+    if (hasAutoModpack && !existsSync(autoModpack)) throw new Error('Locked Forge AutoModpack requires an explicit managed-publication config before testing');
+    if (existsSync(autoModpack)) {
+      const held = dir === serverDir(id) && hostingHold(id);
+      const cfg = JSON.parse(held ? held.original : readFileSync(autoModpack, 'utf8'));
+      if (cfg.DO_NOT_CHANGE_IT !== 2 || cfg.modpackHost !== true || cfg.generateModpackOnStart !== true || cfg.selfUpdater !== false) throw new Error('Locked Forge AutoModpack requires a version 2 managed-publication config with hosting and generation enabled, and selfUpdater:false');
+    }
+    const name = process.platform === 'win32' ? 'win_args.txt' : 'unix_args.txt';
+    const argfile = `libraries/net/minecraftforge/forge/${det.mc}-${loader}/${name}`;
+    const index = argv.indexOf(`@${argfile}`);
+    const prefix = argv.slice(1, index);
+    if (argv[0] !== executable || index < 1 || argv.slice(index).join(' ') !== `@${argfile} nogui`
+      || prefix.filter((arg) => arg === '@user_jvm_args.txt').length > 1 || prefix.some((arg) => arg !== '@user_jvm_args.txt' && !heap(arg))) throw new Error('unsupported Forge launch recipe; only heap flags, @user_jvm_args.txt and the certified loader argfile are allowed');
+    // Exact official installer data, not an allowlist that could admit agents,
+    // absolute classpaths, nested @files, a different target or world options.
+    const bytes = readFileSync(join(dir, argfile));
+    const expected = name === 'win_args.txt'
+      ? 'f86ee984b4577121b7fcbc41f4c5db5457370e7037841e97ceb348b9f9e928fcd5d9fae8320e3ce8399a1e8e46737d62044be5ce2bbe29cfb9fedc1b856c8e30'
+      : '667b0896ec529f99355eaf05761c6d0411c9b14b5c92a2eb9ba1dc3fbff82d1c6f60c27ac07e00f78ceeb40b705bad66ce3e5a64b0aac3c767849e4fb05094e5';
+    if (createHash('sha512').update(bytes).digest('hex') !== expected) throw new Error('Forge loader arguments differ from the certified official installer');
+    const flags = prefix.flatMap((arg) => arg !== '@user_jvm_args.txt' ? [arg]
+      : readFileSync(join(dir, 'user_jvm_args.txt'), 'utf8').replace(/#[^\r\n]*/g, '').split(/\s+/).filter(Boolean));
+    if (flags.some((arg) => !heap(arg))) throw new Error('Forge user_jvm_args.txt must contain only heap flags and comments');
+    // The sandbox uses the sealed expansion, so its smaller heap cannot be
+    // overridden by an @file. Crafty's invocation and both files stay locked.
+    argv = [executable, ...flags, ...bytes.toString('utf8').trim().split(/\s+/), 'nogui'];
+  }
   return { det: { ...det, mc: det.mc }, loader, command, executable, argv };
 }
 export function livePath(id: string, f: Pick<LockedFile, 'path' | 'location'>): string {
@@ -334,12 +374,12 @@ export function revisionInputs(id: string): RevisionInput[] {
   const dir = serverDir(id);
   const ledger = ledgerEntries(id);
   const inputs: RevisionInput[] = [];
-  for (const name of ['config', 'kubejs', 'emotes']) for (const src of packFiles(join(dir, name))) inputs.push({ src, path: relative(dir, src).replace(/\\/g, '/'), side: 'server', location: 'server' });
+  for (const name of ['config', 'defaultconfigs', 'kubejs', 'emotes']) for (const src of packFiles(join(dir, name))) inputs.push({ src, path: relative(dir, src).replace(/\\/g, '/'), side: 'server', location: 'server' });
   const amConfig = join(dir, 'automodpack', 'automodpack-server.json');
   if (existsSync(amConfig)) inputs.push({ src: amConfig, path: 'automodpack/automodpack-server.json', side: 'server', location: 'server' });
   // Remap caches and processed mods are generated outputs, not launch inputs.
   // The downloaded Minecraft jar under .fabric/server is a launch input.
-  for (const name of ['.spawnpoint-launch.py', 'fabric.jar', 'libraries', 'versions', '.fabric/server']) {
+  for (const name of ['.spawnpoint-launch.py', 'fabric.jar', 'user_jvm_args.txt', 'libraries', 'versions', '.fabric/server']) {
     const src = join(dir, name);
     if (!existsSync(src)) continue;
     for (const file of lstatSync(src).isDirectory() ? packFiles(src) : [src]) inputs.push({ src: file, path: relative(dir, file).replace(/\\/g, '/'), side: 'server', location: 'server' });

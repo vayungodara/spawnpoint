@@ -12,6 +12,7 @@ Run `npm ci` and `npm run build`, then:
 node .github/smoke-boot.mjs
 node .github/wizard-e2e.mjs
 node .github/revision-guard.mjs
+node .github/publication-guard.mjs
 node .github/solver-test.mjs
 node .github/solver-install.mjs
 npx oxlint server/src
@@ -24,6 +25,8 @@ Crafty/Fabric proof below. The installer checks need Java on `PATH` and use
 an isolated layout with controlled catalog/CDN responses. The current
 baseline has five server lint warnings and two web lint warnings. Do not
 suppress them to make a change look green.
+In a seeded orb, prepend the installed `Tools/jdk-21…/bin` directory to
+`PATH` for the installer checks. The setup script installs Java there.
 
 ## Disposable orb integration environment
 
@@ -52,6 +55,34 @@ jars. The seed pins exact Modrinth version IDs. ImmediatelyFast is absent so
 the xvfb run can check the real AutoModpack handshake without omitting a mod.
 The script boots the fixture once and leaves it stopped. The container name
 is `crafty`; mounts and the pinned image digest are in `.amp/services.yaml`.
+
+For Forge acceptance, import a separate disposable Minecraft 1.20.1 server
+from the official Forge 47.4.28 installer. Crafty imports ZIPs from
+`/srv/sp/Crafty/import/upload/`, not the import root. Wait for Crafty's
+`importing` flag to clear before seeding files or starting. Use Tools Java 21,
+the unchanged OS argument file and heap-only `user_jvm_args.txt`. Keep a nonempty
+baseline: AutoModpack `KcBYU5P0` and FerriteCore `DG5Fn9Sz`. Request Waystones
+`Y0IgdaoP`; its Balm dependency is `dDN38ae7`. Require the native server and
+client graph to include `automodpack_mod`, not the service-only bootstrap's
+outer `automodpack` metadata. The config must explicitly use version 2,
+hosting and generation enabled, and `selfUpdater:false`.
+Boot and stop this baseline before sealing, as the Fabric seed does, so the
+lock includes AutoModpack's expanded defaults. Hash drift on a later live
+boot must still refuse publication, even when only config formatting changed.
+Keep `broadcast-rcon-to-ops=false`: publication uses Crafty's stdin endpoint
+and waits for native console completion. Check interrupted reload and host
+start: kill the publisher before acknowledgement, then restart the panel.
+Recovery must retain the publication mutex until the old JVM exits and its
+lifetime fence can be acquired, then restore exact paused config bytes.
+
+Forge must reach `Done` before the server test passes. A constructor-failing
+mod must fail after the EULA check. Repeat the full HTTP consent, promotion,
+publication and Undo checks below. Also probe renamed ledger-identified
+AutoModpack jars, missing managed config, custom `defaultConfigPath`, changed
+`defaultconfigs/`, and a cached Java 17 competing with locked Java 21. Unknown
+discovery must yield no feasible witness. A bootstrap-only baseline cannot
+publish because AutoModpack rejects empty packs; retain the publication
+refusal as a failure, not a successful Undo proof.
 
 ## Pack-change acceptance
 

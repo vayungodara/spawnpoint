@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { PATHS } from '../../config.js';
 import * as modrinth from '../../clients/modrinth.js';
 import * as curseforge from '../../clients/curseforge.js';
@@ -8,21 +8,22 @@ import type { Version, VersionFile } from '../../clients/modrinth.js';
 import { hashes } from '../revisions.js';
 import { writeFileAtomic } from '../platform.js';
 import { readFabricJar } from './fabric.js';
-import type { Catalog, JarMeta } from './index.js';
+import { readForgeJar } from './forge.js';
+import { modIds, type Catalog, type NativeMeta } from './index.js';
 
 /** A bounded catalog session. Domains are complete or fail, while discovered
  * provider mappings are explicitly partial: a search hit is never proof that
  * no other project exists. Immutable artifacts are shared across sessions. */
 export class NetworkCatalog implements Catalog {
   private domains = new Map<string, Promise<Version[]>>();
-  private metas = new Map<string, JarMeta>();
+  private metas = new Map<string, NativeMeta>();
   private index = new Map<string, Set<string>>();
   private downloaded = 0;
   private bytes = 0;
   readonly manualDownloads: { title: string; url: string }[] = [];
 
   constructor(
-    private filter: { mc: string; loader: 'fabric' },
+    private filter: { mc: string; loader: 'fabric' | 'forge'; loaderVersion?: string },
     private local: Map<string, { version: Version; path: string; clientOnly?: boolean }> = new Map(),
     private limits = { downloads: 64, bytes: 256 * 1024 * 1024 },
   ) {}
@@ -115,9 +116,17 @@ export class NetworkCatalog implements Catalog {
     return path;
   }
 
-  async jarMeta(version: Version): Promise<JarMeta> {
+  async jarMeta(version: Version): Promise<NativeMeta> {
     if (!this.metas.has(version.id)) {
-      const meta = readFabricJar(readFileSync(await this.artifact(version)));
+      const path = await this.artifact(version);
+      const file = version.files.find((file) => file.primary) ?? version.files[0];
+      // Local filenames survive the solver witness. Forge discovery (including
+      // service bootstraps and automatic module names) must see that same name.
+      const filename = this.local.has(version.id) ? basename(path) : file.filename;
+      if (this.filter.loader === 'forge' && !this.filter.loaderVersion) throw new Error('Forge metadata needs the installed loader version');
+      const meta = this.filter.loader === 'forge'
+        ? readForgeJar(readFileSync(path), filename, { mc: this.filter.mc, forge: this.filter.loaderVersion! })
+        : readFabricJar(readFileSync(path));
       const shelved = [...this.local.values()].some((f) => f.version.project_id === version.project_id && f.clientOnly);
       const project = version.project_id.startsWith('cf:') || version.project_id.startsWith('local:')
         ? undefined : await modrinth.getProject(version.project_id);
@@ -125,12 +134,13 @@ export class NetworkCatalog implements Catalog {
         if (meta.environment === 'server') throw new Error(`Conflicting server/client declarations for ${version.name}`);
         meta.environment = 'client';
       }
-      const index = (node: JarMeta): void => {
-        for (const id of node.ids) {
+      const index = (node: NativeMeta): void => {
+        for (const id of modIds(node)) {
           if (!this.index.has(id)) this.index.set(id, new Set());
           this.index.get(id)!.add(version.project_id);
         }
-        node.nested.forEach(index);
+        if ('loader' in node) node.nested.forEach((entry) => index(entry.jar));
+        else node.nested.forEach(index);
       };
       index(meta);
       this.metas.set(version.id, meta);

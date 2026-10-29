@@ -1,7 +1,10 @@
 import type { Version } from '../../clients/modrinth.js';
 import { compareFabricVersions, matchesFabric, type JarMeta, type Predicate } from './fabric.js';
+import { validateForge, type ForgeJar } from './forge.js';
 
 export type { JarMeta, Predicate } from './fabric.js';
+export type NativeMeta = JarMeta | ForgeJar;
+export const modIds = (meta: NativeMeta): string[] => 'loader' in meta ? meta.discovered?.flatMap(modIds) ?? meta.mods.map((mod) => mod.id) : meta.ids;
 export interface Pin {
   projectId: string;
   versionId: string;
@@ -11,9 +14,11 @@ export interface Pin {
 }
 export interface SolveInput {
   mc: string;
-  loader: 'fabric';
+  loader: 'fabric' | 'forge';
   java: string;
   loaderVersion: string;
+  languageVersions?: Record<string, string>;
+  features?: Record<string, string>;
   installed: Pin[];
   add: { projectId: string; versionId?: string; requested?: boolean }[];
   remove: string[];
@@ -24,11 +29,11 @@ export interface SolveInput {
 }
 export interface Catalog {
   /** Complete compatible domain, including installed and explicitly pinned versions. */
-  versions(projectId: string, filter: { mc: string; loader: 'fabric' }): Promise<Version[]>;
-  jarMeta(version: Version): Promise<JarMeta>;
-  /** Complete provider index for a Fabric id (including provides and nested ids).
+  versions(projectId: string, filter: { mc: string; loader: 'fabric' | 'forge' }): Promise<Version[]>;
+  jarMeta(version: Version): Promise<NativeMeta>;
+  /** Complete provider index for a native id (including nested ids).
    * Missing capability is unknown, not evidence that no provider exists. */
-  providers?(modId: string, filter: { mc: string; loader: 'fabric' }): Promise<string[] | { projects: string[]; complete: boolean }>;
+  providers?(modId: string, filter: { mc: string; loader: 'fabric' | 'forge' }): Promise<string[] | { projects: string[]; complete: boolean }>;
   /** Needed only for required Modrinth dependencies with a version id but no project id. */
   version?(versionId: string): Promise<Version>;
 }
@@ -40,9 +45,9 @@ export type SolveResult =
   | { status: 'conflict'; explanation: string[] }
   | { status: 'inconclusive'; reason: string; tentative?: SolvedPlan };
 
-interface Pick { version: Version; meta: JarMeta }
+interface Pick { version: Version; meta: NativeMeta }
 interface Unit { meta: JarMeta; owner: string; side: number }
-interface Solution { selected: Map<string, Pick>; active: Unit[] }
+interface Solution { selected: Map<string, Pick>; active: Unit[]; warnings?: string[] }
 class Exhausted extends Error {}
 
 const describe = (unit: Unit): string => `${unit.meta.name ?? unit.meta.ids[0]} ${unit.meta.version} (${unit.owner})`;
@@ -82,7 +87,7 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
   let unknown: string | undefined;
   const uncertain = (reason: string): null => { unknown ??= reason; return null; };
   const domains = new Map<string, Version[]>();
-  const metadata = new Map<string, JarMeta>();
+  const metadata = new Map<string, NativeMeta>();
   const providers = new Map<string, { projects: string[]; complete: boolean }>();
   const missingProviders = new Set<string>();
   const versionProjects = new Map<string, string>();
@@ -107,9 +112,11 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
     }
     return domains.get(id)!;
   };
-  const meta = async (version: Version): Promise<JarMeta> => {
+  const meta = async (version: Version): Promise<NativeMeta> => {
     if (!metadata.has(version.id)) metadata.set(version.id, await call(() => catalog.jarMeta(version)));
-    return metadata.get(version.id)!;
+    const result = metadata.get(version.id)!;
+    if (('loader' in result) !== (input.loader === 'forge')) throw new Error(`Wrong native metadata for ${input.loader}`);
+    return result;
   };
 
   // Check hard constraints on loaded units. An absent mod id can still be
@@ -158,7 +165,10 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
       if (!file || filenames.has(file.toLowerCase())) return reject(`Selected artifacts collide at filename ${file ?? '(missing)'}.`);
       filenames.add(file.toLowerCase());
     }
-    const active = [...selected].map(([owner, pick]) => ({ owner, meta: pick.meta, side: side(pick.meta) }));
+    const active = input.loader === 'fabric' ? [...selected].map(([owner, pick]) => {
+      const jar = pick.meta as JarMeta;
+      return { owner, meta: jar, side: side(jar) };
+    }) : [];
     if (environments.some((environment) => !validate(active, environment))) return null;
     const needs = new Map(required);
     for (const [id, pick] of selected) {
@@ -214,7 +224,8 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
         if (cost + (old && old.versionId !== version.id ? 1 : 0) > budget) continue;
         if (!version.files.length) { reject(`${version.name} (${version.id}) has no downloadable file.`); continue; }
         const jar = await meta(version);
-        if (input.exclude?.includes(jar.ids[0])) { reject(`Mod ${jar.ids[0]} was explicitly removed and cannot be reinstalled.`); continue; }
+        const excluded = modIds(jar).find((id) => input.exclude?.includes(id));
+        if (excluded) { reject(`Mod ${excluded} was explicitly removed and cannot be reinstalled.`); continue; }
         if (jar.environment === 'client' && input.side !== 'both') { reject(`${version.name} (${version.id}) is client-only, not a server build.`); continue; }
         const branch = new Map(selected);
         branch.set(next, { version, meta: jar });
@@ -227,6 +238,41 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
         return search(selected, needs, budget, new Set([...omitted, next]));
       }
       return null;
+    }
+
+    const provide = async (id: string, range: string, owner: string, suppressible = false): Promise<Solution | null> => {
+      if (!providers.has(id)) {
+        if (!catalog.providers) return uncertain(`No selected jar supplies ${id} ${range} required by ${owner}. Catalog.providers is needed to discover other projects.`);
+        const found = await call(() => catalog.providers!(id, filter));
+        providers.set(id, Array.isArray(found) ? { projects: found, complete: true } : found);
+      }
+      for (const project of new Set(providers.get(id)!.projects)) {
+        missingProviders.add(project);
+        if (selected.has(project) || removed.has(project)) continue;
+        const extra = new Map(needs);
+        extra.set(project, undefined);
+        const result = await search(selected, extra, budget, omitted);
+        if (result) return result;
+      }
+      if (suppressible) return uncertain(`No indexed provider satisfied ${id} ${range}; suppression of effective nested files has not been exhaustively searched.`);
+      if (!providers.get(id)!.complete) return uncertain(`The provider index for ${id} is incomplete; no allowed indexed provider satisfied ${range}.`);
+      return reject(`${owner} requires ${id} ${range}, but no allowed provider can satisfy it for Minecraft ${input.mc} / ${input.loader}.`);
+    };
+    if (input.loader === 'forge') {
+      const warnings = new Set<string>();
+      for (const environment of environments) {
+        const result = validateForge([...selected].map(([owner, pick]) => ({ owner, meta: pick.meta as ForgeJar })), environment === 1 ? 'server' : 'client', {
+          mc: input.mc, forge: input.loaderVersion, java: input.java, languages: input.languageVersions ?? {}, features: input.features,
+        }, () => tick(true));
+        if (result.status === 'conflict') return reject(result.reason);
+        if (result.status === 'inconclusive') return uncertain(result.reason);
+        if (result.missing.length) {
+          const missing = result.missing[0];
+          return provide(missing.id, missing.range, missing.owner, result.suppressible);
+        }
+        result.warnings.forEach((warning) => warnings.add(warning));
+      }
+      return { selected, active: [], warnings: [...warnings] };
     }
 
     // Nested jars have Fabric's IF_POSSIBLE load condition: optional candidates,
@@ -264,21 +310,7 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
               const result = await complete([...loaded, ...extra]);
               if (result) return result;
             }
-            if (!providers.has(id)) {
-              if (!catalog.providers) return uncertain(`No selected jar supplies ${id} ${rangeText(range)} required by ${describe(unit)}. Catalog.providers is needed to discover other projects.`);
-              const found = await call(() => catalog.providers!(id, filter));
-              providers.set(id, Array.isArray(found) ? { projects: found, complete: true } : found);
-            }
-            for (const project of new Set(providers.get(id)!.projects)) {
-              missingProviders.add(project);
-              if (selected.has(project) || removed.has(project)) continue;
-              const extra = new Map(needs);
-              extra.set(project, undefined);
-              const result = await search(selected, extra, budget, omitted);
-              if (result) return result;
-            }
-            if (!providers.get(id)!.complete) return uncertain(`The provider index for ${id} is incomplete; no allowed indexed provider satisfied ${rangeText(range)}.`);
-            return reject(`${describe(unit)} requires ${id} ${rangeText(range)}, but no allowed provider can satisfy it for Minecraft ${input.mc} / ${input.loader}.`);
+            return provide(id, rangeText(range), describe(unit));
           }
         }
       }
@@ -289,8 +321,8 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
 
   try {
     tick();
-    if (!input.mc || !input.java || !input.loaderVersion || input.loader !== 'fabric') {
-      return { status: 'inconclusive', reason: 'Minecraft, Java and Fabric loader versions are required.' };
+    if (!input.mc || !input.java || !input.loaderVersion || !['fabric', 'forge'].includes(input.loader)) {
+      return { status: 'inconclusive', reason: 'Minecraft, Java and a supported loader version are required.' };
     }
     if (installed.size !== input.installed.length) return { status: 'inconclusive', reason: 'Installed pins contain duplicate project ids.' };
     for (const add of input.add) {
@@ -329,7 +361,7 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
         changed: plan.filter((pin) => installed.has(pin.projectId) && installed.get(pin.projectId)!.versionId !== pin.versionId)
           .map((pin) => ({ from: installed.get(pin.projectId)!, to: pin })),
       };
-      const warnings = new Set<string>();
+      const warnings = new Set<string>(solution.warnings);
       for (const environment of environments) {
         const active = solution.active.filter((u) => u.side & environment);
         const supplied = new Map(active.flatMap((u) => u.meta.ids.map((id) => [id, u.meta.version] as const)));

@@ -10,10 +10,9 @@ import { hashes, packFiles, packPath, type RevisionLock } from './revisions.js';
 // SERVER BOOT TEST. The loader is the only honest judge of whether a mod set
 // boots, so the panel does not model compatibility: it boots the real thing.
 // A sandbox gets the server's loader and libraries, the mod jars under test
-// and eula=false, and is launched for real. The loader resolves dependencies,
-// applies mixins and runs every mod's init; then the vanilla EULA check stops
-// it before it opens a port or writes a world. "You need to agree to the
-// EULA" in the log means this exact set of jars boots on this server.
+// and is launched for real. Fabric initializes before the EULA check. Forge
+// initializes after it, so Forge must reach Done in a fresh disposable world
+// on a loopback-only ephemeral port, then stop before outputs are captured.
 
 export interface Verdict {
   result: 'passed' | 'failed' | 'unverified';
@@ -56,7 +55,7 @@ export function linkLoader(dir: string, sandbox: string, lock?: RevisionLock): v
     }
     return;
   }
-  for (const item of ['fabric.jar', 'libraries', 'versions', '.fabric', 'config', 'kubejs', 'emotes']) {
+  for (const item of ['fabric.jar', 'libraries', 'versions', '.fabric', 'config', 'defaultconfigs', 'kubejs', 'emotes']) {
     const src = join(dir, item);
     if (existsSync(src)) cpSync(src, join(sandbox, item), { recursive: true, mode: constants.COPYFILE_FICLONE });
   }
@@ -109,12 +108,19 @@ async function dryBootInner(serverId: string, jars: string[], dir: string, lock?
   mkdirSync(join(sandbox, 'mods'), { recursive: true });
   linkLoader(dir, sandbox, lock);
   for (const jar of jars) copyFileSync(jar, join(sandbox, 'mods', basename(jar)), constants.COPYFILE_FICLONE);
-  writeFileSync(join(sandbox, 'eula.txt'), 'eula=false\n', 'utf8');
+  const fullBoot = det.loader === 'forge';
+  const pass = fullBoot ? /Done \([\d.]+s\)!/ : PASS_RE;
+  writeFileSync(join(sandbox, 'eula.txt'), `eula=${fullBoot}\n`, 'utf8');
+  if (fullBoot) {
+    writeFileSync(join(sandbox, 'server.properties'), 'server-ip=127.0.0.1\nserver-port=0\nenable-rcon=false\nonline-mode=false\nlevel-type=flat\ngenerate-structures=false\nview-distance=2\nsimulation-distance=2\nsync-chunk-writes=false\n');
+    const config = join(sandbox, 'automodpack', 'automodpack-server.json');
+    if (existsSync(config)) writeFileSync(config, JSON.stringify({ ...JSON.parse(readFileSync(config, 'utf8')), modpackHost: false, generateModpackOnStart: false, selfUpdater: false }));
+  }
 
   const started = Date.now();
   return await new Promise<Verdict>((resolve) => {
     const [cmd, args] = IS_WIN ? [java, launchArgs] : ['nice', ['-n', '19', java, ...launchArgs]];
-    const child = spawn(cmd, args, { cwd: sandbox, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, { cwd: sandbox, stdio: ['pipe', 'pipe', 'pipe'] });
     const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
     let out = '';
     let settled = false;
@@ -123,8 +129,11 @@ async function dryBootInner(serverId: string, jars: string[], dir: string, lock?
       settled = true;
       clearInterval(poll);
       clearTimeout(killer);
-      try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      const shutdown = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 10_000);
+      if (fullBoot && v.result === 'passed') child.stdin.end('stop\n');
+      else try { child.kill('SIGKILL'); } catch { /* already dead */ }
       await closed; // no JVM can keep writing while outputs are captured
+      clearTimeout(shutdown);
       try {
         if (lock && v.result === 'passed') {
           const before = new Map(lock.files.filter((f) => f.location === 'server' && f.path.startsWith('config/')).map((f) => [f.path, f.sha512]));
@@ -151,15 +160,15 @@ async function dryBootInner(serverId: string, jars: string[], dir: string, lock?
     child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
     child.stderr.on('data', (d: Buffer) => { out += d.toString(); });
     child.on('error', (e) => { void finish({ result: 'unverified', detail: `could not launch the server test: ${e.message}` }); });
-    // the JVM lingers on non-daemon threads after the EULA line, so the
-    // verdict comes from the log; reap it before capturing config outputs
+    // Reap the JVM before capturing outputs. Forge's EULA line alone says
+    // nothing about mod construction and can never pass this check.
     const poll = setInterval(() => {
-      if (PASS_RE.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mods` });
+      if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mods${fullBoot ? ' into a disposable world' : ''}` });
       else if (FAIL_RE.test(out)) finish({ result: 'failed', detail: 'the loader rejected this mod set', excerpt: excerptOf(out) });
     }, 1000);
     child.on('exit', (code) => {
       setTimeout(() => {
-        if (PASS_RE.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mods` });
+        if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mods${fullBoot ? ' into a disposable world' : ''}` });
         else finish({ result: 'failed', detail: `the server exited (code ${code}) before it finished loading mods`, excerpt: excerptOf(out) });
       }, 300);
     });

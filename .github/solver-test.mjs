@@ -1,11 +1,15 @@
 // Offline solver contract tests. Real responses and jar metadata are unchanged
 // in recorded.json. Explicit counterfactuals below exercise hard-to-find edges.
 import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
 import AdmZip from 'adm-zip';
+import { stringify } from 'smol-toml';
 import { tsImport } from 'tsx/esm/api';
 
 const { solve } = await tsImport('../server/src/services/solver/index.ts', import.meta.url);
 const { readFabricJar, matchesFabric, compareFabricVersions } = await tsImport('../server/src/services/solver/fabric.ts', import.meta.url);
+const { compareMavenVersions, matchesMaven, parseMavenRange, restrictMaven, containsMaven } = await tsImport('../server/src/services/solver/maven.ts', import.meta.url);
+const { readForgeJar, validateForge } = await tsImport('../server/src/services/solver/forge.ts', import.meta.url);
 const recorded = JSON.parse(readFileSync(new URL('./fixtures/solver/recorded.json', import.meta.url), 'utf8'));
 const fails = [];
 let checks = 0;
@@ -308,6 +312,240 @@ result = await solve(input(pack.map((v) => pin(v))), cached, { maxMs: 1_000 });
 check('cached 100-mod smoke solves under one second without changing a pin', result.status === 'ok'
   && result.plan.length === 100 && result.changes.changed.length === 0
   && pack.every((v) => pick(result, v.project_id) === v.id) && performance.now() - start < 1_000);
+
+// Apache Maven Artifact 3.8.8 reference semantics, not npm/Fabric semver.
+const qualifiers = ['1-alpha1', '1-beta1', '1-milestone1', '1-rc1', '1-SNAPSHOT', '1', '1-sp', '1-unknown'];
+check('Maven qualifier ordering includes snapshots, service packs and unknown names', qualifiers.slice(1).every((v, i) => compareMavenVersions(qualifiers[i], v) < 0));
+check('Maven release aliases and trailing numeric zeroes are equal', ['1.0.0', '1-0', '1-ga', '1-FINAL', '1-release'].every((v) => compareMavenVersions('1', v) === 0));
+check('Maven numeric transitions and short qualifier aliases retain their semantics', compareMavenVersions('1-a2', '1-alpha2') === 0
+  && compareMavenVersions('1.0.X1', '1.0-X2') < 0 && compareMavenVersions('1.0.1', '1.0-2') > 0);
+check('Maven 3.8.5 retains the older dot-qualifier ordering used by Forge 47', compareMavenVersions('1.0.X1', '1.0-X2', '3.8.5') > 0
+  && !matchesMaven('1.0.X1', '(,1.0-X2)', '3.8.5') && matchesMaven('1.0.X1', '(,1.0-X2)', '3.8.8'));
+assert.throws(() => parseMavenRange('[1,1]', '3.8.5'));
+assert.throws(() => parseMavenRange('(,)', '3.8.5'));
+check('Maven 3.8.5 rejects identical raw boundaries but accepts equivalent open bounds', !matchesMaven('1', '(1.0,1]', '3.8.5')
+  && matchesMaven('1', '[1.0,1]', '3.8.5'));
+check('Maven numbers remain exact beyond JavaScript integer precision', compareMavenVersions('1.9007199254740993', '1.9007199254740992') > 0);
+check('Maven metadata values cannot resolve JavaScript object prototype names as aliases', compareMavenVersions('constructor', 'beta') > 0
+  && compareMavenVersions('__proto__', 'constructor') < 0 && compareMavenVersions('constructor1', 'constructor2') < 0);
+check('Maven union ranges retain gaps and asymmetric inclusive boundaries', matchesMaven('0.9', '(,1],[1.2,2)')
+  && matchesMaven('1', '(,1],[1.2,2)') && !matchesMaven('1.1', '(,1],[1.2,2)')
+  && matchesMaven('1.2', '(,1],[1.2,2)') && !matchesMaven('2', '(,1],[1.2,2)'));
+check('a bare Maven recommendation is not an exact constraint', matchesMaven('9', '1.2') && parseMavenRange('1.2').recommended === '1.2'
+  && matchesMaven('1.2', '[1.2]') && !matchesMaven('1.3', '[1.2]'));
+check('raw Maven empty ranges differ from loader-specific defaults', !matchesMaven('1', '') && parseMavenRange('').restrictions.length === 0);
+check('Maven 3.8.8 accepts equal inclusive bounds and unbounded comma ranges', matchesMaven('1.0', '[1,1]')
+  && !matchesMaven('1.1', '[1,1]') && matchesMaven('3', '(,)'));
+const intersection = restrictMaven(parseMavenRange('(,1],[2,4)'), parseMavenRange('[1,3]'));
+check('Maven restriction preserves isolated endpoints and union gaps', containsMaven('1', intersection)
+  && !containsMaven('1.5', intersection) && containsMaven('2', intersection) && containsMaven('3', intersection) && !containsMaven('4', intersection));
+check('Maven restriction retains recommendations, not just matching membership', restrictMaven(parseMavenRange('2'), parseMavenRange('[1,3)')).recommended === '2'
+  && restrictMaven(parseMavenRange('4'), parseMavenRange('[1,3)')).recommended === undefined
+  && restrictMaven(parseMavenRange('2'), parseMavenRange('')).recommended === '2');
+const unsorted = restrictMaven(parseMavenRange('[2,),(,1]'), parseMavenRange('[0,3]'));
+check('Maven restriction preserves the native traversal of accepted unsorted unbounded unions', !containsMaven('0', unsorted) && containsMaven('2', unsorted));
+let repeated = parseMavenRange('[1],[1]');
+for (let i = 0; i < 6; i++) repeated = restrictMaven(repeated, parseMavenRange('[1],[1]'));
+check('repeated Maven restrictions do not multiply duplicate intervals exponentially', containsMaven('1', repeated) && repeated.restrictions.length <= 14);
+for (const range of ['[2,1]', '(1)', '[1,1)', '(1.0,1]', '[1,3],[2,4]', '[1,2),2', '[1,2']) assert.throws(() => parseMavenRange(range));
+check('malformed and overlapping Maven ranges are refused instead of widened', true);
+
+// Metadata-only Forge jars, with actual TOML tables and JarJar zip trees.
+const runtime = { mc: '1.21.1', forge: '52.1.20', java: '21.0.4', languages: { javafml: '52.1.20', lowcodefml: '52.1.20' } };
+const fjar = (name, raw = {}, children = [], manifest = '') => {
+  const zip = new AdmZip();
+  zip.addFile('META-INF/MANIFEST.MF', Buffer.from(`Manifest-Version: 1.0\r\n${manifest}\r\n`));
+  if (raw !== null) zip.addFile('META-INF/mods.toml', Buffer.from(stringify({ modLoader: 'javafml', loaderVersion: '[52,)', mods: [{ modId: name, version: '1' }], ...raw })));
+  if (children.length) {
+    zip.addFile('META-INF/jarjar/metadata.json', Buffer.from(JSON.stringify({ jars: children.map((child) => ({
+      identifier: { group: child.group ?? 'example', artifact: child.artifact ?? child.name },
+      version: { range: child.range ?? '[1,)', artifactVersion: child.version ?? '1' }, path: child.path ?? `${child.name}.jar`, isObfuscated: false,
+    })) })));
+    for (const child of children) zip.addFile(child.path ?? `${child.name}.jar`, child.bytes);
+  }
+  const bytes = zip.toBuffer();
+  return { bytes, owner: name, meta: readForgeJar(bytes, `${name}.jar`, runtime) };
+};
+const dep = (modId, versionRange = '[1,)', extra = {}) => ({ modId, versionRange, mandatory: true, ...extra });
+const fcheck = (files, side = 'server', ctx = runtime) => validateForge(files, side, ctx);
+const legacyRuntime = { mc: '1.20.1', forge: '47.4.28', java: '21.0.4', languages: { javafml: '47', lowcodefml: '47' } };
+const dotQualifier = fjar('dot_qualifier', { loaderVersion: '[47,)', mods: [{ modId: 'dot_qualifier', version: '1.0.X1' }] });
+const needsQualifier = fjar('needs_qualifier', { loaderVersion: '[47,)', dependencies: { needs_qualifier: [dep('dot_qualifier', '(,1.0-X2)')] } });
+check('Forge selects its installed Maven semantics for native dependency bounds', fcheck([dotQualifier, needsQualifier]).status === 'ok'
+  && fcheck([dotQualifier, needsQualifier], 'server', legacyRuntime).status === 'conflict');
+const multi = fjar('multi', { mods: [{ modId: 'multi', version: '1' }, { modId: 'secondary', version: '7.4' }] });
+const needsSecondary = fjar('consumer', { dependencies: { consumer: [dep('secondary', '[7,8)')] } });
+check('Forge secondary mods retain their own version instead of inheriting an alias version', fcheck([multi, needsSecondary]).status === 'ok'
+  && fcheck([multi, needsSecondary]).missing.length === 0);
+const sideNeeds = fjar('side_needs', { dependencies: { side_needs: [dep('secondary', '[7,8)', { side: 'SERVER' }), dep('secondary', '[8,9)', { side: 'CLIENT' })] } });
+check('Forge repeated side-scoped requirements are not overwritten', fcheck([multi, sideNeeds]).status === 'ok' && fcheck([multi, sideNeeds], 'client').status === 'conflict');
+const optional = fjar('optional', { dependencies: { optional: [dep('secondary', '[8,9)', { mandatory: false })] } });
+check('Forge optional dependencies are absent-or-compatible, not ignored', fcheck([optional]).status === 'ok'
+  && fcheck([optional]).missing.length === 0 && fcheck([optional, multi]).status === 'conflict');
+const language = fjar('language', { loaderVersion: '[51,52)' });
+check('Forge language requirements use the language provider version, not the Forge mod version', fcheck([language]).status === 'conflict'
+  && fcheck([language], 'server', { ...runtime, languages: { javafml: '51.9' } }).status === 'ok');
+const feature = fjar('feature', { features: { feature: { javaVersion: '[22,)' } } });
+check('Forge declared Java feature bounds are enforced', fcheck([feature]).status === 'conflict'
+  && fcheck([feature], 'server', { ...runtime, java: '22.0.1' }).status === 'ok');
+const custom = fjar('custom', { modLoader: 'customfml' });
+check('unmodeled Forge languages and features remain inconclusive', fcheck([custom]).status === 'inconclusive'
+  && fcheck([fjar('feature', { features: { feature: { someFeature: '[1,)' } } })]).status === 'inconclusive');
+const placeholder = fjar('placeholder', { mods: [{ modId: 'placeholder', version: '${file.jarVersion}' }, { modId: 'secondary', version: '${file.custom}' }], properties: { custom: '4.2' } }, [], 'Implementation-Version: 3.7.\r\n 2\r\n');
+check('Forge manifest continuation and file substitutions are resolved before matching', placeholder.meta.mods[0].version === '3.7.2' && placeholder.meta.mods[1].version === '4.2');
+const unknownVersion = fjar('unknown_version', { mods: [{ modId: 'unknown_version', version: '${file.jarVersion}' }] });
+check('Forge 0.0NONE target version has its native wildcard behavior', fcheck([unknownVersion, fjar('consumer', { dependencies: { consumer: [dep('unknown_version', '[99,100)')] } })]).status === 'ok');
+const cycleA = fjar('cycle_a', { dependencies: { cycle_a: [dep('cycle_b', '[1,)', { ordering: 'BEFORE', side: 'CLIENT' })] } });
+const cycleB = fjar('cycle_b', { dependencies: { cycle_b: [dep('cycle_a', '[1,)', { ordering: 'BEFORE', side: 'CLIENT' })] } });
+check('Forge file ordering edges are not side-filtered', fcheck([cycleA, cycleB], 'server').status === 'conflict');
+const inFile = fjar('same_file', { mods: [{ modId: 'same_file' }, { modId: 'second' }], dependencies: { same_file: [dep('second', '[1,)', { ordering: 'BEFORE' })], second: [dep('same_file', '[1,)', { ordering: 'BEFORE' })] } });
+check('Forge ignores ordering between independently versioned mods in the same file', fcheck([inFile]).status === 'ok');
+const nested1 = fjar('nested_mod', { mods: [{ modId: 'nested_mod', version: '1' }] });
+const nested2 = fjar('nested_mod', { mods: [{ modId: 'nested_mod', version: '2' }] });
+const fbundle = (name, child, range = '[1,)', version = '1') => fjar(name, {}, [{ name: 'nested_mod', bytes: child.bytes, range, version }]);
+check('Forge JarJar single distinct declaration short-circuits even an unsatisfied range', fcheck([fbundle('bundle_a', nested1, '[8,9)')]).status === 'ok');
+const requiresNew = fjar('requires_new', { dependencies: { requires_new: [dep('nested_mod', '[2,3)')] } });
+check('Forge JarJar negotiates globally before validating nested mod constraints', fcheck([fbundle('bundle_a', nested1, '[1,3)'), fbundle('bundle_b', nested2, '[2,3)', '2'), requiresNew]).status === 'ok');
+check('Forge cannot choose a convenient nested version when runtime selection is ambiguous', fcheck([fbundle('bundle_a', nested1, '[1,3)'), fbundle('bundle_b', nested2, '[1,3)', '2'), requiresNew]).status === 'inconclusive');
+check('identical JarJar declarations with different nested bytes remain inconclusive', fcheck([fbundle('bundle_a', nested1), fbundle('bundle_b', nested2)]).status === 'inconclusive');
+const library = fjar('library', null, [], 'FMLModType: GAMELIBRARY\r\nAutomatic-Module-Name: example.library\r\n');
+const libs = [fjar('libs_a', {}, [{ name: 'library', bytes: library.bytes, range: '[1,2)', version: '1' }]), fjar('libs_b', {}, [{ name: 'library', bytes: library.bytes, range: '[2,3)', version: '2' }])];
+check('Forge JarJar negotiates non-mod libraries too', fcheck(libs).status === 'conflict');
+const descendant = fjar('descendant', { dependencies: { descendant: [dep('missing_after_parent_dedup')] } });
+const parent1 = fjar('parent', {}, [{ name: 'descendant', bytes: descendant.bytes }]);
+const parent2 = fjar('parent', { mods: [{ modId: 'parent', version: '2' }] });
+const root1 = fjar('root_one', {}, [{ name: 'parent', bytes: parent1.bytes, range: '[2,3)', version: '1' }]);
+const root2 = fjar('root_two', {}, [{ name: 'parent', bytes: parent2.bytes, range: '[2,3)', version: '2' }]);
+check('Forge discovers descendants before discarding a competing parent', fcheck([root1, root2]).status === 'ok'
+  && fcheck([root1, root2]).missing.some((missing) => missing.id === 'missing_after_parent_dedup'));
+const fversion = (file, version = '1') => ({ ...model(file.owner, `${file.owner}-${version}`, version), loaders: ['forge'] });
+const fversions = [fversion(multi), fversion(needsSecondary), fversion(custom)];
+const fmetas = new Map([[fversions[0].id, multi.meta], [fversions[1].id, needsSecondary.meta], [fversions[2].id, custom.meta]]);
+const fcatalog = { versions: async (id) => fversions.filter((v) => v.project_id === id), jarMeta: async (v) => fmetas.get(v.id), providers: async (id) => id === 'secondary' ? [multi.owner] : [] };
+const finput = { ...input([], [exact(fversions[1])]), loader: 'forge', loaderVersion: runtime.forge, languageVersions: runtime.languages, side: 'both' };
+result = await solve(finput, fcatalog);
+check('the shared solver discovers Forge native providers and preserves the requested root', result.status === 'ok'
+  && result.plan.length === 2 && pick(result, multi.owner) === fversions[0].id && result.plan.find((p) => p.projectId === needsSecondary.owner).requested);
+result = await solve({ ...finput, add: [exact(fversions[2])] }, fcatalog);
+check('unknown Forge feasibility never carries a tentative install plan', result.status === 'inconclusive' && !result.tentative);
+const coordinateMissing = fjar('coordinate_missing', { dependencies: { coordinate_missing: [dep('absent_coordinate_provider')] } });
+const coordinateSafe = fjar('coordinate_safe');
+const coordinateBundle = fjar('coordinate_bundle', {}, [
+  { ...coordinateMissing, name: 'missing', group: 'a:b', artifact: 'c', version: '1', range: '[2,3)' },
+  { ...coordinateSafe, name: 'safe', group: 'a', artifact: 'b:c', version: '2', range: '[2,3)' },
+]);
+const coordinateVersion = fversion(coordinateBundle);
+result = await solve({ ...finput, add: [exact(coordinateVersion)] }, {
+  versions: async () => [coordinateVersion], jarMeta: async () => coordinateBundle.meta, providers: async () => [],
+});
+check('distinct JarJar coordinate tuples cannot hide a selected nested dependency', result.status === 'inconclusive' && !result.tentative);
+assert.throws(() => fjar('missing_mandatory', { loaderVersion: '[2,)', dependencies: { missing_mandatory: [{ modId: 'forge', versionRange: '[52,)' }] } }));
+check('a Forge dependency clears the legacy mandatory fallback before its own validation', true);
+assert.throws(() => fjar('recursive', { mods: [{ modId: 'recursive', version: '${file.recursive}' }], properties: { recursive: '${file.recursive}' } }));
+check('recursive Forge substitutions are refused before expansion', true);
+const equivalent = fcheck([fbundle('bundle_a', nested1, '[8,9)', '1'), fbundle('bundle_b', nested1, '[8.0,9.0)', '1.0')]);
+check('native-equal JarJar declarations take the single-declaration shortcut', equivalent.status === 'ok');
+const replacement = fversion(nested2, '2');
+const withBundledOld = fbundle('bundle_a', nested1), bundledVersion = fversion(withBundledOld), requiresVersion = fversion(requiresNew);
+const providerVersions = [bundledVersion, requiresVersion, replacement];
+const providerMetas = new Map([[bundledVersion.id, withBundledOld.meta], [requiresVersion.id, requiresNew.meta], [replacement.id, nested2.meta]]);
+result = await solve({ ...finput, add: [exact(bundledVersion), exact(requiresVersion)] }, {
+  versions: async (id) => providerVersions.filter((v) => v.project_id === id), jarMeta: async (v) => providerMetas.get(v.id), providers: async (id) => id === 'nested_mod' ? [replacement.project_id] : [],
+});
+check('a top-level native provider can shadow an incompatible bundled Forge mod', result.status === 'ok' && pick(result, replacement.project_id) === replacement.id);
+
+const badNested = fjar('nested_mod', { dependencies: { nested_mod: [dep('minecraft', '[1.20.1]')] } });
+const badBundle = fbundle('bad_bundle', badNested), badBundleVersion = fversion(badBundle);
+result = await solve({ ...finput, add: [exact(badBundleVersion)] }, {
+  versions: async (id) => [badBundleVersion, replacement].filter((v) => v.project_id === id),
+  jarMeta: async (v) => v.id === badBundleVersion.id ? badBundle.meta : nested2.meta,
+  providers: async (id) => id === 'nested_mod' ? [replacement.project_id] : [],
+});
+check('a broken dependency declared by a nested mod is not false impossibility', result.status !== 'conflict');
+const exponential = { p0: '' };
+for (let i = 1; i <= 4; i++) exponential[`p${i}`] = `\${file.p${i - 1}}`.repeat(16);
+for (const [name, version, properties] of [
+  ['default-value syntax', '1.${file.v:-0}', { v: '2' }],
+  ['escaped syntax inside a property', '${file.v}', { v: '1.$${global.mcVersion}' }],
+  ['exponential empty expansion', '1${file.p4}', exponential],
+]) {
+  let refused = false;
+  try { fjar('substitution', { mods: [{ modId: 'substitution', version }], properties }); } catch { refused = true; }
+  check(`unsupported Forge ${name} is refused before certification`, refused);
+}
+let unsupportedNumeric = false;
+try { matchesMaven('1.0000000000.1', '(,1.1.1)'); } catch { unsupportedNumeric = true; }
+check('Maven all-zero LongItem spellings are not collapsed into ordinary zeroes', unsupportedNumeric);
+const absentNested = fjar('nested_mod', { dependencies: { nested_mod: [dep('absent')] } });
+const absentBundle = fbundle('absent_bundle', absentNested), absentVersion = fversion(absentBundle);
+result = await solve({ ...finput, add: [exact(absentVersion)] }, {
+  versions: async (id) => [absentVersion, replacement].filter((v) => v.project_id === id),
+  jarMeta: async (v) => v.id === absentVersion.id ? absentBundle.meta : nested2.meta,
+  providers: async (id) => id === 'nested_mod' ? [replacement.project_id] : [],
+});
+check('missing nested dependencies remain inconclusive when suppression was not searched', result.status === 'inconclusive' && !result.tentative);
+const notBundled = fcheck([fbundle('bundle_a', nested1, '[2,3)', '1'), fbundle('bundle_b', nested2, '[2,3)', '3')]);
+check('a missing JarJar candidate is not impossibility while another bundle could supply it', notBundled.status === 'inconclusive');
+
+// Counterfactual service-only bootstrap: only its separately discovered child
+// is an effective mod. Actual AutoModpack bytes are checked in the live proof.
+const bootstrap = fjar('bootstrap');
+bootstrap.meta.discovered = [nested2.meta];
+check('a certified service bootstrap supplies its child, not its outer metadata id', fcheck([bootstrap, requiresNew]).missing.length === 0
+  && fcheck([bootstrap, fjar('needs_bootstrap', { dependencies: { needs_bootstrap: [dep('bootstrap')] } })]).missing.some((m) => m.id === 'bootstrap'));
+check('competing root or JarJar child identities stay unknown', fcheck([bootstrap, nested2]).status === 'inconclusive'
+  && fcheck([bootstrap, fbundle('child_competition', nested2)]).status === 'inconclusive');
+const transformer = new AdmZip(fjar('transformer').bytes);
+transformer.addFile('META-INF/services/cpw.mods.modlauncher.api.ITransformationService', Buffer.from('example.Transformer'));
+const transformationVersion = fversion({ owner: 'transformer' });
+result = await solve({ ...finput, add: [exact(transformationVersion)] }, {
+  versions: async () => [transformationVersion], jarMeta: async () => readForgeJar(transformer.toBuffer(), 'transformer.jar', runtime), providers: async () => [],
+});
+check('unmodeled transformation services cannot claim a feasible or tentative graph', result.status === 'inconclusive' && !result.tentative);
+
+// javac --release 17: module example.versioned {}. Descriptor metadata only.
+const versionedDescriptor = Buffer.from('yv66vgAAAD0ACgcAAgEAC21vZHVsZS1pbmZvAQAKU291cmNlRmlsZQEAEG1vZHVsZS1pbmZvLmphdmEBAAZNb2R1bGUTAAcBABFleGFtcGxlLnZlcnNpb25lZBMACQEACWphdmEuYmFzZYAAAAEAAAAAAAAAAAACAAMAAAACAAQABQAAABYABgAAAAAAAQAIgAAAAAAAAAAAAAAA', 'base64');
+const multiRelease = new AdmZip(fjar('versioned_discovery').bytes);
+multiRelease.addFile('META-INF/MANIFEST.MF', Buffer.from('Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n'));
+multiRelease.addFile('META-INF/versions/17/module-info.class', versionedDescriptor);
+const implicitOne = fjar('implicit_one', null, [], 'FMLModType: GAMELIBRARY\r\nImplementation-Version: 1\r\n');
+const implicitTwo = fjar('implicit_two', null, [], 'FMLModType: GAMELIBRARY\r\nImplementation-Version: 2\r\n');
+const moduleCollision = fjar('module_collision', {}, [
+  { name: 'first_library', bytes: implicitOne.bytes, path: 'example-1.0-extra.jar' },
+  { name: 'second_library', bytes: implicitTwo.bytes, path: 'example-extra.jar' },
+]);
+for (const [name, bytes] of [
+  ['versioned module discovery', multiRelease.toBuffer()],
+  ['implicit library module collision across distinct JarJar coordinates', moduleCollision.bytes],
+]) {
+  const version = fversion({ owner: 'discovery_boundary' });
+  result = await solve({ ...finput, add: [exact(version)] }, {
+    versions: async () => [version], jarMeta: async () => readForgeJar(bytes, 'discovery_boundary.jar', runtime), providers: async () => [],
+  });
+  check(`unmodeled ${name} has no feasible or tentative witness`, result.status === 'inconclusive' && !result.tentative);
+}
+
+const uncertainLibrary = new AdmZip(implicitOne.bytes);
+uncertainLibrary.addFile('META-INF/MANIFEST.MF', Buffer.from('Manifest-Version: 1.0\r\nFMLModType: GAMELIBRARY\r\nAutomatic-Module-Name: example\r\nMulti-Release: true\r\n\r\n'));
+uncertainLibrary.addFile('META-INF/versions/17/module-info.class', versionedDescriptor);
+for (const [name, filename, libraryBytes] of [
+  ['versioned module', 'example.jar', uncertainLibrary.toBuffer()],
+  ['implicit module', 'example-.1.jar', implicitOne.bytes],
+  ...['true', 'false', 'null'].map((literal) => [`reserved literal ${literal}`, `example-${literal}.jar`, implicitOne.bytes]),
+]) {
+  const parent = new AdmZip(fjar('uncertain_parent').bytes);
+  parent.addFile('META-INF/jarjar/metadata.json', Buffer.from(JSON.stringify({ jars: [{
+    identifier: { group: 'example', artifact: 'uncertain_library' }, version: { range: '[1,)', artifactVersion: '1' }, path: filename,
+  }] })));
+  parent.addFile(filename, libraryBytes);
+  const top = fjar('example'), roots = [fversion(top), fversion({ owner: 'uncertain_parent' })];
+  result = await solve({ ...finput, add: roots.map(exact) }, {
+    versions: async project => roots.filter(v => v.project_id === project),
+    jarMeta: async version => readForgeJar(version.project_id === 'example' ? top.bytes : parent.toBuffer(), `${version.project_id}.jar`, runtime),
+    providers: async () => [],
+  });
+  check(`a provisional nested ${name} identity cannot suppress its discovery uncertainty`, result.status === 'inconclusive' && !result.tentative);
+}
 
 console.log(`\n${checks - fails.length}/${checks} checks passed`);
 if (fails.length) process.exit(1);

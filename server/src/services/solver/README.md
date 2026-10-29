@@ -1,4 +1,4 @@
-# Fabric solver contract
+# Mod solver contract
 
 `solve(input, catalog, limits?)` returns a `Promise<SolveResult>`. It plans only.
 It does not import installer configuration, download files, change the ledger,
@@ -7,7 +7,7 @@ selection. Boot and friend-sync tests remain separate from metadata planning.
 
 ## Inputs and results
 
-`SolveInput` contains `mc`, `loader: 'fabric'`, `java`, `loaderVersion`,
+`SolveInput` contains `mc`, `loader: 'fabric' | 'forge'`, `java`, `loaderVersion`,
 `installed: Pin[]`, `add: { projectId, versionId? }[]`, and `remove: string[]`.
 Use canonical Modrinth project ids, `cf:<id>` for CurseForge projects and files,
 or immutable `local:` pins for unidentified jars. Java is a version such as
@@ -38,7 +38,7 @@ domain of Modrinth `Version` objects. The solver checks MC and loader again.
 Do not silently truncate pages or substitute a newest-only list. When an
 installed version is missing from a nonempty domain, the result is inconclusive.
 
-`Catalog.jarMeta(version)` returns `JarMeta`, with `ids` (primary id first,
+For Fabric, `Catalog.jarMeta(version)` returns `JarMeta`, with `ids` (primary id first,
 then provides aliases), the jar's own `version`, `depends`, `breaks`, and
 `nested: JarMeta[]`. `conflicts`, `recommends`, `name`, and `environment` are
 optional. `readFabricJar(buffer)` reads this tree from real schema-1 jars.
@@ -97,6 +97,37 @@ Incompatible relations exclude the project pair, or only the named version.
 Embedded and optional relations add nothing. Fabric id dependencies can be
 satisfied by provides or nested jars without adding a separate project.
 
+## Forge profiles
+
+`readForgeJar(bytes, filename, { mc, forge })` returns `ForgeJar`. Each file
+retains independently versioned mod IDs, native dependency tables, languages,
+features, Java module identity and JarJar declarations. `languageVersions`
+supplies the installed language implementations. It is not the Forge version.
+The filename is the installed or proposed filename, never the cache hash or
+an upstream name that differs from the retained local file.
+
+The certified metadata profiles are Minecraft 1.20.1 with Forge 47.4.28
+(Maven Artifact 3.8.5) and Minecraft 1.21.1 with Forge 52.1.20 (Maven 3.8.8).
+Ranges and comparisons follow those implementations, including recommended
+bare versions, qualifier nesting and JarJar's global range negotiation.
+Optional dependencies constrain present targets. Ordering uses file-level
+edges and first mod IDs, independently of dependency side.
+
+The solver validates effective discovery on each side after every selection.
+Different possible JarJar bytes, custom languages, unknown features or
+unmodeled discovery yield inconclusive feasibility without a tentative plan.
+An unresolved nested constraint also stays inconclusive when an unsearched
+root or bundle could change suppression or selection.
+
+The only custom discovery exception is the SHA-512-pinned AutoModpack 4.0.7
+build `KcBYU5P0`, top-level under an `automodpack*.jar` filename on Forge
+47.4.28. Its service-only bootstrap is not an effective mod. Its separate
+`discovered` child supplies `automodpack_mod`. Competing child identities and
+non-mod client discovery remain inconclusive. Runtime admission requires an
+explicit managed-publication config with self-updating disabled. Client tests
+disable version swapping and independently hash the resulting inventory.
+Locked promotion currently supports only the canonical 47.4.28 recipe.
+
 ## Bounds and coverage
 
 Defaults are `maxNodes: 100000`, `maxCatalogCalls: 2000`, and `maxMs: 5000`.
@@ -114,9 +145,10 @@ manual work. The provider index combines observed metadata, slug lookups and
 search, and always reports partial coverage.
 
 The jar reader supports Fabric metadata schema 1, with a nesting depth limit of
-32. Schema 0 and malformed metadata are inconclusive through `solve`. Forge,
-NeoForge, dependency overrides, runtime mixin compatibility, and boot testing
-are outside this module.
+32. Forge nesting is limited to 32 levels, 4,096 artifacts and 64 MiB expanded
+nested bytes. Fabric schema 0 and malformed metadata are inconclusive through
+`solve`. NeoForge, dependency overrides, runtime mixin compatibility and boot
+testing are outside this module.
 
 `node .github/solver-test.mjs` runs offline through the existing `tsx` dependency.
 `node .github/solver-install.mjs` checks the public installer with real files,

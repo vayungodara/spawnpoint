@@ -3,10 +3,11 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import AdmZip from 'adm-zip';
+import { stringify } from 'smol-toml';
 import { tsImport } from 'tsx/esm/api';
 import { getGlobalDispatcher, MockAgent, setGlobalDispatcher } from 'undici';
 
@@ -25,18 +26,21 @@ const { revisionDir, setRevisionState } = await tsImport('../server/src/services
 const { PATHS } = await tsImport('../server/src/config.ts', import.meta.url);
 mkdirSync(join(root, 'Tools'), { recursive: true });
 symlinkSync(javaHome, join(root, 'Tools', 'jdk-25-fixture'), process.platform === 'win32' ? 'junction' : 'dir');
+symlinkSync(javaHome, join(root, 'Tools', 'jdk-21-fixture'), process.platform === 'win32' ? 'junction' : 'dir');
 mkdirSync(PATHS.data, { recursive: true });
 
 const versions = new Map(), projects = new Map(), artifacts = new Map();
 const sha = (bytes, algorithm) => createHash(algorithm).update(bytes).digest('hex');
-const record = (project, id, number, fields = {}, relations = []) => {
+const record = (project, id, number, fields = {}, relations = [], loader = 'fabric') => {
   const zip = new AdmZip();
-  zip.addFile('fabric.mod.json', Buffer.from(JSON.stringify({ schemaVersion: 1, id: project, version: number, ...fields })));
+  if (loader === 'forge') zip.addFile('META-INF/mods.toml', Buffer.from(stringify({ modLoader: 'javafml', loaderVersion: '[47,)',
+    mods: [{ modId: project, version: number }], ...fields })));
+  else zip.addFile('fabric.mod.json', Buffer.from(JSON.stringify({ schemaVersion: 1, id: project, version: number, ...fields })));
   const bytes = zip.toBuffer();
   const file = { filename: `${id}.jar`, primary: true, size: bytes.length,
     url: `https://fixture.invalid/${id}.jar`, hashes: { sha1: sha(bytes, 'sha1'), sha512: sha(bytes, 'sha512') } };
   const version = { id, project_id: project, name: id, version_number: number, version_type: 'release',
-    game_versions: ['1.21.1'], loaders: ['fabric'], date_published: number.startsWith('2') ? '2026-01-02T00:00:00Z' : '2026-01-01T00:00:00Z',
+    game_versions: [loader === 'forge' ? '1.20.1' : '1.21.1'], loaders: [loader], date_published: number.startsWith('2') ? '2026-01-02T00:00:00Z' : '2026-01-01T00:00:00Z',
     downloads: 0, files: [file], dependencies: relations };
   versions.set(id, version);
   projects.set(project, { id: project, title: project, categories: [], server_side: 'required', client_side: 'required' });
@@ -63,13 +67,16 @@ globalThis.fetch = async (url) => {
   throw Error(`Unexpected network call: ${url}`);
 };
 const ids = [];
-const fixture = (items) => {
+const fixture = (items, kind = 'fabric') => {
   const id = randomUUID(); ids.push(id);
   const dir = join(PATHS.craftyServers, id);
   mkdirSync(join(dir, 'mods'), { recursive: true });
-  mkdirSync(join(dir, 'libraries/net/fabricmc/fabric-loader/0.20.1'), { recursive: true });
-  const loader = new AdmZip(); loader.addFile('install.properties', Buffer.from('game-version=1.21.1'));
-  writeFileSync(join(dir, 'fabric.jar'), loader.toBuffer());
+  if (kind === 'forge') mkdirSync(join(dir, 'libraries/net/minecraftforge/forge/1.20.1-47.4.28'), { recursive: true });
+  else {
+    mkdirSync(join(dir, 'libraries/net/fabricmc/fabric-loader/0.20.1'), { recursive: true });
+    const loader = new AdmZip(); loader.addFile('install.properties', Buffer.from('game-version=1.21.1'));
+    writeFileSync(join(dir, 'fabric.jar'), loader.toBuffer());
+  }
   const entries = items.map(([v, requested = true]) => {
     const file = v.files[0]; writeFileSync(join(dir, 'mods', file.filename), artifacts.get(file.url));
     return { file: file.filename, projectId: v.project_id, versionId: v.id, versionNumber: v.version_number,
@@ -97,6 +104,38 @@ try {
   check('requested and dependency roots survive staging distinctly', candidate(f.id).files.find((s) => s.entry.projectId === 'testuser').entry.via === 'direct'
     && candidate(f.id).files.find((s) => s.entry.projectId === 'testlib').entry.via === 'dependency');
   discard(f.id);
+
+  const forgeOld = record('forgelib', 'forgelib1', '1.0.0', {}, [], 'forge');
+  const forgeNew = record('forgelib', 'forgelib2', '2.0.0', {}, [], 'forge');
+  const forgeUser = record('forgeuser', 'forgeuser1', '1.0.0', {
+    dependencies: { forgeuser: [{ modId: 'forgelib', versionRange: '[2,3)', mandatory: true, side: 'BOTH' }] },
+  }, [{ project_id: 'forgelib', version_id: null, dependency_type: 'required' }], 'forge');
+  const forge = fixture([[forgeOld, false]], 'forge');
+  const forgeBefore = { bytes: forge.bytes(), ledger: forge.ledger() };
+  const forgeResult = await install(forge.id, { projectId: 'forgeuser', versionId: forgeUser.id, type: 'mod' });
+  check('Forge native ranges resolve through public install and preserve root intent', !forgeResult.error
+    && forgeResult.solver.status === 'ok' && forgeResult.solver.changes.changed[0].to.versionId === forgeNew.id
+    && candidate(forge.id).files.find((s) => s.entry.projectId === 'forgeuser').entry.via === 'direct'
+    && candidate(forge.id).files.find((s) => s.entry.projectId === 'forgelib').entry.via === 'dependency');
+  check('Forge whole-pack planning does not write live files or ledger', forge.bytes() === forgeBefore.bytes && forge.ledger() === forgeBefore.ledger);
+  discard(forge.id);
+
+  const moduleLibrary = record('module_library', 'upstream-library-1', '1.0.0', {}, [], 'forge');
+  const libraryZip = new AdmZip();
+  libraryZip.addFile('META-INF/MANIFEST.MF', Buffer.from('Manifest-Version: 1.0\nFMLModType: GAMELIBRARY\n\n'));
+  const libraryBytes = libraryZip.toBuffer(), libraryFile = moduleLibrary.files[0];
+  artifacts.set(libraryFile.url, libraryBytes);
+  libraryFile.hashes = { sha1: sha(libraryBytes, 'sha1'), sha512: sha(libraryBytes, 'sha512') };
+  libraryFile.size = libraryBytes.length;
+  const renamed = fixture([[moduleLibrary]], 'forge');
+  renameSync(join(renamed.dir, 'mods', libraryFile.filename), join(renamed.dir, 'mods', 'sync.jar'));
+  updateLedger(renamed.id, entries => entries.map(entry => ({ ...entry, file: 'sync.jar' })));
+  const sameModule = record('sync', 'sync1', '1.0.0', {}, [], 'forge');
+  const moduleBefore = { bytes: renamed.bytes(), ledger: renamed.ledger() };
+  const moduleResult = await install(renamed.id, { projectId: 'sync', versionId: sameModule.id, type: 'mod' });
+  check('catalog-identified local Forge jars use their installed filenames for discovery', moduleResult.error
+    && moduleResult.solver.status === 'inconclusive' && !moduleResult.solver.tentative
+    && !candidate(renamed.id) && renamed.bytes() === moduleBefore.bytes && renamed.ledger() === moduleBefore.ledger);
 
   const kept = fixture([[lib2, false]]);
   const promoted = await install(kept.id, { projectId: 'testlib', versionId: lib2.id, type: 'mod' });

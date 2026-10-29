@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, copyFileSync, writeFileSync, readdirSync, renameSync, readFileSync, cpSync, constants } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, copyFileSync, writeFileSync, readdirSync, renameSync, readFileSync, realpathSync, cpSync, constants } from 'node:fs';
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -8,7 +8,7 @@ import { serverDir, javaFor } from './servers.js';
 import { detect, loaderVersion, type Detection } from './detect.js';
 import { killTree, IS_WIN, KILLABLE_SPAWN_OPTS, linkOrCopy, withMemory } from './platform.js';
 import { loaderLaunchArgs, lockedLaunchArgs, linkLoader, excerptOf, type Verdict } from './preflight.js';
-import type { RevisionLock } from './revisions.js';
+import { packFiles, type RevisionLock } from './revisions.js';
 
 // CLIENT BOOT TEST. AutoModpack mirrors whatever the server has; it does not
 // check that the result runs. So before a change reaches friends, this boots
@@ -75,7 +75,7 @@ async function ensureHeadlessMc(): Promise<void> {
 }
 
 /** Point HeadlessMC at its own Minecraft dir, the gate's JDK and this run's game dir. */
-function writeHmcConfig(gamedir: string): void {
+function writeHmcConfig(gamedir: string, java = gateJava()): void {
   const dir = join(HMC, 'HeadlessMC');
   mkdirSync(dir, { recursive: true });
   // .properties escaping eats backslashes; the JVM accepts forward slashes everywhere
@@ -83,7 +83,11 @@ function writeHmcConfig(gamedir: string): void {
   writeFileSync(join(dir, 'config.properties'), [
     `hmc.mcdir=${fwd(join(HMC, 'mc'))}`,
     `hmc.gamedir=${fwd(gamedir)}`,
-    `hmc.java.versions=${fwd(gateJava() ?? '')}`,
+    `hmc.java.versions=${fwd(java ?? '')}`,
+    'hmc.java.use.current=false',
+    'hmc.auto.download.java=false',
+    'hmc.java.require.exact=true',
+    'hmc.jvmargs=-XshowSettings:properties',
     'hmc.offline=true',
     '',
   ].join('\n'), 'utf8');
@@ -116,19 +120,39 @@ async function hmcCmd(args: string[]): Promise<void> {
 
 /** Install this MC version with the server's own loader version into
     HeadlessMC (once) and return the installed version's name. */
-async function ensureVersion(mc: string, loader: 'fabric' | 'forge', uid: string | null): Promise<string> {
+async function ensureVersion(mc: string, loader: 'fabric' | 'forge', uid: string | null, java: string): Promise<string> {
   const versions = join(HMC, 'mc', 'versions');
   const wanted = (d: string): boolean => loader === 'fabric'
-    ? d.startsWith(`fabric-loader-${uid ?? ''}`) && d.endsWith(`-${mc}`)
-    : d.startsWith(`${mc}-forge-${uid ?? ''}`);
+    ? uid ? d === `fabric-loader-${uid}-${mc}` : d.startsWith('fabric-loader-') && d.endsWith(`-${mc}`)
+    : uid ? d === `${mc}-forge-${uid}` : d.startsWith(`${mc}-forge-`);
   const find = (): string | undefined => (existsSync(versions) ? readdirSync(versions).find(wanted) : undefined);
-  const have = find();
-  if (have) return have;
-  await hmcCmd(['download', mc]);
-  await hmcCmd([loader, mc, '--java', parseInt(mc.split('.')[0], 10) >= 26 ? '25' : '21', ...(uid ? ['--uid', uid] : [])]);
+  const runtime = await execFileP(java, ['-XshowSettings:properties', '-version'], { timeout: 5_000 });
+  const major = Number(/^\s*java.specification.version = (\d+)\s*$/m.exec(runtime.stderr)?.[1]);
+  if (!major) throw new Error('Could not identify the locked client Java runtime');
+  // Only the harness's launcher recipes change, never the pack or runtime.
+  // Forge's installer selects Java from the vanilla parent and ignores --java.
+  const pinJava = (version: string): void => {
+    const path = join(versions, version, `${version}.json`);
+    const metadata = JSON.parse(readFileSync(path, 'utf8'));
+    writeFileSync(path, JSON.stringify({ ...metadata, javaVersion: { ...metadata.javaVersion, majorVersion: major } }));
+  };
+  if (!find()) {
+    await hmcCmd(['download', mc, '-noredownload']);
+    pinJava(mc);
+    await hmcCmd([loader, mc, ...(uid ? ['--uid', uid] : [])]);
+  }
   const installed = find();
   if (!installed) throw new Error(`HeadlessMC did not install ${loader} ${uid ?? ''} for ${mc}`);
+  // A cached Java 17 must not silently win over the locked Java 21.
+  pinJava(installed);
   return installed;
+}
+
+/** Observe the game JVM itself, not the Java process running HeadlessMC. */
+function clientUsesJava(output: string, java: string): boolean {
+  const home = /^\s*java.home = (.+)$/m.exec(output)?.[1].trim();
+  try { return !!home && realpathSync(join(home, 'bin', IS_WIN ? 'java.exe' : 'java')) === realpathSync(java); }
+  catch { return false; }
 }
 
 /** The mc-runtime-test jar for this MC (asset names use the version, then its minor family). */
@@ -206,10 +230,12 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   const work = join(PATHS.data, 'launchgate', serverId);
   const rundir = join(work, 'run');
   let version: string;
+  const java = set.lock?.java.executable ?? javaFor(det.mc, det.loader);
+  if (!java) return { result: 'unverified', detail: 'No known client Java runtime' };
   try {
     await ensureHeadlessMc();
-    writeHmcConfig(rundir); // before any HeadlessMC command, or it installs into ~/.minecraft
-    version = await ensureVersion(det.mc, det.loader, loaderVersion(sourceDir, det));
+    writeHmcConfig(rundir, java); // before any HeadlessMC command, or it installs into ~/.minecraft
+    version = await ensureVersion(det.mc, det.loader, loaderVersion(sourceDir, det), java);
   } catch (e) {
     return { result: 'unverified', detail: `could not prepare the test client: ${String(e).slice(0, 140)}` };
   }
@@ -222,9 +248,8 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   // AutoModpack's handshake needs the client to hold the exact pack, so it is
   // skipped when a mod has to be left out for the virtual display; the join
   // then runs without AutoModpack, and the live pack is checked after the restart
-  const amJar = det.loader === 'fabric' && set.serverJars.find((p) => /^automodpack.*\.jar$/i.test(basename(p)));
+  const amJar = set.serverJars.find((p) => /^automodpack.*\.jar$/i.test(basename(p)));
   const handshakeOff = !!amJar && set.files.some((f) => skipped(basename(f.rel)));
-  const amOnForge = det.loader !== 'fabric' && set.serverJars.some((p) => /^automodpack.*\.jar$/i.test(basename(p)));
   const tested: AutoModpackFile[] | null = amJar && !handshakeOff ? [] : null;
   if (tested && !set.files.some((f) => f.rel.startsWith('mods/') && /^automodpack.*\.jar$/i.test(basename(f.rel))
     && readFileSync(f.src).equals(readFileSync(amJar as string)))) {
@@ -257,6 +282,13 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
     if (f.rel.startsWith('mods/')) mods++;
   }
   copyFileSync(testJar, join(rundir, 'mods', basename(testJar)));
+  if (tested) {
+    mkdirSync(join(rundir, 'automodpack'), { recursive: true });
+    writeFileSync(join(rundir, 'automodpack', 'automodpack-client.json'), JSON.stringify({ DO_NOT_CHANGE_IT: 2,
+      selectedModpack: '', installedModpacks: {}, updateSelectedModpackOnLaunch: false,
+      selfUpdater: false, syncAutoModpackVersion: false, syncLoaderVersion: false,
+    }));
+  }
 
   // measured: a 20-mod client and a server copy each settle near 0.75 GB
   const needGb = mods > 150 ? { client: 4.5, join: 8 } : mods > 50 ? { client: 2, join: 3.5 } : { client: 1, join: 2 };
@@ -276,6 +308,10 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
       clearTimeout(killer);
       const seconds = Math.round((Date.now() - started) / 1000);
       writeFileSync(join(work, `${set.label}-client.log`), out.slice(-40_000), 'utf8');
+      if (!clientUsesJava(out, java)) {
+        resolve({ result: 'unverified', detail: 'The game JVM did not prove it used the locked Java executable', seconds });
+        return;
+      }
       if (code === 0 && /exited with code: 0/.test(out)) {
         resolve({ result: 'passed', detail: `a client booted into a world with ${mods} mods`, seconds });
         return;
@@ -325,7 +361,6 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   const notes = [
     gateMode() === 'headless' && 'graphics stubbed: install xvfb to test rendering too',
     gateMode() !== 'headless' && left.length && `${left.join(', ')} left out: it cannot run on the virtual display${handshakeOff ? ', so AutoModpack\'s handshake was not run' : ''}`,
-    amOnForge && 'AutoModpack\'s handshake is only checked on Fabric',
   ].filter(Boolean);
   return { result: notes.length ? 'unverified' : 'passed', detail: `${sp.detail}, then ${join_.detail}${notes.length ? ` (${notes.join('; ')})` : ''}`, seconds: Math.round((Date.now() - started) / 1000),
     checks: {
@@ -338,7 +373,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
 // The join test boots a throwaway server (the candidate's jars, a fresh flat
 // world, offline mode, a side port) and quick-plays the client into it. The
 // verdict comes from the server's log: "joined the game" plus a quiet dwell
-// passes; "lost connection: Internal Exception" fails. Fabric AutoModpack 4.x
+// passes; "lost connection: Internal Exception" fails. AutoModpack 4.x
 // also needs an exact served-file match and the real login sync acknowledgement.
 // Trust only the copy's logged fingerprint; never copy the live server's keys.
 const JOIN_PORT = 25999;
@@ -440,12 +475,28 @@ async function joinTest(
   // of colliding with the real server's voice port
   mkdirSync(join(srv, 'config', 'voicechat'), { recursive: true });
   writeFileSync(join(srv, 'config', 'voicechat', 'voicechat-server.properties'), 'port=-1\n', 'utf8');
-  // The singleplayer driver would force its own flow. Keep AutoModpack on Fabric.
+  // The singleplayer driver would force its own flow. Retain the sync client
+  // only when the join will exercise its real handshake.
   for (const jar of readdirSync(join(rundir, 'mods'))) {
     if (/mc-runtime-test/i.test(jar) || (!tested && /automodpack/i.test(jar))) rmSync(join(rundir, 'mods', jar), { force: true });
   }
 
   const started = Date.now();
+  const expected = new Map(set.files.map((f) => [f.rel, createHash('sha512').update(readFileSync(f.src)).digest('hex')]));
+  const inventoryDifference = (): string | null => {
+    try {
+      const pack = join(rundir, 'automodpack', 'modpacks', 'spawnpoint-join-test');
+      for (const [rel, sha512] of expected) {
+        const copies = [join(rundir, rel), join(pack, rel)].filter(existsSync);
+        if (!copies.length || copies.some((p) => createHash('sha512').update(readFileSync(p)).digest('hex') !== sha512)) return rel;
+      }
+      for (const base of [rundir, pack]) for (const file of packFiles(join(base, 'mods')).filter((f) => f.endsWith('.jar'))) {
+        const rel = relative(base, file).replace(/\\/g, '/');
+        if (!expected.has(rel)) return `${rel} (unexpected executable input)`;
+      }
+      return null;
+    } catch { return 'unreadable client inventory'; }
+  };
   return await new Promise<Verdict>((resolve) => {
     let srvOut = '';
     let cliOut = '';
@@ -459,6 +510,7 @@ async function joinTest(
     const finish = (v: Verdict): void => {
       if (settled) return;
       settled = true;
+      if (v.result === 'passed' && !clientUsesJava(cliOut, java)) v = { result: 'unverified', detail: 'The join client did not prove it used the locked Java executable' };
       if (dwell) clearTimeout(dwell);
       clearTimeout(totalKiller);
       clearInterval(upPoll);
@@ -510,8 +562,11 @@ async function joinTest(
         dwell = setTimeout(() => {
           const k = kicked();
           const handshake = cliOut.indexOf('Modpack address:');
+          const altered = tested ? inventoryDifference() : null;
           if (tested && (handshake < 0 || !/Modpack .* is up to date!/.test(cliOut.slice(handshake)) || !/has installed whole modpack/.test(srvOut))) {
             finish({ result: 'unverified', detail: 'the player joined, but AutoModpack did not verify its client handshake' });
+          } else if (altered) {
+            finish({ result: 'failed', detail: `AutoModpack client inputs differ from the tested bytes: ${altered}` });
           } else if (tested && differences.length) {
             finish({ result: 'failed', detail: `AutoModpack serves different files: ${differences.join(', ')}`, excerpt: differences });
           } else finish(k ? { result: 'failed', detail: `a player was kicked after joining: ${k}` }
@@ -561,7 +616,7 @@ async function joinTest(
           const address = `127.0.0.1:${JOIN_PORT}`;
           writeFileSync(join(rundir, 'automodpack', 'automodpack-client.json'), JSON.stringify({ DO_NOT_CHANGE_IT: 2,
             selectedModpack: 'spawnpoint-join-test', installedModpacks: { 'spawnpoint-join-test': { hostAddress: address, serverAddress: address, requiresMagic: true } },
-            updateSelectedModpackOnLaunch: true, selfUpdater: false,
+            updateSelectedModpackOnLaunch: true, selfUpdater: false, syncAutoModpackVersion: false, syncLoaderVersion: false,
           }), 'utf8');
           const privateDir = join(rundir, 'automodpack', '.private');
           mkdirSync(privateDir, { recursive: true });

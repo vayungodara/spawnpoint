@@ -170,10 +170,16 @@ function claimWaiting(id: string, log: (m: string) => void): boolean {
 
 /** Pick up records a panel restart left behind, and ready candidates whose
     record was never written (the panel stopped between the two writes). */
-export function resumePromotions(log: (m: string) => void): void {
+export async function resumePromotions(log: (m: string) => void): Promise<void> {
   panelLog = log;
   const locked = join(PATHS.data, 'locked-revisions');
-  for (const id of existsSync(locked) ? readdirSync(locked) : []) recoverHosting(id);
+  for (const id of existsSync(locked) ? readdirSync(locked) : []) {
+    try { await recoverHosting(id); }
+    catch (error) {
+      strandMaintenance(id, OP, `publication recovery refused: ${String(error).slice(0, 180)}`);
+      log(`promote: ${id}: publication recovery refused: ${String(error).slice(0, 180)}`);
+    }
+  }
   const cands = join(PATHS.data, 'candidates');
   for (const id of existsSync(cands) ? readdirSync(cands) : []) {
     const c = candidate(id);
