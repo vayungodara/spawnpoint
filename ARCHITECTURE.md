@@ -64,11 +64,10 @@ candidate is tested:
    `eula=false`, resolves dependencies, applies mixins and runs mod
    initialisers before the EULA check. Forge and NeoForge initialize after that
    check, so they must reach `Done` in a fresh flat world on a loopback-only ephemeral
-   port, then stop before configs are captured. A client-only mod that
-   crashes the server can be moved to the client shelf and retested. Fabric
-   and both FML loaders no longer guess missing dependencies from crash text. Other
-   loaders retain the legacy dependency scan and repair path, but are not
-   supported by locked revisions yet.
+   port, then stop before configs are captured. Native metadata determines
+   client-only placement. Crash text and filenames cannot authorize moving
+   a mod to the client shelf or guessing a dependency. Other loaders are
+   not supported by locked revisions yet.
 3. **Client test** (`launchgate.ts`, Fabric and certified Forge and NeoForge AutoModpack revisions):
    HeadlessMC boots the matching Minecraft version and loader version with
    the files a player would receive, then quick-plays into a throwaway copy
@@ -89,6 +88,31 @@ warning. The installer may stage that plan, but retests retain its original
 live basis and the report keeps feasibility and optimality separate. Limits
 without a complete witness stage nothing. CurseForge file IDs are exact,
 and disabled API downloads require manual work without cross-source swaps.
+
+Typed automatic repairs (`repairs.ts`) change one coherent candidate plan
+before repeating its tests. The native solver supplies missing libraries.
+A wrong-loader upload needs an exact hash-verified source and a compatible
+build from the same project with the same native mod identities. An installed
+compatible build takes precedence over an upgrade. Exact owner pins cannot
+be substituted. Automatic deduplication removes only byte-identical top-level
+jars in the same server or client-shelf scope. Shared nested IDs and aliases
+are not duplicates.
+
+A Java repair needs an `UnsupportedClassVersionError` naming one class whose
+header matches the reported version in the candidate. Fabric can propose
+Tools Java 21 or 25. Both certified FML recipes remain on Java 21. The proposal
+preserves Minecraft and loader versions and leaves the live command unchanged
+until consented promotion. Activation, Undo, and interrupted recovery switch
+the exact locked command under the stopped revision fence.
+
+The candidate persists at most three repairs and refuses a repeated inventory.
+Its repair record, file overlay, and proposed Java commit in one atomic
+manifest write. Superseded staged bytes remain until that write succeeds.
+Automatic repairs refuse to overwrite different staged bytes at the same
+filename. Wrong-loader planning checks at most eight builds with 128 MB of
+downloads and a 60-second planning deadline. Limits and uncertain evidence
+leave the candidate for review. All repaired candidates require exact-revision
+owner consent before promotion.
 
 Each test returns `passed`, `failed` or `unverified`:
 
@@ -138,6 +162,7 @@ publication. Locked revisions currently accept Fabric's explicit Tools Java
 command with heap flags and `-jar fabric.jar nogui`, or the certified Forge
 1.20.1/47.4.28 and NeoForge 1.21.1/21.1.219 installers' exact OS argument files
 and heap-only user arguments. The NeoForge recipe requires Java 21.
+An explicit locked Java 21 path remains valid after Java 25 is downloaded.
 Both FML loaders seal `defaultconfigs/` and refuse custom `defaultConfigPath`
 values. NeoForge dependency overrides and artifacts competing with its bundled
 MixinExtras or coremods libraries return inconclusive rather than a feasible

@@ -3,11 +3,12 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, basename, dirname } from 'node:path';
 import { PATHS } from '../config.js';
-import { serverDir, clientShelfDir } from './servers.js';
+import { serverDir, clientShelfDir, javaFor } from './servers.js';
+import { craftyApi } from '../clients/crafty.js';
 import { chownToDirOwner, moveFile, writeFileAtomic } from './platform.js';
 import { ledgerEntries, updateLedger, type LedgerEntry } from './ledger.js';
 import { dryBoot, type Verdict } from './preflight.js';
-import { scanJars, isServerOnly } from './jardeps.js';
+import { isServerOnly } from './jardeps.js';
 import { autoModpackActive, extrasDir, publishPack } from './automodpack.js';
 import { clientGate, type ClientSet } from './launchgate.js';
 import { isRunningSafe, busyReason } from './maintenance.js';
@@ -35,6 +36,8 @@ export interface StagedFile {
   remove?: boolean;
   /** Dependency-only removal proposed by the solver, not an owner exclusion. */
   automatic?: boolean;
+  /** Byte-identical duplicate removal; retain this other top-level mod. */
+  duplicateOf?: string;
   /** a live file this one supersedes (an older version of the same mod) */
   replaces?: string;
   /** ledger record to write on apply; absent for hand-uploaded jars */
@@ -64,6 +67,9 @@ export interface Candidate {
   solver?: SolveResult;
   /** Owner intent survives retests; staged dependency choices are not pins. */
   requests?: SolveInput['add'];
+  /** Proposed runtime, tested without changing the live launch command. */
+  java?: string;
+  repairs?: { kind: 'missing-library' | 'wrong-loader' | 'wrong-java' | 'duplicate-mod'; detail: string; before: string; after: string }[];
   updatedAt: string;
 }
 
@@ -91,6 +97,21 @@ const dropFiles = (id: string, c: Candidate): void => {
 
 export function candidate(id: string): Candidate | null {
   try { return JSON.parse(readFileSync(join(root(id), 'candidate.json'), 'utf8')) as Candidate; } catch { return null; }
+}
+
+export function candidateJava(id: string): string | null {
+  const active = revisionState(id).active;
+  const det = detect(serverDir(id), id);
+  const c = candidate(id);
+  return (isOpen(c) ? c.java : undefined) ?? (active ? readLock(id, active).java.executable : javaFor(det.mc, det.loader));
+}
+
+/** Validate before preparing bytes; stage atomically publishes the repair,
+    overlay and runtime together. Unreferenced prepared bytes are harmless. */
+export function checkRepair(id: string, repair: NonNullable<Candidate['repairs']>[number]): void {
+  const c = candidate(id)!;
+  if ((c.repairs?.length ?? 0) >= 3) throw new Error('automatic repairs stopped after three attempts; review the remaining failure');
+  if (repair.before === repair.after || c.repairs?.some((r) => r.before === repair.after || r.after === repair.after)) throw new Error('automatic repairs stopped on a repeated plan or inventory');
 }
 
 function save(id: string, c: Candidate): Candidate {
@@ -124,20 +145,27 @@ export function txnBusy(): boolean {
 }
 
 /** Add downloaded files to this server's candidate and (re)start its quiet timer. */
-export function stage(id: string, files: StagedFile[], log: (m: string) => void, planning?: Pick<Candidate, 'solver' | 'requests'> & { keep?: string[] }): Candidate {
+export function stage(id: string, files: StagedFile[], log: (m: string) => void, planning?: Pick<Candidate, 'solver' | 'requests' | 'java'> & { keep?: string[]; repair?: NonNullable<Candidate['repairs']>[number] }): Candidate {
   assertCanStage(id);
+  if (planning?.repair) checkRepair(id, planning.repair);
   const prev = candidate(id);
   const c: Candidate = isOpen(prev) ? prev : { txn: new Date().toISOString().replace(/[:.]/g, '-'), status: 'collecting', detail: '', files: [], updatedAt: '' };
+  const obsolete = new Set<string>();
   for (const f of files) {
-    for (const old of c.files.filter((x) => x.file === f.file || (f.entry && x.entry?.projectId === f.entry.projectId))) {
-      if (old.file !== f.file) rmSync(join(filesDir(id), old.file), { force: true });
-      // a staged update of a staged mod replaces what the first one replaced
-      if (!old.remove && (!f.replaces || f.replaces === old.file)) f.replaces = old.replaces;
+    const superseded = c.files.filter((x) => x.file === f.file || (!f.remove && x.file === f.replaces) || (f.entry && x.entry?.projectId === f.entry.projectId));
+    // Reconcile the whole batch, independent of its order: both the upload
+    // and an already-staged compatible build can carry a live predecessor.
+    const predecessors = new Set(superseded.flatMap((old) => !old.remove && old.replaces && (old.replaces === old.file || !superseded.some((x) => x.file === old.replaces)) ? [old.replaces] : []));
+    if (f.replaces && !superseded.some((old) => !old.remove && old.file === f.replaces)) predecessors.add(f.replaces);
+    if (predecessors.size > 1) throw new Error('the staged replacements have conflicting live predecessors; choose an explicit replacement');
+    f.replaces = [...predecessors][0];
+    for (const old of superseded) {
+      if (old.file !== f.file) obsolete.add(old.file);
     }
-    c.files = c.files.filter((x) => x.file !== f.file && !(f.entry && x.entry?.projectId === f.entry.projectId)).concat(f);
+    c.files = c.files.filter((x) => !superseded.includes(x)).concat(f);
   }
   if (planning?.keep) {
-    for (const f of c.files) if (!planning.keep.includes(f.file)) rmSync(join(filesDir(id), f.file), { force: true });
+    for (const f of c.files) if (!planning.keep.includes(f.file)) obsolete.add(f.file);
     c.files = c.files.filter((f) => planning.keep!.includes(f.file));
   }
   generation.set(id, (generation.get(id) ?? 0) + 1);
@@ -146,14 +174,23 @@ export function stage(id: string, files: StagedFile[], log: (m: string) => void,
   c.pack = undefined;
   c.revision = undefined;
   c.consent = undefined;
-  c.solver = planning?.solver ?? (files.some((f) => f.file.endsWith('.jar') || f.remove || f.replaces) ? undefined : c.solver);
+  c.solver = planning?.solver ?? (planning?.java || files.some((f) => f.file.endsWith('.jar') || f.remove || f.replaces) ? undefined : c.solver);
   c.requests = planning?.requests ?? c.requests;
+  c.java = planning?.java ?? c.java;
+  if (planning?.repair) {
+    c.repairs = [...c.repairs ?? [], planning.repair];
+    c.server = undefined;
+    c.client = undefined;
+  }
   if (c.status !== 'testing') {
     c.status = 'collecting';
     c.detail = 'waiting a few seconds for more changes, then boot-testing';
     arm(id, log);
   }
-  return save(id, c);
+  save(id, c);
+  // Never unlink a manifest-referenced input before its replacement commits.
+  for (const file of obsolete) if (!c.files.some((f) => f.file === file)) rmSync(join(filesDir(id), file), { force: true });
+  return c;
 }
 
 /** Generated configs are only proposals: the final inventory is retested,
@@ -263,7 +300,7 @@ export async function resumeCandidates(log: (m: string) => void): Promise<void> 
       if (!m?.undoing) continue;
       try {
         await withStoppedRevision(id, async () => {
-          rollBackUndo(id, join(revs, id, txn));
+          await rollBackUndo(id, join(revs, id, txn));
           await afterCommit(id, log);
         });
         log(`packtxn: reversed an interrupted undo on ${id}`);
@@ -279,7 +316,7 @@ export async function resumeCandidates(log: (m: string) => void): Promise<void> 
     if (c?.status === 'activating') {
       try {
         await withStoppedRevision(id, async () => {
-          rollBackActivation(id, 'the panel stopped while applying this change, so it was undone; apply it again');
+          await rollBackActivation(id, 'the panel stopped while applying this change, so it was undone; apply it again');
           await afterCommit(id, log);
         });
         log(`packtxn: undid an interrupted activation on ${id}`);
@@ -395,7 +432,6 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
   let c = candidate(id);
   if (!c || c.status !== 'collecting') return;
   running++;
-  const healed = new Set<string>();
   let configAttempts = 0;
   const status = (detail: string): void => { c = save(id, { ...candidate(id)!, status: 'testing', detail }); };
   try {
@@ -403,25 +439,26 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       c = save(id, { ...c, consent: ['Install the required Crafty launch guard and hold AutoModpack hosting off until each boot and exact pack are verified. Permit pack rollback to restore locked configs and pack inputs, retaining altered copies for inspection. This changes the launch command and hosting flag, never Minecraft, the loader, or the world.'] });
       return wait(id, {}, 'owner consent is required to manage revision-checked starts and publication', log);
     }
-    for (let round = 0; round < 6; round++) {
+    const { repairCandidate, repairInventory, repairKey } = await import('./repairs.js');
+    for (let round = 0; round < 12; round++) {
       const gen = generation.get(id) ?? 0;
       status('checking declared dependencies');
       let set = candidateSet(id, c);
       const solvedLoader = ['fabric', 'forge', 'neoforge'].includes(detect(serverDir(id), id).loader);
       if (solvedLoader) {
+        if (await repairCandidate(id, log)) continue;
         status('solving the complete server and friend pack');
         const { solveCandidate } = await import('./installer.js');
-        const solved = await solveCandidate(id, [], log);
+        const before = repairKey(await repairInventory(id), candidateJava(id));
+        const solved = await solveCandidate(id, [], log, (plan) => {
+          const after = repairKey(plan.plan, candidateJava(id));
+          // Intent/provenance-only reconciliation is not another repair.
+          if (before !== after) return { kind: 'missing-library', before, after,
+            detail: 'Resolve the complete native dependency graph, retaining every requested root and exact owner pin' };
+        });
         c = save(id, { ...candidate(id)!, solver: solved.solver });
         if (solved.error) return wait(id, {}, solved.error, log);
         if (solved.candidate) continue;
-      } else {
-        const missing = scanJars(set.serverJars).missing.filter((m) => !healed.has(m));
-        if (missing.length && missing.length <= 6) {
-          missing.forEach((m) => healed.add(m));
-          status(`installing missing dependencies: ${missing.join(', ')}`);
-          if ((await healMissing(id, missing)).length) continue;
-        }
       }
 
       const baseline = revisionState(id).active ?? `${c.txn}-baseline`;
@@ -434,7 +471,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
         await afterCommit(id, log);
       }
       const revision = `${c.txn}-${Date.now()}`;
-      await sealRevision(id, revision, inputsFor(id, c));
+      await sealRevision(id, revision, inputsFor(id, c), c.java);
       c = save(id, { ...candidate(id)!, revision, baseline });
       const sealed = sealedSet(id, revision);
       set = sealed;
@@ -471,16 +508,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       }
       if (server.result === 'failed') {
         if (stale()) continue;
-        // the loader names missing mod ids: install them and test again
-        const named = missingFromExcerpt(server.excerpt ?? []).filter((m) => !healed.has(m));
-        if (!solvedLoader && named.length && named.length <= 4) {
-          named.forEach((m) => healed.add(m));
-          status(`installing missing dependencies: ${named.join(', ')}`);
-          if ((await healMissing(id, named)).length) continue;
-        }
-        // a client-only mod staged for mods/ crashes the server environment:
-        // send it to the client shelf and test again
-        if (rerouteClientOnly(id, server.excerpt ?? [])) continue;
+        if (server.javaFailure && await repairCandidate(id, log, server.javaFailure)) continue;
         // blame the change only if the server boots without it, and the
         // failure repeats (some mods race at startup and fail at random)
         status('the server test failed; testing the current mods without this change');
@@ -504,6 +532,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
         reportRevision(id, revision, { tests: { client: { ...client, result: client.result === 'unverified' ? 'inconclusive' : client.result }, ...client.checks } });
         if (client.result === 'failed') {
           if (stale()) continue;
+          if (client.javaFailure && await repairCandidate(id, log, client.javaFailure)) continue;
           // blame the change only if the pack without it passes and the
           // failure repeats (mixin-heavy packs can crash at random)
           status('the client test failed; testing the current pack without this change');
@@ -527,7 +556,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
         const why = [server, client].filter((v) => v?.result === 'unverified').map((v) => v!.detail).join('; ');
         return wait(id, { server, client }, why, log);
       }
-      if (candidate(id)!.files.some((f) => f.path || f.replaces || f.remove)) {
+      if (candidate(id)!.java || candidate(id)!.repairs?.length || candidate(id)!.files.some((f) => f.path || f.replaces || f.remove)) {
         return wait(id, { server, client }, 'approve the listed replacements, removals and config edits before promotion', log);
       }
       await activate(id, { ...candidate(id)!, server, client }, log);
@@ -549,56 +578,12 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
 /** Park a candidate for the owner: apply anyway, test again or discard. */
 function wait(id: string, verdicts: Pick<Candidate, 'server' | 'client'>, why: string, log: (m: string) => void): void {
   const c = candidate(id)!;
-  const consent = revisionState(id).managedHosting ? c.files.filter((f) => f.path || f.replaces || f.remove).map((f) => f.path ? `${f.remove ? 'Remove config' : 'Write config'} ${f.path}` : f.remove ? `Remove ${f.file}` : `${f.replaces} → ${f.file}`) : c.consent;
+  const consent = revisionState(id).managedHosting ? [
+    ...c.files.filter((f) => f.path || f.replaces || f.remove).map((f) => f.path ? `${f.remove ? 'Remove config' : 'Write config'} ${f.path}` : f.remove ? `Remove ${f.file}` : `${f.replaces} → ${f.file}`),
+    ...c.repairs?.map((r) => `${r.kind}: ${r.detail}`) ?? [],
+  ] : c.consent;
   save(id, { ...c, ...verdicts, consent, status: 'needs-approval', detail: why });
   log(`packtxn: ${id} needs approval (${why})`);
-}
-
-function missingFromExcerpt(excerpt: string[]): string[] {
-  return [...new Set(excerpt.flatMap((l) => [
-    ...[...l.matchAll(/Mod ID: '([a-z0-9_.-]+)'/gi)].map((m) => m[1]), // forge / neoforge
-    ...[...l.matchAll(/Install ([a-z0-9_.-]+),/gi)].map((m) => m[1]), // fabric: "Install x, any version"
-  ]))].filter((m) => !/^(minecraft|forge|neoforge|fabricloader|java)$/.test(m));
-}
-
-/** Mod ids are usually Modrinth slugs, not always ('farmersdelight' vs
-    'farmers-delight'): try the id, a dashed variant, then a search hit whose
-    slug or title matches exactly once separators are stripped. */
-async function healMissing(id: string, modIds: string[]): Promise<string[]> {
-  const { install } = await import('./installer.js');
-  const { search } = await import('../clients/modrinth.js');
-  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const healed: string[] = [];
-  for (const modId of modIds) {
-    const tries = modId === 'fabric' ? ['fabric-api'] : [...new Set([modId, modId.replace(/_/g, '-')])]; // "fabric" is Fabric API's legacy id
-    const hit = (await search({ query: modId, type: 'mod', limit: 8 }).catch(() => ({ hits: [] }))).hits
-      .find((h) => norm(h.slug) === norm(modId) || norm(h.title) === norm(modId));
-    if (hit) tries.push(hit.project_id);
-    for (const projectId of tries) {
-      const r = await install(id, { projectId, type: 'mod', dependency: true }).catch(() => null);
-      if (r && 'installed' in r && r.installed.length) { healed.push(...r.installed.map((i) => i.file)); break; }
-    }
-  }
-  return healed;
-}
-
-/** Fabric names the mod whose mixin fails "in environment type SERVER": if it
-    is a staged mods/ file, it belongs on the client shelf. */
-function rerouteClientOnly(id: string, excerpt: string[]): boolean {
-  if (!excerpt.some((l) => /in environment type SERVER/i.test(l))) return false;
-  const ids = new Set(excerpt.flatMap((l) => [...l.matchAll(/from mod ([a-z0-9_-]+)\]/gi)].map((m) => m[1].toLowerCase())));
-  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const c = candidate(id)!;
-  let moved = false;
-  for (const f of c.files) {
-    if (f.to === 'mods' && [...ids].some((m) => norm(f.file).includes(norm(m)))) {
-      f.to = 'shelf';
-      if (f.entry) f.entry.clientOnly = true;
-      moved = true;
-    }
-  }
-  if (moved) save(id, c);
-  return moved;
 }
 
 function reject(id: string, server: Verdict, client: Verdict | undefined, log: (m: string) => void): void {
@@ -637,11 +622,12 @@ function runMoves(j: Journal, persist: (j: Journal) => void): void {
 }
 
 /** Undo an activation from its persisted journal: files, ledger, manifest. */
-function rollBackActivation(id: string, detail: string): void {
+async function rollBackActivation(id: string, detail: string): Promise<void> {
   const c = candidate(id)!;
   if (c.journal) {
     reverseMoves(c.journal, (journal) => save(id, { ...c, journal }));
     updateLedger(id, () => c.journal!.ledgerBefore);
+    if (c.journal.activeBefore) await craftyApi.useRevisionCommand(id, c.journal.activeBefore);
     setRevisionState(id, { active: c.journal.activeBefore });
   }
   rmSync(join(revisionsDir(id), c.txn, 'revision.json'), { force: true });
@@ -649,10 +635,11 @@ function rollBackActivation(id: string, detail: string): void {
 }
 
 /** Reverse an undo cut short, from the journal in its manifest. */
-function rollBackUndo(id: string, dir: string): void {
+async function rollBackUndo(id: string, dir: string): Promise<void> {
   const m = readManifest(dir)!;
   reverseMoves(m.undoing!, (undoing) => writeManifest(dir, { ...m, undoing }));
   updateLedger(id, () => m.undoing!.ledgerBefore);
+  if (m.undoing!.activeBefore) await craftyApi.useRevisionCommand(id, m.undoing!.activeBefore);
   setRevisionState(id, { active: m.undoing!.activeBefore });
   writeManifest(dir, { ...m, undoing: undefined });
 }
@@ -667,8 +654,8 @@ export function exclusive<T>(id: string, fn: () => Promise<T>): Promise<T> {
 
 /** Move a tested candidate into the live folders. Every move is journaled
     in the candidate first, so a crash part-way is undone on the next start
-    (resumeCandidates). Everything up to 'applied' is synchronous, so no
-    install can join the candidate while it is being applied. */
+    (resumeCandidates). The activating status refuses installs across the
+    asynchronous command switch as well as the synchronous file moves. */
 function activate(id: string, c: Candidate, log: (m: string) => void, approved = false, applying = false): Promise<Candidate> {
   const gen = generation.get(id) ?? 0;
   return exclusive(id, async () => {
@@ -726,11 +713,12 @@ function activate(id: string, c: Candidate, log: (m: string) => void, approved =
       updateLedger(id, (entries) => entries
         .filter((e) => !replaced.has(e.file) && !added.has(e.file))
         .concat(c.files.flatMap((f) => (!f.remove && f.entry ? [{ ...f.entry, clientOnly: f.to === 'shelf' || undefined }] : []))));
+      await craftyApi.useRevisionCommand(id, c.revision);
       await verifyRevision(id, c.revision, true);
       setRevisionState(id, { active: c.revision });
     } catch (e) {
       // if the rollback itself fails, the journal stays and the next start finishes it
-      rollBackActivation(id, `the files could not be moved (${String(e).slice(0, 100)}); stop the server and apply again`);
+      await rollBackActivation(id, `the files could not be moved (${String(e).slice(0, 100)}); stop the server and apply again`);
       return candidate(id)!;
     }
     const verdict = approved ? 'applied with owner consent' : 'tested and applied';
@@ -861,12 +849,13 @@ export function undoLast(id: string, log: (m: string) => void, txn?: string): Pr
       const added = new Set(m.added.map((f) => f.file));
       updateLedger(id, (entries) => entries.filter((e) => !added.has(e.file)).concat(m.ledger));
       if (m.baseline) {
+        await craftyApi.useRevisionCommand(id, m.baseline);
         await verifyRevision(id, m.baseline, true);
         setRevisionState(id, { active: m.baseline });
       }
       writeManifest(rev, undone);
     } catch (e) {
-      rollBackUndo(id, rev); // if this throws too, the next start finishes it
+      await rollBackUndo(id, rev); // if this throws too, the next start finishes it
       throw new Error(`could not move the files back (${String(e).slice(0, 100)}); stop the server and try again`);
     }
     // the "applied" banner for this change would now be wrong

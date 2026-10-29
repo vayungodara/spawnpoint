@@ -151,6 +151,16 @@ export const craftyApi = {
     }
     return mutate(id, crafty('PATCH', `/api/v2/servers/${id}`, fields));
   },
+  /** Transaction-only: the journal and OS fence outlive this async write.
+      No arbitrary command or HTTP runtime-edit bypass is accepted here. */
+  useRevisionCommand: async (id: string, revision: string) => {
+    const { assertRevisionMutation, verifyRevision } = await import('../services/revisions.js');
+    assertRevisionMutation(id);
+    const lock = await verifyRevision(id, revision);
+    if ((await craftyApi.getServer(id)).execution_command !== lock.command) {
+      await mutate(id, crafty('PATCH', `/api/v2/servers/${id}`, { execution_command: lock.command }));
+    }
+  },
   // Crafty 4.x exposes stdin as an action-style endpoint on some builds; the
   // route layer falls back to RCON when this 404s.
   sendStdin: (id: string, cmd: string) =>

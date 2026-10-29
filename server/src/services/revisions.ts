@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
 import { chownSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, constants } from 'node:fs';
 import { copyFile, mkdir, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { PATHS } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import { detect, loaderVersion } from './detect.js';
-import { clientShelfDir, javaFor, serverDir } from './servers.js';
+import { clientShelfDir, serverDir } from './servers.js';
 import { ledgerEntries, type LedgerEntry } from './ledger.js';
 import { writeFileAtomic } from './platform.js';
 import { hostingHold } from './automodpack.js';
@@ -160,13 +160,19 @@ export async function withStoppedRevision<T>(id: string, fn: () => Promise<T>): 
     const { fullyStopped } = await import('./maintenance.js');
     if (!await fullyStopped(id)) throw new Error('revision mutation requires a confirmed stopped server');
     writeFileAtomic(marker, 'journal recovery required before starting\n');
+    stoppedFences.add(id);
     const result = await fn();
     rmSync(marker, { force: true });
     return result;
   } finally {
+    stoppedFences.delete(id);
     child.stdin.end();
     await closed;
   }
+}
+const stoppedFences = new Set<string>();
+export function assertRevisionMutation(id: string): void {
+  if (!stoppedFences.has(id)) throw new Error('changing the locked launch command requires the stopped revision fence');
 }
 const GUARD = `"${process.platform === 'win32' ? 'python' : 'python3'}" ".spawnpoint-launch.py" `;
 /** Called only after the owner explicitly approves changing Crafty's launch
@@ -190,14 +196,16 @@ export function writeLaunchGate(id: string): void {
     const bytes = f.path === 'automodpack/automodpack-server.json' && hold?.paused;
     return { path, sha512: bytes ? createHash('sha512').update(bytes).digest('hex') : f.sha512, size: bytes ? Buffer.byteLength(bytes) : f.size };
   });
-  writeFileAtomic(join(serverDir(id), '.spawnpoint-revision.json'), JSON.stringify({ revision: active, java: lock.java, command: lock.command, files, roots: [...PACK_ROOTS, 'automodpack/host-modpack/main'], hosting: hold }, null, 2));
+  // The guard compares pathlib's native spelling. Commands may use forward
+  // slashes on Windows, while its executable identity must use backslashes.
+  writeFileAtomic(join(serverDir(id), '.spawnpoint-revision.json'), JSON.stringify({ revision: active, java: { ...lock.java, executable: resolve(lock.java.executable) }, command: lock.command, files, roots: [...PACK_ROOTS, 'automodpack/host-modpack/main'], hosting: hold }, null, 2));
 }
 /** Seal the exact launch specification as well as the files. A bare java or
     shell wrapper cannot certify which runtime Crafty will execute. */
-export async function sealRevision(id: string, revision: string, inputs: RevisionInput[]): Promise<RevisionLock> {
+export async function sealRevision(id: string, revision: string, inputs: RevisionInput[], proposedJava?: string): Promise<RevisionLock> {
   const dest = revisionDir(id, revision);
   if (existsSync(join(dest, 'lock.json'))) throw new Error('a sealed revision is immutable');
-  const { det, loader, command, executable, argv } = await launchSpec(id);
+  const { det, loader, command, executable, argv } = await launchSpec(id, serverDir(id), proposedJava);
   const version = await run(executable, ['-version']);
   const javaFiles = [];
   // Only executable runtime inputs, never the JDK certificate/trust stores.
@@ -230,7 +238,7 @@ export async function sealRevision(id: string, revision: string, inputs: Revisio
         requested: input.entry?.via !== 'dependency',
       });
     }
-    const sealed = await launchSpec(id, join(part, 'files', 'server'));
+    const sealed = await launchSpec(id, join(part, 'files', 'server'), proposedJava);
     if (sealed.command !== command || JSON.stringify(sealed.argv) !== JSON.stringify(argv) || sealed.det.mc !== det.mc || sealed.det.loader !== det.loader || sealed.loader !== loader) throw new Error('launch inputs changed while sealing the revision');
     files.sort((a, b) => `${a.location}/${a.path}`.localeCompare(`${b.location}/${b.path}`));
     const identity = (f: LockedFile): string => f.source.projectId ? `${f.source.kind}:${f.source.projectId}` : `${f.location}/${f.path}`;
@@ -248,20 +256,27 @@ export async function sealRevision(id: string, revision: string, inputs: Revisio
 }
 /** One validator for adoption and sealing: refuse unsupported recipes before
     changing Crafty. Arbitrary agents, @files and --universe can escape tests. */
-async function launchSpec(id: string, dir = serverDir(id)) {
+async function launchSpec(id: string, dir = serverDir(id), proposedJava?: string) {
   const det = detect(dir, id);
   const loader = loaderVersion(dir, det);
   if (!det.mc || !loader) throw new Error('Minecraft and loader versions must be known before sealing a revision');
   if (det.loader !== 'fabric' && !(det.loader === 'forge' && det.mc === '1.20.1' && loader === '47.4.28')
     && !(det.loader === 'neoforge' && det.mc === '1.21.1' && loader === '21.1.219')) throw new Error('locked revisions support Fabric, Forge 1.20.1 / 47.4.28 and NeoForge 1.21.1 / 21.1.219');
-  const command = (await craftyApi.getServer(id)).execution_command;
+  let command = (await craftyApi.getServer(id)).execution_command;
+  if (proposedJava) {
+    const prefix = command.startsWith(GUARD) ? GUARD : '';
+    command = prefix + command.slice(prefix.length).replace(/^"[^"]+"|^\S+/, () => JSON.stringify(proposedJava.replaceAll('\\', '/')));
+  }
   const javaCommand = command.startsWith(GUARD) ? command.slice(GUARD.length) : command;
   const executable = /^"([^"]+)"|^(\S+)/.exec(javaCommand)?.slice(1).find(Boolean);
-  if (!executable || executable !== javaFor(det.mc, det.loader)) throw new Error('the server and test must use the same explicit Tools/ Java runtime');
-  if (det.loader === 'neoforge') {
-    const version = await run(executable, ['-XshowSettings:properties', '-version'], { timeout: 5_000 });
-    if (!/^\s*java.specification.version = 21\s*$/m.test(version.stderr)) throw new Error('the certified NeoForge recipe requires Java 21');
-  }
+  // Selection policy chooses a default, not a mutable alias: a sealed Java 21
+  // command remains valid when Java 25 is downloaded for another candidate.
+  const home = executable && resolve(dirname(dirname(executable)));
+  if (!executable || !isAbsolute(executable) || !home || dirname(home) !== resolve(PATHS.root, 'Tools') || !/^jdk-(21|25)(?:[.+-]|$)/.test(basename(home))
+    || basename(dirname(executable)) !== 'bin' || basename(executable) !== (process.platform === 'win32' ? 'java.exe' : 'java')) throw new Error('the server and test must use the same explicit Tools/ Java runtime');
+  const version = await run(executable, ['-XshowSettings:properties', '-version'], { timeout: 5_000 });
+  const major = Number(/^\s*java.specification.version = (\d+)\s*$/m.exec(version.stderr)?.[1]);
+  if (![21, 25].includes(major) || (det.loader !== 'fabric' && major !== 21)) throw new Error('certified FML recipes require Java 21; Fabric revisions support Java 21 or 25');
   const parsed = await run(process.platform === 'win32' ? 'python' : 'python3', ['-c', 'import json,shlex,sys; print(json.dumps(shlex.split(sys.argv[1])))', javaCommand]);
   let argv = JSON.parse(parsed.stdout) as string[];
   const heap = (arg: string): boolean => /^-Xm[sx]\d+[kKmMgG]$/.test(arg);

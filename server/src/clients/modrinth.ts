@@ -184,6 +184,7 @@ export function getVersionsBulk(ids: string[]): Promise<Version[]> {
 export async function identifyByHashes(sha1s: string[]): Promise<Record<string, Version>> {
   const res = await fetch(`${BASE}/version_files`, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'user-agent': UA, 'content-type': 'application/json' },
     body: JSON.stringify({ hashes: sha1s, algorithm: 'sha1' }),
   });

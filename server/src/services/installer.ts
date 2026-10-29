@@ -6,18 +6,18 @@ import { promisify } from 'node:util';
 import { parse } from 'smol-toml';
 import { chownToDirOwner, writeFileAtomic } from './platform.js';
 import { PATHS } from '../config.js';
-import { serverDir, clientShelfDir, javaFor } from './servers.js';
+import { serverDir, clientShelfDir } from './servers.js';
 import { detect, loaderVersion, type Detection } from './detect.js';
 import * as modrinth from '../clients/modrinth.js';
 import * as curseforge from '../clients/curseforge.js';
 import type { ContentType, Version } from '../clients/modrinth.js';
 import { queueChange, listPending, applyPending, type PendingAction } from './pendingmods.js';
 import { ledgerEntries, updateLedger, type LedgerEntry } from './ledger.js';
-import { stage, stagedFiles, stagingPath, invalidate, assertModsWritable, assertCanStage, candidate, candidateSet, exclusive, type Candidate, type StagedFile } from './packtxn.js';
+import { stage, stagedFiles, stagingPath, invalidate, assertModsWritable, assertCanStage, candidate, candidateSet, candidateJava, checkRepair, exclusive, type Candidate, type StagedFile } from './packtxn.js';
 import { scanJars } from './jardeps.js';
 import { assertUnsealed, revisionState, hashes } from './revisions.js';
 import { NetworkCatalog } from './solver/catalog.js';
-import { modIds, solve, type Pin, type SolveResult } from './solver/index.js';
+import { modIds, solve, type Pin, type SolveResult, type SolvedPlan } from './solver/index.js';
 import { readFabricJar } from './solver/fabric.js';
 import { FORGE_PROFILES, NEOFORGE_PROFILES, readForgeJar } from './solver/forge.js';
 
@@ -123,7 +123,7 @@ async function fetchFile(url: string, sha1?: string, sha512?: string, src?: stri
 /** Download a plan and either stage it (mods on modded servers) or write it
     straight into the live folders. */
 async function commit(serverUuid: string, det: Detection, type: ContentType, plan: Planned[], direct: boolean, result: InstallResult, log: (m: string) => void,
-  planning?: { removals: StagedFile[]; requests: Candidate['requests']; keep: string[]; beforeWrite: () => Promise<void> }): Promise<InstallResult> {
+  planning?: { removals: StagedFile[]; requests: Candidate['requests']; keep: string[]; beforeWrite: () => Promise<void>; beforeStage?: () => NonNullable<Candidate['repairs']>[number] | undefined }): Promise<InstallResult> {
   const viaCandidate = type === 'mod' && MOD_LOADERS.has(det.loader) && !direct;
   if (direct && type === 'mod') assertUnsealed(serverUuid);
   const staged: { file: StagedFile; buf: Buffer }[] = [];
@@ -161,6 +161,16 @@ async function commit(serverUuid: string, det: Detection, type: ContentType, pla
     // a running test must not pass on bytes about to be replaced, even if a
     // write below fails before stage() registers the batch
     assertCanStage(serverUuid);
+    const repair = planning?.beforeStage?.();
+    if (repair) {
+      checkRepair(serverUuid, repair);
+      // Automatic repair publication is copy-before-manifest: interrupted
+      // preparation must leave every old referenced input intact.
+      for (const s of staged) {
+        const path = stagingPath(serverUuid, s.file.file);
+        if (existsSync(path) && !readFileSync(path).equals(s.buf)) throw new Error('automatic repair cannot overwrite a staged filename; choose an explicit replacement');
+      }
+    }
     invalidate(serverUuid);
     const known = new Set(stagedFiles(serverUuid).map((f) => f.file));
     const written: string[] = [];
@@ -175,7 +185,7 @@ async function commit(serverUuid: string, det: Detection, type: ContentType, pla
       throw e;
     }
     result.candidate = stage(serverUuid, staged.map((s) => s.file).concat(planning?.removals ?? []), log,
-      { solver: result.solver, requests: planning?.requests, keep: planning?.keep });
+      { solver: result.solver, requests: planning?.requests, keep: planning?.keep, repair });
   }
   if (written.length) {
     const names = new Set(written.map((e) => e.file));
@@ -198,6 +208,7 @@ export function solveCandidate(
   id: string,
   add: { projectId: string; versionId?: string; requested?: boolean }[] = [],
   log: (m: string) => void = noLog,
+  beforeStage?: (plan: SolvedPlan) => NonNullable<Candidate['repairs']>[number] | undefined,
 ): Promise<InstallResult> {
   return exclusive(id, async () => {
     const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: true };
@@ -206,7 +217,7 @@ export function solveCandidate(
       assertCanStage(id);
       const det = detect(serverDir(id), id);
       const loader = loaderVersion(serverDir(id), det);
-      const java = javaFor(det.mc, det.loader);
+      const java = candidateJava(id);
       if ((det.loader !== 'fabric' && det.loader !== 'forge' && det.loader !== 'neoforge') || !det.mc || !loader || !java) throw new Error('The solver needs known Minecraft, supported loader and Java versions');
       const profile = det.loader === 'fabric' ? undefined : (det.loader === 'forge' ? FORGE_PROFILES : NEOFORGE_PROFILES)[`${det.mc}-${loader}`];
       if (det.loader !== 'fabric' && !profile) throw new Error('This FML runtime metadata profile is not certified');
@@ -229,10 +240,12 @@ export function solveCandidate(
         const live = await inventory([], ledgerEntries(id));
         const requests = changes.length ? candidate(id)?.requests : undefined;
         const runtime = { detection: detect(serverDir(id), id), loader: loaderVersion(serverDir(id), det),
-          java: javaFor(det.mc, det.loader), hash: await hashes(java) };
+          java: candidateJava(id), hash: await hashes(java) };
         return { rows, live, requests, changes, key: JSON.stringify({ rows, live, requests, changes, runtime }) };
       };
       const before = await snapshot();
+      const duplicate = (row: typeof before.rows[number]): boolean => before.changes.some((f) => f.remove && f.file === basename(row.path)
+        && f.duplicateOf && before.rows.some((keep) => basename(keep.path) === f.duplicateOf && keep.sha512 === row.sha512));
       const output = await promisify(execFile)(java, ['-version'], { timeout: 5_000 });
       const javaVersion = /version "([^"]+)"/.exec(output.stderr + output.stdout)?.[1];
       if (!javaVersion) throw new Error('Java did not report its runtime version');
@@ -260,13 +273,13 @@ export function solveCandidate(
         if (before.rows.includes(row)) rowsByProject.set(projectId, row);
         const pin = { projectId, versionId, file, sha1: row.sha1, requested: entry?.via !== 'dependency' };
         pinsByPath.set(row.path, pin);
-        if (before.live.includes(row)) installed.push(pin);
+        if (before.live.includes(row) && !duplicate(row)) installed.push(pin);
       }
       catalog = new NetworkCatalog({ mc: det.mc, loader: det.loader, loaderVersion: loader }, local);
       // Removal/disable proposals stay removed; the solver may not silently
       // reinstall a library that the owner has explicitly taken out.
       const removedNames = new Set(before.changes.filter((f) => (f.remove && !f.automatic) || f.file.endsWith('.disabled')).map((f) => f.replaces ?? f.file));
-      const removed = before.live.filter((row) => removedNames.has(basename(row.path)));
+      const removed = before.live.filter((row) => removedNames.has(basename(row.path)) && !duplicate(row));
       const remove = removed.map((row) => pinsByPath.get(row.path)!.projectId);
       for (const upload of before.changes.filter((f) => !f.entry && !f.remove && f.replaces && f.file.endsWith('.jar'))) {
         const previous = before.live.find((row) => basename(row.path) === upload.replaces);
@@ -335,7 +348,7 @@ export function solveCandidate(
       const keep = [...selection.plan.map((p) => p.file), ...removals.map((f) => f.file),
         ...before.changes.filter((f) => f.path || f.file.endsWith('.disabled')
           || (f.remove && (!f.automatic || selection.changes.removed.some((p) => p.file === f.file)))).map((f) => f.file)];
-      return commit(id, det, 'mod', plan, false, result, log, { removals: removals.concat(localReplacements), keep, requests: [...requests.values()], beforeWrite: async () => {
+      return commit(id, det, 'mod', plan, false, result, log, { removals: removals.concat(localReplacements), keep, requests: [...requests.values()], beforeStage: () => beforeStage?.(selection), beforeWrite: async () => {
         assertCanStage(id);
         if ((await snapshot()).key !== before.key) throw new Error('The pack changed during planning; solve the new inventory before installing');
       } });

@@ -1,7 +1,7 @@
 // Cross-platform contract checks for the shipped pre-JVM gate. Real Fabric
 // promotion proof uses .github/setup-integration.mjs and the panel API.
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -46,6 +46,26 @@ try {
   reset();
   check('valid sealed invocation starts the runtime', run().status === 0 && existsSync(join(dir, 'started')));
   check('paused configuration is exact UTF-8 bytes without newline translation', readFileSync(join(dir, 'automodpack/automodpack-server.json')).equals(Buffer.from(paused)));
+
+  // Repaired commands use forward slashes so shlex preserves Windows paths.
+  // Exercise the actual manifest writer and the unchanged copied guard.
+  process.env.SPAWNPOINT_ROOT = join(dir, 'layout');
+  const { writeLaunchGate, setRevisionState, revisionDir } = await import('../server/dist/services/revisions.js');
+  const id = randomUUID(), server = join(process.env.SPAWNPOINT_ROOT, 'Crafty', 'servers', id);
+  mkdirSync(join(server, 'config'), { recursive: true });
+  mkdirSync(join(server, 'automodpack'));
+  writeFileSync(join(server, 'config/example.json'), '{}');
+  writeFileSync(join(server, 'automodpack/automodpack-server.json'), paused);
+  const forwardArgs = [process.execPath.replaceAll('\\', '/'), runner];
+  const forwardCommand = ['python', '.spawnpoint-launch.py', ...forwardArgs].map((s) => JSON.stringify(s)).join(' ');
+  mkdirSync(revisionDir(id, 'forward'), { recursive: true });
+  writeFileSync(join(revisionDir(id, 'forward'), 'lock.json'), JSON.stringify({ schema: 1, id: 'forward', command: forwardCommand,
+    java: { ...gate.java, executable: forwardArgs[0] }, files: gate.files.map((f) => ({ ...f, location: 'server' })) }));
+  setRevisionState(id, { active: 'forward' });
+  writeLaunchGate(id);
+  const forward = spawnSync(python, [script, ...forwardArgs], { cwd: server, input: '', encoding: 'utf8', timeout: 10000 });
+  check('a forward-slash repaired command launches through the real manifest writer and guard', forward.status === 0 && existsSync(join(server, 'started')));
+
   reset();
   writeFileSync(join(dir, 'config/example.json'), '{"changed":true}');
   check('changed locked config refuses the runtime', run().status !== 0 && !existsSync(join(dir, 'started')));

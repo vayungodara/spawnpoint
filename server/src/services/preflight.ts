@@ -19,6 +19,8 @@ export interface Verdict {
   detail: string;
   /** the loader's own words, cause lines first */
   excerpt?: string[];
+  /** Complete class-version diagnostic; display excerpts may truncate it. */
+  javaFailure?: string;
   seconds?: number;
   renderer?: 'xvfb' | 'window' | 'headless' | 'none';
   checks?: Record<string, import('./revisions.js').TestResult>;
@@ -64,6 +66,8 @@ export function linkLoader(dir: string, sandbox: string, lock?: RevisionLock): v
 const PASS_RE = /You need to agree to the EULA/i;
 const FAIL_RE = /Incompatible mods found|Mod resolution failed|Missing or unsupported mandatory dependencies|Error during pre-launch|Failed to start the minecraft server|Exception in thread "main"/i;
 const TIMEOUT_MS = 150_000;
+
+export const classVersionFailure = (out: string): string | undefined => out.match(/^.*UnsupportedClassVersionError:.*class file version.*$/m)?.[0].slice(0, 4096);
 
 /** The loader's own verdict lines first (which mod needs or breaks which),
     then "Caused by" lines deepest first, then error lines, then the raw tail. */
@@ -155,7 +159,7 @@ async function dryBootInner(serverId: string, jars: string[], dir: string, lock?
       // the log outlives the sandbox wipe so the panel can show it
       try { writeFileSync(join(PATHS.data, 'preflight', `${serverId}.log`), out, 'utf8'); } catch { /* diagnostics only */ }
       rmSync(sandbox, { recursive: true, force: true });
-      resolve({ ...v, seconds: Math.round((Date.now() - started) / 1000) });
+      resolve({ ...v, javaFailure: v.result === 'failed' ? classVersionFailure(out) : undefined, seconds: Math.round((Date.now() - started) / 1000) });
     };
     child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
     child.stderr.on('data', (d: Buffer) => { out += d.toString(); });

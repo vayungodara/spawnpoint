@@ -22,6 +22,7 @@ const { install, solveCandidate, deleteInstalled } = await tsImport('../server/s
 const { candidate, candidateSet, discard, stage, stageConfig, stagingPath, approve, applyReady } = await tsImport('../server/src/services/packtxn.ts', import.meta.url);
 const { updateLedger, ledgerEntries } = await tsImport('../server/src/services/ledger.ts', import.meta.url);
 const { NetworkCatalog } = await tsImport('../server/src/services/solver/catalog.ts', import.meta.url);
+const { repairCandidate } = await tsImport('../server/src/services/repairs.ts', import.meta.url);
 const { setOverride } = await tsImport('../server/src/services/detect.ts', import.meta.url);
 const { revisionDir, setRevisionState } = await tsImport('../server/src/services/revisions.ts', import.meta.url);
 const { PATHS } = await tsImport('../server/src/config.ts', import.meta.url);
@@ -56,10 +57,14 @@ const cf = new MockAgent();
 cf.disableNetConnect();
 setGlobalDispatcher(cf);
 let onDomain;
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, options = {}) => {
   const request = new URL(url);
   if (artifacts.has(request.href)) return new Response(artifacts.get(request.href));
   const path = decodeURIComponent(request.pathname).split('/');
+  if (path[2] === 'version_files') {
+    const hashes = JSON.parse(options.body).hashes;
+    return Response.json(Object.fromEntries([...versions.values()].flatMap((v) => v.files.filter((f) => hashes.includes(f.hashes.sha1)).map((f) => [f.hashes.sha1, v]))));
+  }
   if (path[2] === 'project' && path[4] === 'version') {
     onDomain?.();
     return Response.json([...versions.values()].filter((v) => v.project_id === path[3]));
@@ -274,6 +279,19 @@ try {
   check('a retest cannot erase same-filename replacement consent', candidate(restoration.id).files.some((f) => f.file === restored1.files[0].filename && f.replaces === f.file));
   discard(restoration.id);
 
+  const shared1 = record('shared_name', 'shared_name1', '1.0.0');
+  const shared2 = record('shared_name', 'shared_name2', '2.0.0');
+  const shared3 = record('shared_name', 'shared_name3', '3.0.0');
+  shared2.files[0].filename = shared3.files[0].filename = 'shared.jar';
+  const sameName = fixture([[shared1]]);
+  assert.ok(!(await install(sameName.id, { projectId: shared2.project_id, versionId: shared2.id, type: 'mod' })).error);
+  const restaged = await install(sameName.id, { projectId: shared3.project_id, versionId: shared3.id, type: 'mod' });
+  check('restaging a shared filename retains the original live predecessor and publishes the requested bytes', !restaged.error
+    && candidate(sameName.id).files.length === 1 && candidate(sameName.id).files[0].replaces === shared1.files[0].filename
+    && candidate(sameName.id).files[0].entry.versionId === shared3.id
+    && readFileSync(stagingPath(sameName.id, 'shared.jar')).equals(artifacts.get(shared3.files[0].url)));
+  discard(sameName.id);
+
   const uploaded = fixture([[lib1]]);
   writeFileSync(stagingPath(uploaded.id, lib1.files[0].filename), artifacts.get(lib2.files[0].url));
   stage(uploaded.id, [{ file: lib1.files[0].filename, replaces: lib1.files[0].filename, to: 'mods' }], () => {});
@@ -387,6 +405,156 @@ try {
   const manual = await cfCatalog.version('cf:100');
   await assert.rejects(cfCatalog.artifact(manual), /manual download/);
   check('author-disabled CurseForge downloads remain explicit manual work, never cross-source replacements', cfCatalog.manualDownloads.length === 1);
+
+  for (const loader of ['fabric', 'forge', 'neoforge']) {
+    const wrong = record(`repair_${loader}`, `wrong_${loader}`, '1.0.0', {}, [], loader === 'fabric' ? 'neoforge' : 'fabric');
+    const right = record(`repair_${loader}`, `right_${loader}`, '1.0.0', {}, [], loader);
+    const target = fixture([], loader);
+    const live = target.bytes(), ledger = target.ledger();
+    writeFileSync(stagingPath(target.id, wrong.files[0].filename), artifacts.get(wrong.files[0].url));
+    stage(target.id, [{ file: wrong.files[0].filename, to: 'mods' }], () => {});
+    const repaired = await repairCandidate(target.id, () => {});
+    const result = await solveCandidate(target.id);
+    check(`${loader} wrong-loader repair retains the source project and exact compatible build, without changing live bytes`, repaired && !result.error
+      && result.solver.plan.some((p) => p.projectId === right.project_id && p.versionId === right.id && p.requested)
+      && candidate(target.id).files.every((f) => f.file !== wrong.files[0].filename)
+      && candidate(target.id).repairs[0].kind === 'wrong-loader' && target.bytes() === live && target.ledger() === ledger);
+    discard(target.id);
+
+    const pinned = fixture([], loader);
+    writeFileSync(stagingPath(pinned.id, wrong.files[0].filename), artifacts.get(wrong.files[0].url));
+    stage(pinned.id, [{ file: wrong.files[0].filename, to: 'mods' }], () => {}, { requests: [{ projectId: wrong.project_id, versionId: wrong.id }] });
+    await assert.rejects(repairCandidate(pinned.id, () => {}), /exact owner pin/);
+    check(`${loader} wrong-loader repair cannot replace an exact owner pin`, !candidate(pinned.id).repairs && candidate(pinned.id).files[0].file === wrong.files[0].filename);
+    discard(pinned.id);
+  }
+
+  const compatibleRepair = fixture([[lib1]]);
+  const foreign = record('testlib', 'testlib-foreign3', '3.0.0', {}, [], 'forge');
+  writeFileSync(stagingPath(compatibleRepair.id, foreign.files[0].filename), artifacts.get(foreign.files[0].url));
+  stage(compatibleRepair.id, [{ file: foreign.files[0].filename, to: 'mods' }], () => {});
+  assert.equal(await repairCandidate(compatibleRepair.id, () => {}), true);
+  const retained = await solveCandidate(compatibleRepair.id);
+  check('wrong-loader repair reuses the installed compatible version instead of gratuitously upgrading it', !retained.error
+    && retained.solver.plan.length === 1 && retained.solver.plan[0].versionId === lib1.id);
+  discard(compatibleRepair.id);
+
+  for (const alreadyStaged of [false, true]) {
+    const chained = fixture([[lib1]]);
+    if (alreadyStaged) {
+      writeFileSync(stagingPath(chained.id, lib2.files[0].filename), artifacts.get(lib2.files[0].url));
+      stage(chained.id, [{ file: lib2.files[0].filename, to: 'mods', replaces: lib1.files[0].filename,
+        entry: { ...ledgerEntries(chained.id)[0], file: lib2.files[0].filename, versionId: lib2.id, sha1: lib2.files[0].hashes.sha1 } }], () => {});
+    }
+    writeFileSync(stagingPath(chained.id, foreign.files[0].filename), artifacts.get(foreign.files[0].url));
+    stage(chained.id, [{ file: foreign.files[0].filename, to: 'mods', replaces: alreadyStaged ? undefined : lib1.files[0].filename }], () => {});
+    assert.equal(await repairCandidate(chained.id, () => {}), true);
+    const result = await solveCandidate(chained.id);
+    check(`wrong-loader repair preserves the live replacement chain with compatible build ${alreadyStaged ? 'already staged' : 'not staged'}`, !result.error
+      && candidate(chained.id).files.length === 1 && candidate(chained.id).files[0].replaces === lib1.files[0].filename
+      && candidateSet(chained.id, candidate(chained.id)).serverJars.length === 1
+      && result.solver.plan[0].versionId === lib2.id);
+    discard(chained.id);
+  }
+
+  const aliasOnly = fixture([]);
+  const aliasWrong = record('alias_repair', 'alias-wrong', '1.0.0', {}, [], 'forge');
+  record('alias_repair', 'alias-right', '1.0.0', { id: 'different_primary', provides: ['alias_repair'] });
+  writeFileSync(stagingPath(aliasOnly.id, aliasWrong.files[0].filename), artifacts.get(aliasWrong.files[0].url));
+  stage(aliasOnly.id, [{ file: aliasWrong.files[0].filename, to: 'mods' }], () => {});
+  await assert.rejects(repairCandidate(aliasOnly.id, () => {}), /no identity-preserving compatible build/);
+  check('a same-project provides alias cannot replace the original native identity', !candidate(aliasOnly.id).repairs);
+  discard(aliasOnly.id);
+
+  const racedRepair = fixture([]);
+  const racedWrong = record('raced_repair', 'raced-wrong', '1.0.0', {}, [], 'forge');
+  record('raced_repair', 'raced-right', '1.0.0');
+  writeFileSync(stagingPath(racedRepair.id, racedWrong.files[0].filename), artifacts.get(racedWrong.files[0].url));
+  stage(racedRepair.id, [{ file: racedWrong.files[0].filename, to: 'mods' }], () => {});
+  onDomain = () => { onDomain = undefined; writeFileSync(stagingPath(racedRepair.id, racedWrong.files[0].filename), artifacts.get(lib2.files[0].url)); };
+  await assert.rejects(repairCandidate(racedRepair.id, () => {}), /candidate changed/);
+  check('concurrent candidate byte changes invalidate a pending repair without consuming an attempt', !candidate(racedRepair.id).repairs);
+  discard(racedRepair.id);
+
+  const copies = fixture([[lib1]]);
+  const copiesBefore = copies.bytes(), copiesLedger = copies.ledger();
+  const uploadCopy = (name) => {
+    writeFileSync(stagingPath(copies.id, name), artifacts.get(lib1.files[0].url));
+    stage(copies.id, [{ file: name, to: 'mods' }], () => {});
+  };
+  uploadCopy('aaa-copy.jar');
+  assert.equal(await repairCandidate(copies.id, () => {}), true);
+  const deduped = await solveCandidate(copies.id);
+  check('byte-identical deduplication retains the managed requested mod and its source pin', !deduped.error && deduped.solver.plan.length === 1
+    && deduped.solver.plan[0].projectId === lib1.project_id && deduped.solver.plan[0].versionId === lib1.id
+    && candidate(copies.id).files.find((f) => f.file === 'aaa-copy.jar').duplicateOf === lib1.files[0].filename
+    && copies.bytes() === copiesBefore && copies.ledger() === copiesLedger);
+  uploadCopy('aaa-copy.jar');
+  await assert.rejects(repairCandidate(copies.id, () => {}), /repeated plan/);
+  check('reintroducing an earlier inventory stops the automatic repair loop', candidate(copies.id).repairs.length === 1 && candidate(copies.id).files.some((f) => !f.remove && f.file === 'aaa-copy.jar'));
+  discard(copies.id);
+
+  const liveCopies = fixture([[lib1]]);
+  writeFileSync(join(liveCopies.dir, 'mods', 'live-copy.jar'), artifacts.get(lib1.files[0].url));
+  stage(liveCopies.id, [], () => {});
+  assert.equal(await repairCandidate(liveCopies.id, () => {}), true);
+  const liveDedup = await solveCandidate(liveCopies.id);
+  check('a live duplicate proposal does not exclude the surviving native identity', !liveDedup.error && liveDedup.solver.plan.length === 1
+    && liveDedup.solver.plan[0].projectId === lib1.project_id && readdirSync(join(liveCopies.dir, 'mods')).length === 2);
+  discard(liveCopies.id);
+
+  const scopes = fixture([[lib1]]);
+  writeFileSync(stagingPath(scopes.id, 'shelf-copy.jar'), artifacts.get(lib1.files[0].url));
+  stage(scopes.id, [{ file: 'shelf-copy.jar', to: 'shelf', entry: { ...ledgerEntries(scopes.id)[0], file: 'shelf-copy.jar', clientOnly: true } }], () => {});
+  check('deduplication cannot replace server functionality with an identical client-shelf jar', !await repairCandidate(scopes.id, () => {})
+    && !candidate(scopes.id).repairs && candidateSet(scopes.id, candidate(scopes.id)).serverJars.length === 1);
+  discard(scopes.id);
+
+  const repairBound = fixture([[lib1]]);
+  for (let n = 0; n < 4; n++) {
+    const file = `bounded-copy-${n}.jar`;
+    writeFileSync(stagingPath(repairBound.id, file), artifacts.get(lib1.files[0].url));
+    stage(repairBound.id, [{ file, to: 'mods' }], () => {});
+  }
+  for (let n = 0; n < 3; n++) assert.equal(await repairCandidate(repairBound.id, () => {}), true);
+  await assert.rejects(repairCandidate(repairBound.id, () => {}), /three attempts/);
+  check('three persisted repair attempts cannot become a fourth candidate mutation', candidate(repairBound.id).repairs.length === 3
+    && candidateSet(repairBound.id, candidate(repairBound.id)).serverJars.length === 2);
+  discard(repairBound.id);
+
+  const distinct = fixture([[lib1]]);
+  writeFileSync(stagingPath(distinct.id, lib2.files[0].filename), artifacts.get(lib2.files[0].url));
+  stage(distinct.id, [{ file: lib2.files[0].filename, to: 'mods' }], () => {});
+  check('different versions with the same mod ID are not silently deduplicated', !await repairCandidate(distinct.id, () => {}) && !candidate(distinct.id).repairs);
+  discard(distinct.id);
+
+  const nestedParents = fixture([]);
+  for (const id of ['parent_one', 'parent_two']) {
+    const parent = new AdmZip();
+    parent.addFile('fabric.mod.json', Buffer.from(JSON.stringify({ schemaVersion: 1, id, version: '1.0.0', jars: [{ file: 'nested.jar' }] })));
+    parent.addFile('nested.jar', artifacts.get(lib1.files[0].url));
+    writeFileSync(stagingPath(nestedParents.id, `${id}.jar`), parent.toBuffer());
+    stage(nestedParents.id, [{ file: `${id}.jar`, to: 'mods' }], () => {});
+  }
+  check('distinct parent jars sharing an identical nested mod are not duplicate removals', !await repairCandidate(nestedParents.id, () => {})
+    && !candidate(nestedParents.id).repairs && candidateSet(nestedParents.id, candidate(nestedParents.id)).serverJars.length === 2);
+  discard(nestedParents.id);
+
+  const runtime = fixture([]);
+  const jar = new AdmZip();
+  jar.addFile('fabric.mod.json', Buffer.from(JSON.stringify({ schemaVersion: 1, id: 'runtime_repair', version: '1.0.0' })));
+  jar.addFile('probe/Needs25.class', Buffer.from('cafebabe00000045', 'hex'));
+  writeFileSync(stagingPath(runtime.id, 'runtime-repair.jar'), jar.toBuffer());
+  stage(runtime.id, [{ file: 'runtime-repair.jar', to: 'mods' }], () => {}, { java: join(root, 'Tools', 'jdk-21-fixture', 'bin', process.platform === 'win32' ? 'java.exe' : 'java') });
+  const diagnostic = 'java.lang.UnsupportedClassVersionError: probe/Needs25 has been compiled by a more recent version of the Java Runtime (class file version 69.0), this version of the Java Runtime only recognizes class file versions up to 65.0';
+  await assert.rejects(repairCandidate(runtime.id, () => {}, diagnostic.replace('probe/Needs25', 'probe/NotInPack')), /one matching class/);
+  await assert.rejects(repairCandidate(runtime.id, () => {}, diagnostic.replace('version 69.0', 'version 68.0')), /one matching class/);
+  check('crash text alone or a mismatched class header cannot authorize a Java repair', !candidate(runtime.id).repairs);
+  assert.equal(await repairCandidate(runtime.id, () => {}, diagnostic), true);
+  check('class-file evidence proposes Java 25 only in the candidate, retaining every jar', candidate(runtime.id).java.includes('jdk-25-fixture')
+    && candidate(runtime.id).repairs[0].kind === 'wrong-java' && candidateSet(runtime.id, candidate(runtime.id)).serverJars.length === 1
+    && runtime.bytes() === '[]');
+  discard(runtime.id);
   console.log(`\n${checks}/${checks} installer checks passed`);
 } finally {
   globalThis.fetch = originalFetch;

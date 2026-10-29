@@ -7,7 +7,7 @@ import { PATHS } from '../config.js';
 import { serverDir, javaFor } from './servers.js';
 import { detect, loaderVersion, type Detection } from './detect.js';
 import { killTree, IS_WIN, KILLABLE_SPAWN_OPTS, linkOrCopy, withMemory } from './platform.js';
-import { loaderLaunchArgs, lockedLaunchArgs, linkLoader, excerptOf, type Verdict } from './preflight.js';
+import { loaderLaunchArgs, lockedLaunchArgs, linkLoader, excerptOf, classVersionFailure, type Verdict } from './preflight.js';
 import { packFiles, type RevisionLock } from './revisions.js';
 
 // CLIENT BOOT TEST. AutoModpack mirrors whatever the server has; it does not
@@ -340,6 +340,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
         result: 'failed', seconds,
         detail: `the client crashed with exit code ${code}${crash ? ` (${basename(crash)})` : ''}`,
         excerpt: excerptOf(out),
+        javaFailure: classVersionFailure(out),
       });
     });
   }));
@@ -523,7 +524,7 @@ async function joinTest(
         writeFileSync(join(work, 'join-client.log'), cliOut.slice(-40_000), 'utf8');
       } catch { /* diagnostics */ }
       setTimeout(() => rmSync(srv, { recursive: true, force: true }), 2000);
-      resolve({ ...v, seconds: Math.round((Date.now() - started) / 1000) });
+      resolve({ ...v, javaFailure: v.result === 'failed' ? classVersionFailure(cliOut) ?? classVersionFailure(srvOut) : undefined, seconds: Math.round((Date.now() - started) / 1000) });
     };
     // A client that never even tried to connect proves nothing either way:
     // the join is untested. Real join failures leave evidence on the server
