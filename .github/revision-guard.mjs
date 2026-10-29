@@ -79,6 +79,65 @@ try {
   await fenceClosed;
   running = undefined;
   check('a completed mutation releases its fence', run().status === 0 && existsSync(join(dir, 'started')));
+  if (process.platform === 'win32') {
+    const identityChecks = spawnSync(python, ['-c', `
+import importlib.util, json, pathlib, subprocess, sys, _winapi
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('guard', sys.argv[1])
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+root = pathlib.Path.cwd()
+record = root / '.spawnpoint-runtime.json'
+child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.buffer.read()'], stdin=subprocess.PIPE)
+process = _winapi.OpenProcess(0x101000, False, child.pid)
+identity = {'pid': child.pid, 'created': guard.windows_creation(process)}
+try:
+    record.write_text(json.dumps(identity))
+    try:
+        guard.lock_runtime(root).close()
+    except BlockingIOError:
+        print('PASS: a live recorded runtime excludes mutation without an inherited fence', flush=True)
+    else:
+        raise AssertionError('live identity was ignored')
+    record.write_text(json.dumps({**identity, 'created': identity['created'] + 1}))
+    guard.lock_runtime(root).close()
+    assert child.poll() is None and not record.exists()
+    print('PASS: PID reuse does not fence or terminate an unrelated process', flush=True)
+    for interrupted in ['{"starting":true}', '{', 'null', '{"pid":1,"created":"invalid"}',
+                        json.dumps({**identity, 'created': 2**64}), json.dumps({**identity, 'pid': 2**32})]:
+        record.write_text(interrupted)
+        try:
+            guard.lock_runtime(root).close()
+        except ValueError:
+            assert record.exists()
+        else:
+            raise AssertionError('interrupted identity was ignored')
+    print('PASS: interrupted runtime identity publication fails closed', flush=True)
+    with patch.object(pathlib.Path, 'exists', return_value=False), patch.object(pathlib.Path, 'read_bytes', side_effect=PermissionError('denied')):
+        try:
+            guard.lock_runtime(root).close()
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('inaccessible identity was treated as absent')
+    print('PASS: inaccessible runtime identity fails closed', flush=True)
+    record.write_text(json.dumps(identity))
+    child.stdin.close()
+    child.wait()
+    guard.lock_runtime(root).close()
+    assert not record.exists()
+    print('PASS: a confirmed exited runtime releases the identity fence', flush=True)
+finally:
+    if child.poll() is None:
+        child.kill()
+    child.wait()
+    _winapi.CloseHandle(process)
+    record.unlink(missing_ok=True)
+`, script], { cwd: dir, encoding: 'utf8', timeout: 10000 });
+    process.stdout.write(identityChecks.stdout);
+    if (identityChecks.stderr) process.stderr.write(identityChecks.stderr);
+    check('Windows process-identity exit barrier and interrupted publication', identityChecks.status === 0);
+  }
   // This runtime ignores stdin/EOF: a killed Windows guard must terminate
   // it through its Job, not accidentally through a closed console pipe.
   writeFileSync(runner, "import{writeFileSync}from'node:fs';writeFileSync('started',String(process.pid));setInterval(()=>{},1000);");
