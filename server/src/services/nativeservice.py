@@ -113,7 +113,11 @@ def install(root, node, system, user):
         principals = ["*" + sid + ":(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "NT SERVICE\\" + NAME + ":(OI)(CI)M"]
         run("icacls", str(root), "/grant:r", *principals)
         data = root / "Spawnpoint/data"
-        run("icacls", str(data), "/inheritance:r", "/grant:r", *principals, "/T", "/Q")
+        # Inheritance flags apply only to directories. First give existing
+        # files effective grants, then add propagation without replacing those
+        # grants when removing inheritance. The panel may already have files.
+        run("icacls", str(data), "/grant:r", *[p.replace("(OI)(CI)", "") for p in principals], "/T", "/Q")
+        run("icacls", str(data), "/inheritance:r", "/grant", *principals, "/T", "/Q")
         run("icacls", str(data), "/remove:g", "*S-1-1-0", "*S-1-5-11", "*S-1-5-32-545", "/T", "/Q")
         run("sc.exe", "failure", NAME, "reset=", "86400", "actions=", "restart/5000/restart/10000/restart/30000")
         run("sc.exe", "failureflag", NAME, "1")
@@ -130,6 +134,13 @@ def install(root, node, system, user):
         target.write_bytes(plistlib.dumps(config))
         domain = "gui/" + str(os.getuid())
         subprocess.run(["launchctl", "bootout", domain + "/" + LABEL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # bootout acknowledges SIGTERM before launchd removes the old job.
+        # Bootstrap once, only after removal; allow the 60-second exit grace.
+        deadline = time.monotonic() + 90
+        while subprocess.run(["launchctl", "print", domain + "/" + LABEL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("previous launchd supervisor did not finish stopping")
+            time.sleep(0.1)
         run("launchctl", "bootstrap", domain, str(target))
     elif sys.platform == "linux":
         if system and not user:

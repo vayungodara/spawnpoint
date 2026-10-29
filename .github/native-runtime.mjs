@@ -15,6 +15,8 @@ process.env.SPAWNPOINT_NODE = process.execPath;
 const data = join(root, 'Spawnpoint/data'), runtime = join(data, 'runtime');
 mkdirSync(data, { recursive: true });
 writeFileSync(join(data, 'settings.json'), JSON.stringify({ port: 25574 }));
+const accessFile = join(data, 'existing-access-probe.txt');
+writeFileSync(accessFile, 'before installation', { mode: 0o600 });
 const python = process.platform === 'win32' ? 'python' : 'python3';
 const service = process.argv.includes('--service');
 const script = resolve('server/dist/services/nativeservice.py');
@@ -75,7 +77,11 @@ async function stopOwner() {
   else if (process.platform === 'win32') {
     command('sc.exe', 'stop', 'SpawnpointSupervisor');
     await until(() => /STOPPED/.test(command('sc.exe', 'query', 'SpawnpointSupervisor').toString()), 'SCM stop timeout');
-  } else command('launchctl', 'bootout', 'gui/' + process.getuid() + '/com.spawnpoint.supervisor');
+  } else {
+    const target = 'gui/' + process.getuid() + '/com.spawnpoint.supervisor';
+    command('launchctl', 'bootout', target);
+    await until(() => spawnSync('launchctl', ['print', target], { stdio: 'ignore' }).status !== 0, 'launchd stop timeout', 90_000);
+  }
 }
 const stats = () => api(`/servers/${id}/stats`);
 const action = (action) => api(`/servers/${id}/action`, { action });
@@ -86,6 +92,13 @@ async function ready() {
 try {
   await startPanel();
   await startOwner();
+  if (service && process.platform === 'darwin') {
+    const previous = (await supervisor('health')).pid;
+    command(python, script, 'install', '--root', root, '--node', process.execPath);
+    check('reinstalling a loaded LaunchAgent waits for the previous owner to exit', (await supervisor('health')).pid !== previous);
+  }
+  assert.equal(readFileSync(accessFile, 'utf8'), 'before installation');
+  writeFileSync(accessFile, 'panel write');
   check('standalone wizard refuses missing setup consent', (await fetch('http://127.0.0.1:25574/api/wizard/standalone', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status === 403);
   // This is a generated, disposable test layout, never an installed credential.
   const code = readFileSync(join(data, 'setup-code.txt'), 'utf8').trim();
@@ -145,7 +158,8 @@ try {
   mkdirSync(join(dir, 'mods'), { recursive: true });
   copyFileSync('server/dist/services/launchguard.py', join(dir, '.spawnpoint-launch.py'));
   const runner = join(dir, 'fixture.mjs');
-  writeFileSync(runner, `import {createInterface} from 'node:readline';import{once}from'node:events';import{spawn}from'node:child_process';import{writeFileSync}from'node:fs';
+  writeFileSync(runner, `import {createInterface} from 'node:readline';import{once}from'node:events';import{spawn}from'node:child_process';import{readFileSync,writeFileSync}from'node:fs';
+console.log('Existing access: '+readFileSync(${JSON.stringify(accessFile)},'utf8'));writeFileSync(${JSON.stringify(accessFile)},'service write');
 console.log('Fixture console ready');
 createInterface({input:process.stdin}).on('line',async line=>{
   if(line==='stop')process.exit(0);
@@ -169,6 +183,8 @@ createInterface({input:process.stdin}).on('line',async line=>{
   rmSync(unfinished);
   await action('start');
   const first = await ready();
+  check('service installation preserves panel and runtime access to existing private files', await until(async () => readFileSync(accessFile, 'utf8') === 'service write'
+    && (await logs()).lines.includes('Existing access: panel write'), 'runtime could not read and update the pre-install private file'));
   check('guarded independent runtime exposes its actual PID and RSS', first.mem > 0 && first.pid > 0);
   await api(`/servers/${id}/command`, { cmd: 'say before-panel-exit' });
   await until(async () => (await logs()).lines.some((l) => l === 'ACK say before-panel-exit'), 'stdin did not reach runtime');
@@ -242,6 +258,7 @@ createInterface({input:process.stdin}).on('line',async line=>{
   }
   console.log(`native runtime contract: ${checks} checks passed on ${process.platform}${service ? ' with the native OS service' : ''}`);
 } catch (error) {
+  console.error('Primary failure:', error);
   console.error('Failure evidence:', await supervisor('stats', { id }).catch(String), await supervisor('logs', { id }).then((lines) => lines.slice(-5), String));
   throw error;
 } finally {
