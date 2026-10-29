@@ -36,30 +36,39 @@ def lock_runtime(root, relocating=False):
         # below also covers handle rundown before exit is signaled.
         path = root / ".spawnpoint-runtime.lock"
         flags = 0x200080 if relocating else 0x80  # OPEN_REPARSE_POINT for transfers
-        handle = _winapi.CreateFile(str(path), 0xC0000000, 0, 0, 4, flags, 0)
-        stream = os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDWR), "a+b")
+        handle = _winapi.CreateFile(str(path), 0x80 if relocating else 0xC0000000, 7 if relocating else 0, 0, 4, flags, 0)
+        stream = os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDONLY if relocating else os.O_RDWR), "rb" if relocating else "a+b")
         try:
             if relocating:
+                import ctypes as c
+                from ctypes import wintypes as w
                 initial = os.fstat(stream.fileno())
-                if not stat.S_ISREG(initial.st_mode) or initial.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                if (not stat.S_ISREG(initial.st_mode) or initial.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                        or not 0 < initial.st_ino < 2**128):
                     raise ValueError("the runtime fence is not a regular file")
-                stream.close()
-                # Windows forbids renaming an ancestor of an open file, even
-                # with share-delete. Open the same inode through an external
-                # link; sharing restrictions still exclude unchanged guards.
-                # Keep this bounded, stable alias after release or a crash.
                 alias = root.parent / ("." + root.name + ".spawnpoint-runtime.lock")
-                try:
-                    os.link(path, alias)
-                except FileExistsError:
-                    pass
-                handle = _winapi.CreateFile(str(alias), 0xC0000000, 0, 0, 3, flags, 0)
+                if initial.st_nlink != 1 or os.path.lexists(alias):
+                    raise ValueError("legacy runtime fence aliases need owner recovery")
+                # A pathname-open descendant prevents ancestor rename. Open
+                # by file ID instead, retaining exclusive sharing on the same
+                # file without introducing a removable second hard-link name.
+                class FileId(c.Structure):
+                    _fields_ = [("size", w.DWORD), ("kind", w.DWORD), ("value", c.c_ulonglong * 2)]
+                descriptor = FileId(c.sizeof(FileId), 2 if initial.st_ino >= 2**64 else 0,
+                                    (initial.st_ino % 2**64, initial.st_ino // 2**64))
+                kernel = c.WinDLL("kernel32", use_last_error=True)
+                kernel.OpenFileById.argtypes = [w.HANDLE, c.POINTER(FileId), w.DWORD, w.DWORD, c.c_void_p, w.DWORD]
+                kernel.OpenFileById.restype = w.HANDLE
+                handle = kernel.OpenFileById(msvcrt.get_osfhandle(stream.fileno()), c.byref(descriptor), 0xC0000000, 0, None, flags)
+                if handle == c.c_void_p(-1).value:
+                    raise c.WinError(c.get_last_error())
+                stream.close()
                 stream = os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDWR), "a+b")
                 held, canonical = os.fstat(stream.fileno()), path.lstat()
                 if (any(not stat.S_ISREG(info.st_mode) or not info.st_ino
-                        or info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT for info in (held, canonical))
+                        or info.st_nlink != 1 or info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT for info in (held, canonical))
                         or not os.path.samestat(held, canonical)):
-                    raise ValueError("the runtime fence alias needs owner recovery")
+                    raise ValueError("the runtime fence identity needs owner recovery")
             os.set_inheritable(stream.fileno(), True)
             # Windows closes inherited handles before signaling process exit.
             # Bridge that rundown interval with the exact persisted identity;

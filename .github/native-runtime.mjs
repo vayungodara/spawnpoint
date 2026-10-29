@@ -164,9 +164,6 @@ try {
   check('prepared and recovering imports never adopt an unrelated destination', !existsSync(join(runtime, 'servers', transferId + '.json'))
     && readFileSync(join(sourcePath, 'world/sentinel'), 'utf8') === 'original world' && readFileSync(join(destination, 'unrelated'), 'utf8') === 'another directory');
   rmSync(destination, { recursive: true });
-  // The completed conflict probe fenced that unrelated disposable inode.
-  // Dispose of its alias too before reusing the path for a different inode.
-  if (process.platform === 'win32') rmSync(join(root, 'Servers', '.' + transferId + '.spawnpoint-runtime.lock'), { force: true });
   const outside = join(root, 'outside-world'); mkdirSync(outside); writeFileSync(join(outside, 'sentinel'), 'external world');
   for (const phase of ['prepared', 'committing']) {
     transfer.phase = phase; writeFileSync(join(runtime, 'transfers', transferId + '.json'), JSON.stringify(transfer));

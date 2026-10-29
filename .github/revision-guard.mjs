@@ -115,7 +115,13 @@ try {
   if (process.platform === 'win32') {
     const canonical = join(moved, '.spawnpoint-runtime.lock'), replacement = join(dir, 'replacement.lock');
     writeFileSync(replacement, 'unrelated fence');
-    assert.throws(() => rmSync(canonical));
+    try { assert.throws(() => rmSync(canonical)); }
+    catch (error) {
+      const visible = existsSync(canonical), contender = movedFence();
+      console.error('Canonical removal evidence:', { visible, holderPid: running.pid, holderExitCode: running.exitCode,
+        contenderStatus: contender.status, contenderAck: contender.stdout, contenderError: contender.stderr?.slice(0, 1000) });
+      throw error;
+    }
     assert.throws(() => renameSync(replacement, canonical));
     const identity = statSync(canonical, { bigint: true });
     check('a held transfer refuses canonical removal or replacement and preserves file identity', identity.ino === fenceIdentity.ino && identity.dev === fenceIdentity.dev);
@@ -128,17 +134,19 @@ try {
     running = spawn(python, [script, '--fence'], { cwd: moved, stdio: ['pipe', 'pipe', 'inherit'] });
     const canonicalClosed = once(running, 'close');
     await Promise.race([once(running.stdout, 'data'), canonicalClosed.then(([code]) => { throw new Error(`canonical fence exited before readiness: ${code}`); })]);
-    check('an unchanged canonical guard excludes acquisition through an external alias', run(['--fence', moved]).status !== 0);
+    check('an unchanged canonical guard excludes acquisition by file ID', run(['--fence', moved]).status !== 0);
     running.stdin.end();
     await canonicalClosed;
     running = spawn(python, [script, '--fence', moved], { cwd: dir, stdio: ['pipe', 'pipe', 'inherit'] });
-    const aliasClosed = once(running, 'close');
-    await Promise.race([once(running.stdout, 'data'), aliasClosed.then(([code]) => { throw new Error(`alias fence exited before readiness: ${code}`); })]);
-    check('a destination alias retains exclusive fencing', movedFence().status !== 0);
+    const relocatedClosed = once(running, 'close');
+    await Promise.race([once(running.stdout, 'data'), relocatedClosed.then(([code]) => { throw new Error(`relocated fence exited before readiness: ${code}`); })]);
+    check('a destination file-ID holder retains exclusive fencing', movedFence().status !== 0);
     running.kill('SIGKILL');
-    await aliasClosed;
+    await relocatedClosed;
     running = undefined;
-    check('a killed alias holder releases its fence for a later stopped acquisition', run(['--fence', moved]).status === 0 && movedFence().status === 0);
+    check('a killed file-ID holder releases its fence for a later stopped acquisition', run(['--fence', moved]).status === 0 && movedFence().status === 0);
+    linkSync(join(moved, '.spawnpoint-runtime.lock'), join(sourceParent, '.server.spawnpoint-runtime.lock'));
+    check('a multiply linked legacy fence requires owner recovery', run(['--fence', moved]).status !== 0);
     mkdirSync(movable);
     const reused = join(movable, '.spawnpoint-runtime.lock');
     writeFileSync(reused, 'new source identity');
