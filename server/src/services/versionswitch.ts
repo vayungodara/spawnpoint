@@ -8,6 +8,7 @@ import { detect } from './detect.js';
 import { assertModsWritable, exclusive, liveChanged } from './packtxn.js';
 import { stopAndWait, isRunningSafe, createBackup, beginMaintenance, endMaintenance, waitForReady } from './maintenance.js';
 import * as modrinth from '../clients/modrinth.js';
+import { assertUnsealed } from './revisions.js';
 
 // Change a server's Minecraft version in place — the thing you would otherwise
 // do by building a whole new server. Three phases, and the middle one is the
@@ -203,6 +204,7 @@ export async function apply(
     // holds the live-folder lock, so no mod apply or undo runs during the switch
     return await exclusive(id, async () => {
       assertModsWritable(id);
+      assertUnsealed(id);
       // mods/ may have changed even if this fails part-way: anything tested against the old ones is stale
       try { return await doApply(id, targetMc, opts); } finally { liveChanged(id); }
     });
@@ -325,6 +327,7 @@ async function doApply(id: string, targetMc: string, opts: { acceptDowngrade?: b
 export function rollback(id: string): Promise<boolean> {
   return exclusive(id, async () => {
     assertModsWritable(id);
+    assertUnsealed(id);
     try { return await restoreSnapshot(id); } finally { liveChanged(id); }
   });
 }

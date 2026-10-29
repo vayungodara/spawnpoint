@@ -8,4 +8,6 @@ autostart/
 .env
 .env.*
 *.tsbuildinfo
+.amp/portals/
+.amp/in/
 CLAUDE.md

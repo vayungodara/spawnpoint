@@ -18,6 +18,8 @@ import { candidate, approve, discard, retest, liveChanged, lastChange, undoLast,
 import { promotion, lastSeen, choose, cancelUndo } from '../services/promote.js';
 import { craftyApi } from '../clients/crafty.js';
 import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { assertUnsealed, lockedPath, packPath, readLock, revisionReport, revisionState } from '../services/revisions.js';
 
 /** A change waiting for a restart, with the players it waits on. */
 function promotionView(id: string) {
@@ -126,6 +128,9 @@ export default async function contentRoutes(app: FastifyInstance) {
     if (type === 'modpack') {
       return { error: 'a modpack becomes its own server: create a new server from it instead' };
     }
+    if (type === 'shader' || type === 'resourcepack') {
+      try { assertUnsealed(id); } catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+    }
     // a refusal (a change is going in, an undo waits) is the owner's to read, not a crash
     try { assertCanStage(id); } catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
     const r = req.body.source === 'curseforge'
@@ -133,14 +138,43 @@ export default async function contentRoutes(app: FastifyInstance) {
       : await install(id, { projectId, versionId, type }, log);
     // resource and shader packs belong in the synced pack on AutoModpack servers
     if (type === 'shader' || type === 'resourcepack') {
-      for (const i of r.installed) void stageClientAsset(id, type, join(PATHS.downloads, i.file), log);
+      for (const i of r.installed) await stageClientAsset(id, type, join(PATHS.downloads, i.file), log);
     }
     return r;
   });
 
   // the mod change waiting for (or done with) its boot test
   app.get<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req) => ({ candidate: candidate(req.params.id), promotion: promotionView(req.params.id) }));
-  app.post<{ Params: { id: string } }>('/api/servers/:id/candidate/apply', async (req) => ({ candidate: await approve(req.params.id, log) }));
+  app.post<{ Params: { id: string }; Body: { consent?: boolean; revision?: string } }>('/api/servers/:id/candidate/apply', async (req, reply) => {
+    try { return { candidate: await approve(req.params.id, log, req.body?.consent === true, req.body?.revision) }; }
+    catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+  });
+  app.get<{ Params: { id: string }; Querystring: { path: string; revision: string } }>('/api/servers/:id/candidate/config', async (req, reply) => {
+    const { id } = req.params;
+    const c = candidate(id);
+    const path = packPath(req.query.path, 'server');
+    if (!c?.revision || !c.baseline || c.revision !== req.query.revision || !c.files.some((f) => f.path === path)) return reply.code(409).send({ error: 'the proposed config changed; reload its revision' });
+    const text = (revision: string): string | null => {
+      const f = readLock(id, revision).files.find((f) => f.location === 'server' && f.path === path);
+      if (f && f.size > 512 * 1024) throw new Error('config too large to preview; inspect the locked files on disk');
+      return f ? readFileSync(lockedPath(id, revision, f), 'utf8') : null;
+    };
+    return { path, revision: c.revision, before: text(c.baseline), after: text(c.revision) };
+  });
+  app.get<{ Params: { id: string } }>('/api/servers/:id/revisions', async (req) => {
+    const id = req.params.id;
+    serverDir(id); // validate before deriving a data path
+    const dir = join(PATHS.data, 'locked-revisions', id);
+    return { ...revisionState(id), revisions: (existsSync(dir) ? readdirSync(dir) : [])
+      .filter((revision) => existsSync(join(dir, revision, 'lock.json'))).sort().reverse()
+      .map((revision) => {
+        const lock = readLock(id, revision);
+        return { id: revision, minecraft: lock.minecraft, loader: lock.loader, loaderVersion: lock.loaderVersion, files: lock.files.length, requested: lock.requested.length, dependencies: lock.dependencies.length, ...revisionReport(id, revision) };
+      }) };
+  });
+  app.get<{ Params: { id: string; revision: string } }>('/api/servers/:id/revisions/:revision', async (req) => ({
+    lock: readLock(req.params.id, req.params.revision), report: revisionReport(req.params.id, req.params.revision),
+  }));
   app.get<{ Params: { id: string } }>('/api/servers/:id/last-change', async (req) => ({ change: lastChange(req.params.id) }));
   app.post<{ Params: { id: string } }>('/api/servers/:id/last-change/undo', async (req, reply) => {
     try {
@@ -278,9 +312,11 @@ export default async function contentRoutes(app: FastifyInstance) {
     '/api/servers/:id/installed/toggle',
     async (req, reply) => {
       try {
-        const r = toggleInstalled(req.params.id, req.body.file);
-        liveChanged(req.params.id, log);
-        void publishPack(req.params.id, log);
+        const r = toggleInstalled(req.params.id, req.body.file, log);
+        if (!r.candidate) {
+          liveChanged(req.params.id, log);
+          void publishPack(req.params.id, log);
+        }
         return r;
       } catch (e) {
         return reply.code(409).send({ error: String((e as Error).message ?? e) });
@@ -292,9 +328,11 @@ export default async function contentRoutes(app: FastifyInstance) {
     '/api/servers/:id/installed',
     async (req, reply) => {
       try {
-        const r = { ok: true, ...deleteInstalled(req.params.id, req.query.file) };
-        liveChanged(req.params.id, log);
-        void publishPack(req.params.id, log);
+        const r = { ok: true, ...deleteInstalled(req.params.id, req.query.file, log) };
+        if (!r.candidate) {
+          liveChanged(req.params.id, log);
+          void publishPack(req.params.id, log);
+        }
         return r;
       } catch (e) {
         return reply.code(409).send({ error: String((e as Error).message ?? e) });

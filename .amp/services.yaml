@@ -1,0 +1,25 @@
+services:
+  docker:
+    command: sudo dockerd --storage-driver=vfs --iptables=false --bridge=none
+    platforms: [linux]
+  crafty:
+    command: |
+      until sudo docker info >/dev/null 2>&1; do sleep 1; done
+      image=registry.gitlab.com/crafty-controller/crafty-4@sha256:7b6e87514259549647e15ceeaf73d238792e6d77e2c79fc744d5badc8d6e997c
+      if ! sudo docker container inspect crafty >/dev/null 2>&1; then
+        sudo docker run -d --name crafty --network host -e TZ=Etc/UTC \
+          -v /srv/sp/Crafty/servers:/crafty/servers -v /srv/sp/Crafty/config:/crafty/app/config \
+          -v /srv/sp/Crafty/backups:/crafty/backups -v /srv/sp/Crafty/logs:/crafty/logs \
+          -v /srv/sp/Crafty/import:/crafty/import -v /srv/sp/Tools:/srv/sp/Tools "$image"
+      fi
+      sudo docker start crafty >/dev/null
+      exec sudo docker wait crafty
+    port: 8443
+    platforms: [linux]
+  sp:
+    command: SPAWNPOINT_ROOT=/srv/sp node server/dist/index.js
+    port: 25570
+    health: /api/health
+    portal:
+      title: Spawnpoint
+      description: Disposable Crafty and Fabric integration environment

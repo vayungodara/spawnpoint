@@ -10,17 +10,17 @@ Spawnpoint is a web panel you run on the machine that hosts your Minecraft
 servers. It works alongside [Crafty Controller](https://craftycontrol.com/),
 which starts and supervises the server processes. Spawnpoint adds mod and
 plugin installs from Modrinth and CurseForge, new servers from modpacks, a
-config editor, world slots, backups and a file manager. Mod installs and
-updates on Fabric, Forge and NeoForge servers come with three promises:
+config editor, world slots, backups and a file manager. Tested mod revisions
+currently support Fabric, with three promises:
 
 - **Friends get exactly the tested version.** A change stays out of the
   server and out of the friend pack until it passes, or until you approve
   one that could not be fully tested. Only then does
   [AutoModpack](https://modrinth.com/mod/automodpack) sync those exact files
   to players.
-- **You see what was tested, skipped or uncertain.** Each change shows a
-  verdict per test (passed, failed or not tested) with the reason and the
-  loader's own error lines.
+- **You see what was tested, skipped or uncertain.** Each revision shows
+  passed, failed, skipped or inconclusive results, the renderer used, and
+  the loader's own error lines.
 - **You can roll back.** The files a change replaced are kept, and
   *Undo last change* puts them back (the last five changes per server).
 
@@ -34,14 +34,14 @@ tested:
 
 1. **Dependency check.** Each jar's declared dependencies are read. Missing
    ones are installed from Modrinth and join the candidate.
-2. **Server boot test.** A sandbox boots the server's own loader with the
-   candidate's mods (Fabric, Forge and NeoForge). If the loader names a
+2. **Server boot test.** A sandbox boots the server's own Fabric loader with
+   the candidate's mods. If the loader names a
    missing mod, it is installed and the test runs again.
 3. **Client test** (servers with AutoModpack). A real Minecraft client boots
    with the files your friends would receive, then joins a throwaway server
    with the same mods and a fresh world. This uses
-   [HeadlessMC](https://github.com/headlesshq/headlessmc) and supports Fabric
-   and Forge on Minecraft 1.20 and newer. On Fabric, the join also runs
+   [HeadlessMC](https://github.com/headlesshq/headlessmc) on Minecraft 1.20
+   and newer. The Fabric join also runs
    AutoModpack's own handshake and checks that the client ends up with
    exactly the tested files.
 
@@ -50,11 +50,27 @@ the same test passes on the current pack without it and the failure
 repeats; otherwise Spawnpoint does not blame the change. A change that
 could not be fully tested (the pack already fails, the test is unreliable,
 no JDK yet, not enough free memory, an unsupported loader) waits for you:
-apply anyway, test again, or discard.
+approve the test gaps, test again, or discard. Unsupported launch recipes
+and failed hash checks cannot be waived. Forge and NeoForge are not yet
+supported by locked revisions.
 
-A candidate that passes goes live. Server mods only change while the
-server is stopped, so if the server is running the change waits for a
-restart:
+Before the first revision, you must approve a required Crafty launch guard
+and managed AutoModpack publication. The guard checks the locked files and
+Java before every start, including starts from Crafty itself. It also keeps
+a start from racing a pack swap. This requires Python 3 on the Crafty host.
+The current Fabric recipe supports an explicit Tools Java path, heap flags,
+and `-jar fabric.jar nogui`; custom launch recipes are refused.
+
+Each revision locks Minecraft, the loader and its version, Java, and every
+pack-owned file's path, side, SHA-512, size and source IDs. Requested mods
+are recorded separately from dependencies. Tests use copies of those exact
+inputs. Configs generated during testing become proposals and are retested.
+Replacements, removals and config edits always need your explicit approval.
+Spawnpoint never treats dropping a requested mod as success and never
+changes Minecraft or the loader automatically on an existing world.
+
+A passed, approved candidate waits for a verified restart. Server mods only
+change while the server is stopped:
 
 - Nobody online: Spawnpoint restarts the server on its own. It only does
   this when RCON confirms the server is empty.
@@ -63,17 +79,23 @@ restart:
 - Server stopped: the change goes in when you start the server from the
   panel (Start, Restart or a scheduled start).
 
-If the server then fails to start, or AutoModpack's pack for friends is
-not exactly the tested files (or was not rebuilt), the change is undone,
-the server starts without it, and the change is marked failed with the
-reason. *Undo
-last change* follows the same restart rules. If the panel itself restarts
+Spawnpoint backs up the world while the server is stopped, journals the pack
+swap, starts the server, and waits for that boot to become ready. AutoModpack
+hosting stays off until its fresh manifest and the published bytes match the
+promoted revision. Friends receive only that revision's client files.
+
+If the server fails to start or publication fails, the pack is rolled back
+and the server starts without the change. The failed revision retains its
+test results and reason. Pack rollback restores locked configs and pack
+files, **not the world**. World restore is a separate operation that needs
+your approval. *Undo last change* follows the same restart rules.
+If the panel itself restarts
 in the middle, it picks up where it stopped. If a change cannot be rolled
 back cleanly, the server stays stopped and locked until you check it and
 clear the lock on the dashboard.
 
-Removing or disabling a mod is not boot-tested; it is refused while another
-installed mod depends on it.
+Removing or disabling a Fabric mod is staged, tested and approved like an
+install. It is also refused while another installed mod depends on it.
 
 Tests wait until the machine has enough free memory for them, so they do
 not starve the live server: about 1 GB for the server test, 1 to 4.5 GB for

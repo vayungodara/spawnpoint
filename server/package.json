@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('node:fs').copyFileSync('src/services/launchguard.py', 'dist/services/launchguard.py')\"",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },

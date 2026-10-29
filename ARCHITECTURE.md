@@ -50,13 +50,13 @@ candidate is tested:
 1. **Dependency scan** (`jardeps.ts`): reads each jar's declared mandatory
    dependencies (`fabric.mod.json`, `mods.toml`, nested jars). Missing ids
    are installed from Modrinth into the candidate.
-2. **Server boot test** (`preflight.ts`): a sandbox gets the server's loader
-   and libraries, hard links (or copies) of the candidate's jars, and
+2. **Server boot test** (`preflight.ts`): a sandbox gets the locked Fabric
+   loader, libraries, configs, copies of the candidate's jars, and
    `eula=false`. The loader resolves dependencies, applies mixins and runs
    mod initialisers, then stops at the EULA check. Missing ids named by the
    loader are installed and the test repeats; a client-only mod that crashes
    the server is moved to the client shelf.
-3. **Client test** (`launchgate.ts`, AutoModpack servers, Fabric and Forge):
+3. **Client test** (`launchgate.ts`, Fabric AutoModpack revisions):
    HeadlessMC boots the matching Minecraft version and loader version with
    the files a player would receive, then quick-plays into a throwaway copy
    of the server on port 25999. A crash, a failed join or a kick fails the
@@ -67,12 +67,10 @@ candidate is tested:
 
 Each test returns `passed`, `failed` or `unverified`:
 
-- All passed: the candidate is applied. Replaced files move to
-  `data/revisions/<id>/<txn>/` (five kept), staged files move into `mods/`
-  or the client shelf, the install ledger is updated, and only then is the
-  AutoModpack pack regenerated. A candidate that touches `mods/` while the
-  server runs becomes `ready` instead and waits for a restart (see
-  Promotion).
+- All passed: replacements, removals and config edits still require explicit
+  owner consent for that exact revision. A candidate then becomes `ready`
+  and waits for a verified restart (see Promotion). Journaled swaps retain
+  replaced pack files in `data/revisions/<id>/<txn>/` (five kept).
 - Failed: before blaming the change, the same test runs on the live set
   without it. If the live set passes, the candidate is deleted and recorded
   in the rejection history. If the live set fails too, the change was not
@@ -81,8 +79,8 @@ Each test returns `passed`, `failed` or `unverified`:
   start, the join could not run): the candidate waits for the owner to
   apply or discard it.
 
-Removing or disabling a jar is not boot-tested; instead it is refused when
-another installed mod declares it as a dependency.
+Fabric removals and disables use the same tested candidate and consent flow.
+They are also refused when another installed mod declares the jar as a dependency.
 
 Client tests wait while anyone is online on any server, and run one at a
 time under `nice`. Every test JVM first waits (up to 10 minutes, then
@@ -93,13 +91,47 @@ join, by mod count (up to 50, up to 150, more). On a 4 GB machine a client
 test next to the live server and a server copy otherwise gets the panel
 OOM-killed.
 
+## Revision locks (`revisions.ts`)
+
+`data/locked-revisions/<id>/<revision>/` holds immutable copied inputs,
+`lock.json`, and a mutable `report.json`. The lock records Minecraft, loader
+and loader version, the exact launch command, Java's executable and native
+runtime inputs, and each pack file's path, side, SHA-512, size and source IDs.
+Requested mods and dependency projects have separate lists. SHA-1 is retained
+only for AutoModpack's manifest protocol. `state.json` distinguishes the
+active pack from the published pack.
+
+Only pack-owned roots can enter a lock or move journal. Worlds, credentials,
+and Java trust stores are excluded. Generated test configs are staged as
+proposals, resealed and retested, at most three times. The owner reviews the
+before/after bytes before approving config writes. Report entries retain
+passed, failed, skipped or inconclusive results and their renderer. An
+observed rollback baseline is explicitly not a client-certified revision.
+
+The owner must first approve the mandatory Crafty launch guard and managed
+publication. Locked revisions currently accept Fabric's explicit Tools Java
+command with heap flags and `-jar fabric.jar nogui`. Unsupported loaders and
+custom recipes are refused before adoption, not treated as verified.
+Direct config, pack, import or runtime edits cannot bypass an active lock.
+World restore remains a separate owner-approved operation.
+
+`launchguard.py` is copied into the server and packaged with the panel. It
+checks the locked command, runtime, complete file inventory and hashes before
+launching Java, even when Crafty starts it outside Spawnpoint. The guard and
+stopped swaps share an OS fence for the entire JVM lifetime. Unix inherits
+the locked descriptor through `exec`; Windows inherits an exclusive-share
+file handle and uses a kill-on-close Job Object. A persisted mutation marker
+blocks starts until interrupted journals are recovered. Python 3 must exist
+on the Crafty host.
+
 ## Promotion (`promote.ts`)
 
 Server mods only change while the server is stopped. A `ready` candidate, or
 an undo while the server runs, gets a promotion record in
 `data/promotions/<id>.json`, polled every 15 seconds only while one exists.
-A `ready` candidate keeps the SHA-1 of every tested client file, and any
-live mod change (delete, toggle, file manager) sends it back to testing.
+A `ready` candidate names its immutable revision and keeps the SHA-1 of every
+tested client file for AutoModpack's protocol. Further candidate changes
+invalidate its approval and test results.
 
 - Running, RCON `list` says empty twice in a row: restart now. Without an
   RCON answer the count is unknown and the panel never restarts on its own.
@@ -109,6 +141,11 @@ live mod change (delete, toggle, file manager) sends it back to testing.
   Restart, scheduled start or restart, config restart). These all go
   through `startServer` / `restartServer`; a server started outside the
   panel runs the old mods and gets the change on its next restart.
+
+With the server confirmed stopped and the OS fence held, promotion backs up
+the world before applying or undoing the pack. It checks source hashes and
+journals every pack move and the ledger. Rollback restores locked pack files
+and configs but never restores the world backup.
 
 The record carries a stage, so a panel restart resumes it: `countdown`
 (released, the stop never happened), `stopping` (stop, then apply or undo
@@ -150,6 +187,14 @@ clients. Client-only mods live on a shelf (`data/clientmods/<id>/`);
 `publishPack` mirrors the shelf into AutoModpack's extras folder and asks
 the server to regenerate the pack. The starter pack a friend imports carries
 the server's own AutoModpack build and loader version.
+
+On a locked revision, hosting stays off in the on-disk startup configuration.
+After fresh boot proof, `packCheck` compares the manifest with the promoted
+client inventory and SHA-512-checks the actual served bytes, including shelf
+mirrors. Only then does `releaseHosting` reload the enabled configuration and
+start the host through one non-reconnecting RCON session, waiting for log
+acknowledgements. A shared publication mutex prevents a concurrent direct
+start from exposing an unverified pack. Failure rolls the pack back.
 
 ## Chat genie (optional)
 

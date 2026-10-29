@@ -9,6 +9,7 @@ import { clientShelfDir } from './servers.js';
 import { updateLedger } from './ledger.js';
 import { settled, assertModsWritable } from './packtxn.js';
 import { isUnderMaintenance } from './maintenance.js';
+import { assertUnsealed } from './revisions.js';
 
 // DEPENDENCY DOCTOR — a failed boot from missing mod dependencies should be
 // fixed in the background, not shown to the owner (his words: "fixed
@@ -75,7 +76,7 @@ function parseConflictMods(log: string): string[] {
 
 async function treat(id: string, log: (m: string) => void): Promise<boolean> {
   // an unfinished apply or undo is reversed on the next start; leave mods/ alone until then
-  try { assertModsWritable(id); } catch { return false; }
+  try { assertModsWritable(id); assertUnsealed(id); } catch { return false; }
   const dir = serverDir(id);
   const logFile = join(dir, 'logs', 'latest.log');
   if (!existsSync(logFile)) return false;
@@ -104,6 +105,7 @@ async function treat(id: string, log: (m: string) => void): Promise<boolean> {
   /** move a jar to the client shelf (AutoModpack still ships it to clients) */
   const shelfJar = (jar: string): void => {
     assertModsWritable(id); // re-checked here: the lookups before this awaited
+    assertUnsealed(id);
     mkdirSync(clientShelfDir(id), { recursive: true });
     renameSync(join(dir, 'mods', jar), join(clientShelfDir(id), jar));
     updateLedger(id, (entries) => entries.map((e) => (e.file === jar ? { ...e, clientOnly: true } : e)));

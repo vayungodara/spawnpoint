@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { renameSync, statSync, symlinkSync, linkSync, copyFileSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { renameSync, statSync, copyFileSync, constants, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { freemem } from 'node:os';
 import { cp, rm } from 'node:fs/promises';
@@ -64,9 +64,14 @@ export async function portListening(port: number): Promise<boolean> {
   if (IS_WIN) {
     const { stdout } = await run('powershell', [
       '-NoProfile', '-Command',
-      `(Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count`,
+      `$ErrorActionPreference='Stop'; ([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object Port -eq ${port} | Measure-Object).Count`,
     ]);
-    return stdout.trim() !== '0';
+    if (!/^\d+$/.test(stdout.trim())) throw new Error('could not inspect TCP listeners');
+    return Number(stdout.trim()) > 0;
+  }
+  if (process.platform === 'darwin') {
+    const { stdout } = await run('netstat', ['-an', '-p', 'tcp']);
+    return stdout.split('\n').some((line) => /\sLISTEN\s*$/.test(line) && new RegExp(`^[^\\n]*\\s\\S+\\.${port}\\s`).test(line));
   }
   // iproute2 ships on every Ubuntu/Debian install; -H drops the header so
   // any output at all means a listener exists
@@ -193,21 +198,10 @@ export async function chownToDirOwner(destDir: string): Promise<void> {
   } catch { /* never fail the caller over ownership */ }
 }
 
-/** Borrow src into a sandbox at dst without copying. POSIX symlinks; Windows
-    can't symlink without admin/developer-mode, so directories get junctions
-    (always allowed) and files get hardlinks, falling back to a real copy when
-    the sandbox sits on a different volume. */
-export function sandboxLink(src: string, dst: string): void {
-  if (!IS_WIN) { symlinkSync(src, dst); return; }
-  if (statSync(src).isDirectory()) { symlinkSync(src, dst, 'junction'); return; }
-  try { linkSync(src, dst); } catch { copyFileSync(src, dst); }
-}
-
-/** A real file at dst with src's bytes: a hardlink when both sit on one
-    filesystem, a copy otherwise. Mod jars must never be symlinks: some mods
-    (AutoModpack among them) refuse to load from one. */
+/** A private copy, using a reflink where supported. Test JVMs and updaters
+    must never be able to write through a hardlink into live or sealed inputs. */
 export function linkOrCopy(src: string, dst: string): void {
-  try { linkSync(src, dst); } catch { copyFileSync(src, dst); }
+  copyFileSync(src, dst, constants.COPYFILE_FICLONE);
 }
 
 /** rename(), falling back to copy-and-delete across filesystems. */

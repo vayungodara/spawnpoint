@@ -31,6 +31,16 @@ export async function rconCommand(uuid: string, cmd: string, opts?: { timeout?: 
 /** Send many commands over ONE connection — vanilla logs two console lines
     per RCON connection, so batching keeps the server log readable. */
 export async function rconBatch(uuid: string, cmds: string[], opts?: { timeout?: number }): Promise<string[]> {
+  return withRcon(uuid, async (send) => {
+    const out: string[] = [];
+    for (const cmd of cmds) out.push(await send(cmd));
+    return out;
+  }, opts);
+}
+
+/** One boot-bound connection. A restart closes it; it must never reconnect
+    halfway through authorizing publication on another JVM. */
+export async function withRcon<T>(uuid: string, fn: (send: (cmd: string) => Promise<string>) => Promise<T>, opts?: { timeout?: number }): Promise<T> {
   const s = rconSettings(uuid);
   if (!s.enabled || !s.password) {
     throw new Error('RCON is not enabled for this server');
@@ -42,9 +52,7 @@ export async function rconBatch(uuid: string, cmds: string[], opts?: { timeout?:
     timeout: opts?.timeout ?? DEFAULT_TIMEOUT,
   });
   try {
-    const out: string[] = [];
-    for (const cmd of cmds) out.push(await rcon.send(cmd));
-    return out;
+    return await fn((cmd) => rcon.send(cmd));
   } finally {
     await rcon.end();
   }

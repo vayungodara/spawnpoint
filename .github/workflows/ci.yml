@@ -35,6 +35,9 @@ jobs:
       # Crafty admin login mints + persists the token (stub Crafty), wizard
       # turns itself off, PIN step returns a cookie that validates
       - run: node .github/wizard-e2e.mjs
+      # The same shipped gate must hash exact UTF-8 bytes and fence starts
+      # against a running JVM or stopped revision mutation on all three OSes.
+      - run: node .github/revision-guard.mjs
 
   # the repo is public — every push gets a full-history secret scan
   gitleaks:

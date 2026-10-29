@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, statSync, copyFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { chownToDirOwner, writeFileAtomic } from './platform.js';
 import { PATHS } from '../config.js';
@@ -12,6 +12,7 @@ import { queueChange, listPending, applyPending, type PendingAction } from './pe
 import { ledgerEntries, updateLedger, type LedgerEntry } from './ledger.js';
 import { stage, stagedFiles, stagingPath, invalidate, assertModsWritable, assertCanStage, type Candidate, type StagedFile } from './packtxn.js';
 import { scanJars } from './jardeps.js';
+import { assertUnsealed, revisionState } from './revisions.js';
 
 // The install engine: picks the right build for the server's MC version and
 // loader (releases first), resolves required dependencies (keeping any copy
@@ -43,6 +44,8 @@ export interface InstallOpts {
   force?: boolean;
   /** write straight into the live folders: only for a server being created */
   direct?: boolean;
+  /** Internal dependency repair, not a new owner-requested root. */
+  dependency?: boolean;
 }
 
 /** One file the plan wants installed. */
@@ -107,17 +110,20 @@ async function fetchFile(url: string, sha1?: string): Promise<Buffer> {
     straight into the live folders. */
 async function commit(serverUuid: string, det: Detection, type: ContentType, plan: Planned[], direct: boolean, result: InstallResult, log: (m: string) => void): Promise<InstallResult> {
   const viaCandidate = type === 'mod' && MOD_LOADERS.has(det.loader) && !direct;
+  if (direct && type === 'mod') assertUnsealed(serverUuid);
   const staged: { file: StagedFile; buf: Buffer }[] = [];
   const written: LedgerEntry[] = [];
+  // Download the entire plan before its first write. A missing requested jar
+  // or library is a failed request, never a smaller successful pack.
+  const downloaded = new Map<Planned, Buffer>();
+  try {
+    for (const p of plan) downloaded.set(p, await fetchFile(p.url, p.sha1));
+  } catch (e) {
+    return { ...result, error: `Nothing was installed: ${(e as Error).message}` };
+  }
   for (const p of plan) {
     const clientOnly = !!p.entry.clientOnly;
-    let buf: Buffer;
-    try {
-      buf = await fetchFile(p.url, p.sha1);
-    } catch (e) {
-      result.skipped.push({ projectId: p.entry.title, reason: String((e as Error).message ?? e) });
-      continue;
-    }
+    const buf = downloaded.get(p)!;
     result.installed.push({ file: p.entry.file, title: p.entry.title, version: p.entry.versionNumber, ...(clientOnly ? { clientOnly: true } : {}) });
     if (viaCandidate) {
       staged.push({ file: { file: p.entry.file, to: clientOnly ? 'shelf' : 'mods', replaces: p.replaces, entry: p.entry }, buf });
@@ -184,12 +190,12 @@ export async function install(serverUuid: string, opts: InstallOpts, log: (m: st
     if (seen.has(projectId) || (isDep && known.has(projectId))) return;
     seen.add(projectId);
     let version = pinned ? await modrinth.getVersion(pinned).catch(() => undefined) : undefined;
-    // a dependency pinned to a build for another MC version or loader is replaced by the best fitting one
-    if (version && isDep && !fits(version)) version = undefined;
+    if (pinned && !version) throw new Refusal(`The selected version ${pinned} could not be resolved. Nothing was installed; no other version was substituted.`);
+    if (version && pinned && (await modrinth.getProject(projectId)).id !== version.project_id) throw new Refusal(`Version ${pinned} does not belong to ${projectId}. Nothing was installed.`);
+    if (version && isDep && !fits(version)) throw new Refusal(`Required version ${pinned} does not support ${det.mc}/${det.loader}; choose another requested build.`);
     version ??= modrinth.bestVersion(await modrinth.getVersions(projectId, filter).catch(() => []));
     if (!version) {
-      result.skipped.push({ projectId, reason: `no build for ${det.mc ?? '?'}/${det.loader}` });
-      return;
+      throw new Refusal(`No build of ${projectId} for ${det.mc ?? '?'}/${det.loader}. Nothing was installed.`);
     }
     seen.add(version.project_id);
     if (isDep && known.has(version.project_id)) return; // keep the copy already installed
@@ -200,8 +206,7 @@ export async function install(serverUuid: string, opts: InstallOpts, log: (m: st
     }
     const file = version.files.find((f) => f.primary) ?? version.files[0];
     if (!file) {
-      result.skipped.push({ projectId, reason: 'version has no files' });
-      return;
+      throw new Refusal(`Version ${version.id} has no files. Nothing was installed.`);
     }
     const proj = await modrinth.getProject(version.project_id).catch(() => null);
     const title = proj?.title ?? version.name;
@@ -220,7 +225,7 @@ export async function install(serverUuid: string, opts: InstallOpts, log: (m: st
       entry: {
         file: file.filename, projectId: version.project_id, versionId: version.id, versionNumber: version.version_number,
         title, source: 'modrinth', sha1: file.hashes.sha1, installedAt: new Date().toISOString(),
-        via: isDep ? 'dependency' : 'direct', categories: proj?.categories, ...(clientOnly ? { clientOnly: true } : {}),
+        via: existing?.via ?? (isDep || opts.dependency ? 'dependency' : 'direct'), categories: proj?.categories, ...(clientOnly ? { clientOnly: true } : {}),
       },
     });
     if (type === 'mod' || type === 'plugin') {
@@ -279,18 +284,16 @@ export async function installCurseforge(
     seen.add(modId);
     const mod = await curseforge.getMod(modId).catch(() => null);
     if (!mod) {
-      result.skipped.push({ projectId: modId, reason: 'project not found on CurseForge' });
-      return;
+      throw new Refusal(`CurseForge project ${modId} could not be resolved. Nothing was installed.`);
     }
     const files = await curseforge.getFiles(modId, {
       mc: det.mc ?? undefined,
       // only mods are loader-specific
       loader: type === 'mod' && det.loader !== 'unknown' ? det.loader : undefined,
     });
-    const file = (pinnedFileId && files.find((f) => String(f.id) === pinnedFileId)) || curseforge.bestFile(files);
+    const file = pinnedFileId ? files.find((f) => String(f.id) === pinnedFileId) : curseforge.bestFile(files);
     if (!file) {
-      result.skipped.push({ projectId: mod.name, reason: `no build for ${det.mc ?? '?'}/${det.loader}` });
-      return;
+      throw new Refusal(`No ${pinnedFileId ? `selected file ${pinnedFileId}` : 'build'} of ${mod.name} for ${det.mc ?? '?'}/${det.loader}. Nothing was installed; no other file was substituted.`);
     }
     const existing = known.get(String(mod.id));
     if (existing?.versionId === String(file.id)) {
@@ -309,7 +312,7 @@ export async function installCurseforge(
       // the author ticked "no third-party downloads"; no retry will help
       (result.manualDownloads ??= []).push({ title: mod.name, url: mod.links?.websiteUrl ?? `https://www.curseforge.com/minecraft/mc-mods/${modId}` });
       result.warnings.push(`${mod.name}: the author blocked API downloads, so download the jar yourself`);
-      return;
+      throw new Refusal(`${mod.name} requires a manual download. Nothing in this plan was installed.`);
     }
     let clientOnly = false;
     if (type === 'mod' && mod.slug) {
@@ -322,7 +325,7 @@ export async function installCurseforge(
       entry: {
         file: file.fileName, projectId: String(mod.id), versionId: String(file.id), versionNumber: file.displayName,
         title: mod.name, source: 'curseforge', sha1: sha1 ?? '', installedAt: new Date().toISOString(),
-        via: isDep ? 'dependency' : 'direct', categories: curseforge.mapCategories(mod.categories), ...(clientOnly ? { clientOnly: true } : {}),
+        via: existing?.via ?? (isDep ? 'dependency' : 'direct'), categories: curseforge.mapCategories(mod.categories), ...(clientOnly ? { clientOnly: true } : {}),
       },
     });
     if (type === 'mod') {
@@ -625,7 +628,8 @@ export async function updateAll(serverUuid: string, log: (m: string) => void = n
 export function toggleInstalled(
   serverUuid: string,
   file: string,
-): { enabled: boolean; pending?: PendingAction } {
+  log: (m: string) => void = () => {},
+): { enabled: boolean; pending?: PendingAction; candidate?: Candidate } {
   assertModsWritable(serverUuid);
   const dir = jarDir(serverUuid);
   const clean = basename(file); // no path traversal
@@ -638,6 +642,13 @@ export function toggleInstalled(
   if (!isOn && !existsSync(disabled)) throw new Error(`${clean} not found`);
 
   if (isOn) assertNotRequired(serverUuid, clean);
+  if (MOD_LOADERS.has(detect(serverDir(serverUuid), serverUuid).loader)) {
+    assertCanStage(serverUuid);
+    const next = isOn ? `${clean}.disabled` : clean;
+    copyFileSync(isOn ? jar : disabled, stagingPath(serverUuid, next));
+    const entry = ledgerEntries(serverUuid).find((e) => e.file === (isOn ? clean : `${clean}.disabled`));
+    return { enabled: isOn, pending: isOn ? 'disable' : 'enable', candidate: stage(serverUuid, [{ file: next, to: 'mods', replaces: isOn ? clean : `${clean}.disabled`, entry: entry && { ...entry, file: next } }], log) };
+  }
   try {
     if (isOn) {
       renameSync(jar, disabled);
@@ -669,11 +680,19 @@ export function assertNotRequired(serverUuid: string, file: string): void {
   if (needers.length) throw new Error(`${file} is required by ${needers.join(', ')}; remove ${needers.length === 1 ? 'that' : 'those'} first`);
 }
 
-export function deleteInstalled(serverUuid: string, file: string): { pending?: PendingAction } {
+export function deleteInstalled(serverUuid: string, file: string, log: (m: string) => void = () => {}): { pending?: PendingAction; candidate?: Candidate } {
   assertModsWritable(serverUuid);
   const dir = jarDir(serverUuid);
   const clean = basename(file);
   assertNotRequired(serverUuid, clean);
+  if (MOD_LOADERS.has(detect(serverDir(serverUuid), serverUuid).loader)) {
+    const files: StagedFile[] = [];
+    for (const [to, folder] of [['mods', dir], ['shelf', clientShelfDir(serverUuid)]] as const) {
+      for (const name of [clean, `${clean}.disabled`]) if (existsSync(join(folder, name))) files.push({ file: name, to, remove: true });
+    }
+    if (files.length) return { pending: 'delete', candidate: stage(serverUuid, files, log) };
+    if (revisionState(serverUuid).active) assertUnsealed(serverUuid);
+  }
   const amMain = join(serverDir(serverUuid), 'automodpack', 'host-modpack', 'main');
   for (const p of [
     join(dir, clean), join(dir, `${clean}.disabled`), join(clientShelfDir(serverUuid), clean),

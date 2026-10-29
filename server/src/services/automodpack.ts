@@ -1,12 +1,14 @@
-import { existsSync, readdirSync, copyFileSync, unlinkSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, copyFileSync, unlinkSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import AdmZip from 'adm-zip';
 import { serverDir, clientShelfDir } from './servers.js';
 import { detect, loaderVersion } from './detect.js';
 import { chownToDirOwner, writeFileAtomic } from './platform.js';
-import { rconCommand } from '../clients/rcon.js';
+import { rconCommand, withRcon } from '../clients/rcon.js';
 import * as modrinth from '../clients/modrinth.js';
+import { PATHS } from '../config.js';
+import { assertUnsealed, revisionState, verifyActiveRevision, writeLaunchGate } from './revisions.js';
 
 // AutoModpack syncs a server's mods to every client that joins. It reads two
 // folders: the server's mods/ and automodpack/host-modpack/main/ (client-only
@@ -16,6 +18,73 @@ import * as modrinth from '../clients/modrinth.js';
 // ever removed from extras; hand-placed files are never recorded or touched.
 
 const BRIDGED_RECORD = '.spawnpoint-bridged.json';
+const holdFile = (id: string): string => join(PATHS.data, 'pack-hosting', `${id}.json`);
+
+/** Persisted before turning hosting off. Promotion can recover a panel crash
+    without exposing a revision whose live boot has not been verified. */
+export function hostingHold(id: string): { original: string; paused: string } | null {
+  return existsSync(holdFile(id)) ? JSON.parse(readFileSync(holdFile(id), 'utf8')) : null;
+}
+export function holdHosting(id: string): void {
+  if (!autoModpackActive(id)) return;
+  if (!revisionState(id).managedHosting) throw new Error('the owner must approve managed AutoModpack hosting before promotion');
+  const path = join(amDir(id), 'automodpack-server.json');
+  const prior = hostingHold(id);
+  const original = prior?.original ?? readFileSync(path, 'utf8');
+  const cfg = JSON.parse(original);
+  if (cfg.modpackHost !== true || cfg.generateModpackOnStart !== true || cfg.selfUpdater !== false) throw new Error('managed publication requires modpackHost and generateModpackOnStart enabled, and selfUpdater disabled; review the AutoModpack settings first');
+  const paused = prior?.paused ?? JSON.stringify({ ...JSON.parse(original), modpackHost: false }, null, 2);
+  if (!prior) writeFileAtomic(holdFile(id), JSON.stringify({ original, paused }));
+  writeFileAtomic(path, paused);
+}
+/** Make a verified pack visible. Keep hosting OFF in the startup config:
+    even an external Crafty start cannot publish an unverified future boot.
+    The reload is asynchronous in AutoModpack, so its log acknowledgement is
+    required before starting the host. */
+export async function releaseHosting(id: string, verify: () => Promise<void>): Promise<void> {
+  const hold = hostingHold(id);
+  if (!hold) return;
+  const path = join(amDir(id), 'automodpack-server.json');
+  const logPath = join(serverDir(id), 'logs', 'latest.log');
+  const mutex = join(serverDir(id), '.spawnpoint-publication');
+  await withRcon(id, async (send) => {
+    mkdirSync(mutex); // shared with the required pre-JVM launch guard
+    writeFileAtomic(join(mutex, 'owner.json'), JSON.stringify({ pid: process.pid }));
+    const offset = existsSync(logPath) ? readFileSync(logPath, 'utf8').length : 0;
+    const acknowledgement = async (re: RegExp): Promise<void> => {
+      for (let i = 0; ; i++) {
+        const tail = existsSync(logPath) ? readFileSync(logPath, 'utf8').slice(offset) : '';
+        if (re.test(tail)) return;
+        if (i >= 30) throw new Error('AutoModpack did not acknowledge the publication command');
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    };
+    try {
+      await send('list'); // this connection cannot migrate to a later boot
+      await verify();
+      writeFileAtomic(path, hold.original);
+      await send('automodpack config reload');
+      await acknowledgement(/AutoModpack server config reloaded!/);
+      writeFileAtomic(path, hold.paused);
+      await send('automodpack host start');
+      await acknowledgement(/Modpack hosting started!|Modpack hosting is already running!|Hosting modpack on Minecraft port/);
+      await send('list');
+    } finally {
+      writeFileAtomic(path, hold.paused);
+      rmSync(mutex, { recursive: true });
+    }
+  });
+}
+/** Only a known-dead panel publisher's mutex can be reclaimed automatically.
+    An unidentified guard stays fail-closed rather than racing a live launch. */
+export function recoverHosting(id: string): void {
+  const mutex = join(serverDir(id), '.spawnpoint-publication');
+  if (!existsSync(join(mutex, 'owner.json'))) return;
+  const { pid } = JSON.parse(readFileSync(join(mutex, 'owner.json'), 'utf8'));
+  try { process.kill(pid, 0); return; } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e; }
+  holdHosting(id);
+  rmSync(mutex, { recursive: true });
+}
 
 function amDir(serverId: string): string {
   return join(serverDir(serverId), 'automodpack');
@@ -68,10 +137,11 @@ export async function provisionAutoModpack(serverId: string, loader: string): Pr
 
 /** Mirror the client shelf into the extras folder and regenerate the pack,
     so the next join ships the current set. Call only after a change passed
-    its tests. Never throws. */
+    its tests. Locked packs fail closed on errors. */
 export async function publishPack(serverId: string, log?: (m: string) => void): Promise<void> {
   try {
     if (!autoModpackActive(serverId)) return;
+    await verifyActiveRevision(serverId);
     const extras = join(extrasDir(serverId), 'mods');
     mkdirSync(extras, { recursive: true });
     const recordPath = join(amDir(serverId), BRIDGED_RECORD);
@@ -100,11 +170,17 @@ export async function publishPack(serverId: string, log?: (m: string) => void): 
     writeFileSync(recordPath, JSON.stringify(shelfJars, null, 2), 'utf8');
     if (changed) await chownToDirOwner(extras);
     // an offline server regenerates at its next boot (generateModpackOnStart)
+    if (revisionState(serverId).active) {
+      holdHosting(serverId);
+      writeLaunchGate(serverId);
+      return; // promotion regenerates while hosting is held
+    }
     await rconCommand(serverId, 'automodpack generate', { timeout: 15_000 })
       .then(() => log?.(`automodpack: regenerated ${serverId}'s pack`))
       .catch(() => log?.(`automodpack: ${serverId} is offline, so its pack regenerates on next boot`));
   } catch (e) {
     log?.(`automodpack: publish failed for ${serverId}: ${String(e).slice(0, 120)}`);
+    if (revisionState(serverId).active) throw e;
   }
 }
 
@@ -113,6 +189,7 @@ export async function publishPack(serverId: string, log?: (m: string) => void): 
 export async function stageClientAsset(serverId: string, kind: 'shader' | 'resourcepack', src: string, log?: (m: string) => void): Promise<void> {
   try {
     if (!autoModpackActive(serverId) || !existsSync(src)) return;
+    assertUnsealed(serverId);
     const dstDir = join(extrasDir(serverId), kind === 'shader' ? 'shaderpacks' : 'resourcepacks');
     mkdirSync(dstDir, { recursive: true });
     copyFileSync(src, join(dstDir, src.split(/[\\/]/).pop()!));
@@ -120,6 +197,7 @@ export async function stageClientAsset(serverId: string, kind: 'shader' | 'resou
     await publishPack(serverId, log);
   } catch (e) {
     log?.(`automodpack: staging ${src} failed: ${String(e).slice(0, 120)}`);
+    if (revisionState(serverId).active) throw e;
   }
 }
 

@@ -122,15 +122,35 @@ export const craftyApi = {
   getLogs: async (id: string) => (await crafty<string[]>('GET', `/api/v2/servers/${id}/logs`)).map((l) => l
     .replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"')
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')),
-  action: (
+  action: async (
     id: string,
     action: 'start_server' | 'stop_server' | 'restart_server' | 'kill_server' | 'accept_eula',
-  ) => mutate(id, crafty('POST', `/api/v2/servers/${id}/action/${action}`)),
+  ) => {
+    if (action === 'start_server' || action === 'restart_server') {
+      const { verifyActiveRevision, revisionState } = await import('../services/revisions.js');
+      await verifyActiveRevision(id);
+      if (revisionState(id).active) {
+        const { holdHosting } = await import('../services/automodpack.js');
+        holdHosting(id);
+      }
+    }
+    const result = await mutate(id, crafty('POST', `/api/v2/servers/${id}/action/${action}`));
+    if (action === 'start_server' || action === 'restart_server') {
+      const { watchStart } = await import('../services/promote.js');
+      watchStart(id);
+    }
+    return result;
+  },
   // Crafty's own catalogue of installable server jars: { <category>: { <type>: [versions] } }.
   // The create wizard only accepts a type/version pair that appears here.
   jarCatalog: () => crafty<Record<string, Record<string, string[]>>>('GET', '/api/v2/jars'),
-  patchServer: (id: string, fields: Record<string, unknown>) =>
-    mutate(id, crafty('PATCH', `/api/v2/servers/${id}`, fields)),
+  patchServer: async (id: string, fields: Record<string, unknown>) => {
+    if ('execution_command' in fields || 'executable' in fields || 'path' in fields) {
+      const { assertUnsealed } = await import('../services/revisions.js');
+      assertUnsealed(id);
+    }
+    return mutate(id, crafty('PATCH', `/api/v2/servers/${id}`, fields));
+  },
   // Crafty 4.x exposes stdin as an action-style endpoint on some builds; the
   // route layer falls back to RCON when this 404s.
   sendStdin: (id: string, cmd: string) =>

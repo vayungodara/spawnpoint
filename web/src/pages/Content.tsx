@@ -50,10 +50,12 @@ interface Verdict { result: 'passed' | 'failed' | 'unverified'; detail: string; 
 interface Candidate {
   status: 'collecting' | 'testing' | 'needs-approval' | 'ready' | 'activating' | 'applied' | 'rejected'
   detail: string
-  files: { file: string; to: 'mods' | 'shelf'; entry?: { title: string } }[]
+  files: { file: string; path?: string; to: 'mods' | 'shelf'; entry?: { title: string } }[]
   server?: Verdict
   client?: Verdict
   approved?: boolean
+  consent?: string[]
+  revision?: string
   updatedAt: string
 }
 /** A change waiting for the server to restart before it goes live. */
@@ -220,7 +222,7 @@ export default function Content() {
       const base = `/api/servers/${active?.id}`
       if (action === 'now' || action === 'when-empty') return api(`${base}/promotion`, { method: 'POST', body: JSON.stringify({ choice: action }) })
       if (action === 'cancel-undo') return api(`${base}/promotion`, { method: 'DELETE' })
-      return api(`${base}/candidate${action === 'discard' ? '' : `/${action}`}`, { method: action === 'discard' ? 'DELETE' : 'POST' })
+      return api(`${base}/candidate${action === 'discard' ? '' : `/${action}`}`, { method: action === 'discard' ? 'DELETE' : 'POST', ...(action === 'apply' ? { body: JSON.stringify({ consent: true, revision: candidate?.revision }) } : {}) })
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['installed', active?.id] }),
     onError: (e) => failMsg(e),
@@ -314,13 +316,16 @@ export default function Content() {
   }
   const toggle = useMutation({
     mutationFn: (file: string) =>
-      api<{ enabled: boolean; pending?: string }>(`/api/servers/${active?.id}/installed/toggle`, {
+      api<{ enabled: boolean; pending?: string; candidate?: Candidate }>(`/api/servers/${active?.id}/installed/toggle`, {
         method: 'POST',
         body: JSON.stringify({ file }),
       }),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ['installed', active?.id] })
-      if (r.pending) queuedMsg(r.pending === 'disable' ? 'disabling it' : 'enabling it')
+      if (r.candidate) {
+        qc.invalidateQueries({ queryKey: ['candidate', active?.id] })
+        setInstallMsg('The change is staged for testing. Live files stay unchanged until promotion; review its results above.')
+      } else if (r.pending) queuedMsg(r.pending === 'disable' ? 'disabling it' : 'enabling it')
     },
     // this had NO error handler at all: the failure was invisible and the button looked dead
     onError: (e) => {
@@ -330,12 +335,15 @@ export default function Content() {
   })
   const remove = useMutation({
     mutationFn: (file: string) =>
-      api<{ ok: boolean; pending?: string }>(`/api/servers/${active?.id}/installed?file=${encodeURIComponent(file)}`, {
+      api<{ ok: boolean; pending?: string; candidate?: Candidate }>(`/api/servers/${active?.id}/installed?file=${encodeURIComponent(file)}`, {
         method: 'DELETE',
       }),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ['installed', active?.id] })
-      if (r.pending) queuedMsg('deleting it')
+      if (r.candidate) {
+        qc.invalidateQueries({ queryKey: ['candidate', active?.id] })
+        setInstallMsg('The removal is staged for testing. It needs your approval before promotion; live files are unchanged.')
+      } else if (r.pending) queuedMsg('deleting it')
     },
     onError: (e) => {
       setInstallMsg(`✗ ${String(e).replace(/^Error: \d+: /, '')}`)
@@ -465,7 +473,8 @@ export default function Content() {
       )}
 
       {active && promotion?.action === 'undo' && <UndoWaitingBanner p={promotion} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
-      {active && candidate && <CandidateBanner c={candidate} p={promotion?.action === 'apply' ? promotion : null} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
+      {active && candidate && <CandidateBanner id={active.id} c={candidate} p={promotion?.action === 'apply' ? promotion : null} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
+      {active && <RevisionHistory id={active.id} updating={!!promotion || ['collecting', 'testing'].includes(candidate?.status ?? '')} />}
 
       {active && rejections.length > 0 && (
         <div className="block border-gold! px-4 py-2.5 text-sm">
@@ -1057,13 +1066,13 @@ function ConfigsView({ serverId }: { serverId: string }) {
 
   const save = useMutation({
     mutationFn: () =>
-      api<{ ok: boolean; backup: string }>(`/api/servers/${serverId}/configs/file`, {
+      api<{ ok: boolean; backup?: string; staged?: boolean }>(`/api/servers/${serverId}/configs/file`, {
         method: 'PUT',
         body: JSON.stringify({ path: sel, content: text }),
       }),
     onSuccess: (r) => {
       setDirty(false)
-      setMsg(`✓ Saved (backup: ${r.backup}) — restart the server to apply`)
+      setMsg(r.staged ? '✓ Staged for testing — review and approve the config change above before it goes live' : `✓ Saved (backup: ${r.backup}) — restart the server to apply`)
       setTimeout(() => setMsg(null), 8000)
     },
     onError: (e) => {
@@ -1080,8 +1089,8 @@ function ConfigsView({ serverId }: { serverId: string }) {
     <div className="space-y-4">
       <div className="text-text-dim text-xs max-w-[75ch]">
         Every server mod keeps its options in a file here (e.g. Tree Harvester →{' '}
-        <span className="font-mono">config/treeharvester.json5</span>). Edits are backed up as{' '}
-        <span className="font-mono">.bak</span> next to the file and apply on the next restart.
+        <span className="font-mono">config/treeharvester.json5</span>). Locked servers stage edits for testing and approval before the next restart. Unlocked servers keep a{' '}
+        <span className="font-mono">.bak</span> copy next to the file.
       </div>
 
       {msg && <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{msg}</div>}
@@ -1166,6 +1175,45 @@ function Verdicts({ c }: { c: Candidate }) {
   )
 }
 
+interface Revision {
+  id: string; minecraft: string; loader: string; loaderVersion: string
+  files: number; requested: number; dependencies: number; backup?: string
+  tests: Record<string, { result: 'passed' | 'failed' | 'skipped' | 'inconclusive'; detail: string; renderer?: string }>
+  approved?: { at: string; reasons: string[] }
+}
+function RevisionHistory({ id, updating }: { id: string; updating: boolean }) {
+  const q = useQuery({
+    queryKey: ['revisions', id],
+    queryFn: () => api<{ active?: string; published?: string; revisions: Revision[] }>(`/api/servers/${id}/revisions`),
+    refetchInterval: updating ? 5000 : false,
+  })
+  if (q.isError) return <p role="alert" className="text-sm text-gold">Revision history could not be loaded: {q.error.message}</p>
+  if (!q.data?.revisions.length) return null
+  return (
+    <details className="block p-4 text-sm">
+      <summary className="cursor-pointer font-bold">Revision history · {q.data.revisions.length}</summary>
+      <p className="text-text-dim mt-2">Friends get the promoted revision. A pack rollback does not restore the world; world restore needs your approval.</p>
+      <div className="divide-y divide-ink mt-3">
+        {q.data.revisions.map((r) => (
+          <details key={r.id} className="py-3 min-w-0">
+            <summary className="cursor-pointer break-words">
+              <span className="font-mono text-xs">{r.id}</span>
+              {r.id === q.data.published ? ' · published to friends' : r.id === q.data.active ? ' · active, publication pending' : ' · retained'}
+            </summary>
+            <p className="mt-2 text-text-dim">Minecraft {r.minecraft} · {r.loader} {r.loaderVersion} · {r.files} locked files · {r.requested} requested mods · {r.dependencies} dependencies</p>
+            <ul className="space-y-1 mt-2">
+              {Object.entries(r.tests).map(([test, v]) => <li key={test} className={v.result === 'failed' ? 'text-red' : v.result === 'passed' ? 'text-emerald' : 'text-text-dim'}><b>{test}: {v.result}</b>{v.renderer ? ` · renderer: ${v.renderer}` : ''} — {v.detail}</li>)}
+            </ul>
+            {r.approved && <p className="mt-2 text-gold">Owner approved: {r.approved.reasons.join('; ')}</p>}
+            {r.backup && <p className="mt-2 text-text-dim break-all">Stopped-world backup: {r.backup}</p>}
+            <a className="text-sky underline inline-block mt-2" href={`/api/servers/${id}/revisions/${r.id}`} target="_blank" rel="noreferrer">Inspect lock and test report</a>
+          </details>
+        ))}
+      </div>
+    </details>
+  )
+}
+
 /** When a change that waits for a restart will go live, and the owner's choices. */
 function RestartChoice({ p, busy, onDecide }: { p: Promotion; busy: boolean; onDecide: (action: CandidateAction) => void }) {
   if (p.restarting) return <div><span className="hud !opacity-100 mr-2">RESTARTING</span>The server is restarting to load it.</div>
@@ -1219,8 +1267,10 @@ function UndoWaitingBanner({ p, busy, onDecide }: { p: Promotion; busy: boolean;
 }
 
 /** The mod change waiting for its tests, or the result of the last one. */
-function CandidateBanner({ c, p, busy, onDecide }: { c: Candidate; p: Promotion | null; busy: boolean; onDecide: (action: CandidateAction) => void }) {
-  const names = c.files.map((f) => f.entry?.title ?? f.file).join(', ')
+function CandidateBanner({ id, c, p, busy, onDecide }: { id: string; c: Candidate; p: Promotion | null; busy: boolean; onDecide: (action: CandidateAction) => void }) {
+  const [consent, setConsent] = useState(false)
+  useEffect(() => setConsent(false), [c.revision, c.status])
+  const names = c.files.map((f) => f.path ?? f.entry?.title ?? f.file).join(', ')
   const recent = Date.now() - new Date(c.updatedAt).getTime() < 10 * 60_000
   if (c.status === 'rejected' || ((c.status === 'applied') && !recent)) return null
   if (c.status === 'ready') {
@@ -1244,13 +1294,16 @@ function CandidateBanner({ c, p, busy, onDecide }: { c: Candidate; p: Promotion 
     const excerpt = c.client?.excerpt?.length ? c.client.excerpt : c.server?.excerpt ?? []
     return (
       <div className="block border-gold! px-4 py-3 text-sm space-y-2">
-        <div><b>{names}</b> could not be fully tested: {c.detail.replace(/^not tested: /, '')}.</div>
+        <div><b>{names}</b> needs your approval: {c.detail.replace(/^not tested: /, '')}.</div>
         <Verdicts c={c} />
+        {c.consent && <ul className="list-disc pl-5 space-y-1">{c.consent.map((reason) => <li key={reason}>{reason}</li>)}</ul>}
+        {c.revision && c.files.filter((f) => f.path).map((f) => <a key={f.path} className="text-sky underline block break-all" href={`/api/servers/${id}/candidate/config?revision=${encodeURIComponent(c.revision!)}&path=${encodeURIComponent(f.path!)}`} target="_blank" rel="noreferrer">Inspect before / after: {f.path}</a>)}
         {excerpt.length > 0 && (
           <pre className="console p-2 text-xs whitespace-pre-wrap max-h-40 overflow-auto">{excerpt.join('\n')}</pre>
         )}
-        <div className="flex gap-3">
-          <button onClick={() => onDecide('apply')} disabled={busy} className="btn btn-emerald px-4 py-2 text-sm">Apply anyway</button>
+        <label className="flex items-start gap-2"><input className="mt-1" type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />I approve the listed changes and accept the test gaps shown above. Hash checks and world-restore consent cannot be waived.</label>
+        <div className="flex gap-3 flex-wrap">
+          <button onClick={() => onDecide('apply')} disabled={busy || !consent} className="btn btn-emerald px-4 py-2 text-sm">Approve and continue</button>
           <button onClick={() => onDecide('retest')} disabled={busy} className="btn px-4 py-2 text-sm">Test again</button>
           <button onClick={() => onDecide('discard')} disabled={busy} className="btn px-4 py-2 text-sm">Discard</button>
         </div>

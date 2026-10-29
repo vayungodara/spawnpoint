@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { serverDir } from '../services/servers.js';
 import { liveChanged, assertModsWritable, assertCanStage, stage, stagingPath } from '../services/packtxn.js';
 import { assertNotRequired } from '../services/installer.js';
+import { assertPackPathWritable } from '../services/revisions.js';
 
 // WEB FILE MANAGER — browse/edit/upload/download any file under a server's
 // directory from the panel. Every path is confined to the server dir (the one
@@ -66,8 +67,9 @@ export default async function fileRoutes(app: FastifyInstance) {
   /** Any write through the file manager changes what a mod test saw. The
       check, the write and the invalidation run in one synchronous step, so a
       restart for a mod change cannot claim a verdict on the old files between. */
-  const mutate = <T>(id: string, write: () => T): T => {
+  const mutate = <T>(id: string, write: () => T, ...paths: string[]): T => {
     assertModsWritable(id);
+    for (const path of paths) assertPackPathWritable(id, path);
     const r = write();
     liveChanged(id);
     return r;
@@ -123,7 +125,7 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (req, reply) => {
       try {
         const p = confine(req.params.id, req.body.path);
-        mutate(req.params.id, () => writeFileSync(p, req.body.content ?? '', 'utf8'));
+        mutate(req.params.id, () => writeFileSync(p, req.body.content ?? '', 'utf8'), p);
         chownFile(p); // root-vs-crafty ownership class — every panel write into server dirs
         return { ok: true };
       } catch (e) {
@@ -170,12 +172,13 @@ export default async function fileRoutes(app: FastifyInstance) {
           const replaces = existsSync(p) ? name : undefined;
           return { ok: true, candidate: stage(req.params.id, [{ file: name, to: 'mods', replaces }], (m) => app.log.info(m)) };
         }
+        assertPackPathWritable(req.params.id, p);
         mkdirSync(dirname(p), { recursive: true });
         // streamed to a private part file; a mod change may have started going
         // live meanwhile, so check again, then land it and invalidate in one step
         const part = `${p}.${randomBytes(4).toString('hex')}.part`;
         await pipeline(req.body as NodeJS.ReadableStream, createWriteStream(part));
-        try { mutate(req.params.id, () => renameSync(part, p)); } catch (e) { rmSync(part, { force: true }); throw e; }
+        try { mutate(req.params.id, () => renameSync(part, p), p); } catch (e) { rmSync(part, { force: true }); throw e; }
         chownFile(p);
         // a dropped .mrpack / CF pack zip is an intent, not just a file — tell
         // the UI what it is so it can offer install / new-server right away
@@ -254,7 +257,7 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (req, reply) => {
       try {
         const p = confine(req.params.id, req.body.path);
-        mutate(req.params.id, () => mkdirSync(p, { recursive: true }));
+        mutate(req.params.id, () => mkdirSync(p, { recursive: true }), p);
         chownFile(p);
         return { ok: true };
       } catch (e) {
@@ -270,7 +273,7 @@ export default async function fileRoutes(app: FastifyInstance) {
         const from = confine(req.params.id, req.body.from);
         const to = confine(req.params.id, req.body.to);
         if (from !== to) guardJar(req.params.id, from);
-        mutate(req.params.id, () => renameSync(from, to));
+        mutate(req.params.id, () => renameSync(from, to), from, to);
         return { ok: true };
       } catch (e) {
         return reply.code(400).send({ error: String((e as Error).message ?? e).slice(0, 200) });
@@ -297,7 +300,7 @@ export default async function fileRoutes(app: FastifyInstance) {
           return reply.code(400).send({ error: 'use the Worlds card to manage worlds — it backs up first' });
         }
         guardJar(req.params.id, p);
-        mutate(req.params.id, () => rmSync(p, { recursive: true, force: true }));
+        mutate(req.params.id, () => rmSync(p, { recursive: true, force: true }), p);
         return { ok: true };
       } catch (e) {
         return reply.code(400).send({ error: String((e as Error).message ?? e).slice(0, 200) });

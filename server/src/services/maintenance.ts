@@ -12,7 +12,7 @@ async function pause(ms: number): Promise<void> {
 }
 
 /** True only when Crafty says stopped AND nothing listens on the MC port. */
-async function fullyStopped(uuid: string): Promise<boolean> {
+export async function fullyStopped(uuid: string): Promise<boolean> {
   try {
     const stats = await craftyApi.getStats(uuid);
     if (stats.running || stats.waiting_start) return false;
@@ -29,7 +29,7 @@ async function fullyStopped(uuid: string): Promise<boolean> {
     const port = parseInt(readProperties(uuid)['server-port'] ?? '25565', 10) || 25565;
     return !(await portListening(port));
   } catch {
-    return true;
+    return false; // no listener proof means no permission to mutate the pack
   }
 }
 
@@ -267,6 +267,36 @@ export async function createBackup(uuid: string): Promise<BackupInfo | { error: 
   }
 }
 
+/** Promotion snapshots are not rotated with manual backups. An interrupted
+    copy is rebuilt, never mistaken for a complete backup after a restart. */
+export async function createStoppedBackup(uuid: string, txn: string): Promise<string | null> {
+  if (!/^[a-zA-Z0-9_-]+$/.test(txn)) throw new Error('invalid backup revision');
+  if (!await fullyStopped(uuid)) throw new Error('world backup requires a confirmed stopped server');
+  const level = readProperties(uuid)['level-name'] ?? 'world';
+  // The restore UI currently accepts world/-rooted archives only. Refuse a
+  // custom world name rather than silently backing up the wrong directory.
+  if (level !== 'world') throw new Error('promotion backup currently requires level-name=world; no pack files were changed');
+  const world = join(serverDir(uuid), level);
+  if (!existsSync(world)) return null;
+  const dest = join(backupDir(uuid), `revision-${txn}.zip`);
+  if (existsSync(dest)) return dest;
+  const part = `${dest}.part.zip`;
+  try {
+    rmSync(part, { force: true });
+    await stageAndZipWorld(world, join(backupDir(uuid), `_revision-${txn}`, 'world'), part);
+    if (!await fullyStopped(uuid)) throw new Error('the server started during the world backup');
+    if (archiveRoot(part) !== 'world' || statSync(part).size === 0) throw new Error('world backup is invalid');
+    // Atomic publication of a completed snapshot; world restore is NEVER
+    // part of automatic pack rollback.
+    const { renameSync } = await import('node:fs');
+    renameSync(part, dest);
+    return dest;
+  } finally {
+    rmSync(part, { force: true });
+    rmSync(join(backupDir(uuid), `_revision-${txn}`), { recursive: true, force: true });
+  }
+}
+
 // one backup per server at a time: concurrent ones would share the _staging dir
 const backingUp = new Set<string>();
 
@@ -291,7 +321,7 @@ async function doBackup(uuid: string): Promise<BackupInfo | { error: string }> {
   // retention: keep the newest 10 LIVE-WORLD backups. Slot zips (the "even a
   // reset is recoverable" copies) are never auto-deleted: they may be the
   // only copy of a reset world.
-  const rotatable = listBackups(uuid).filter((b) => b.restorable);
+  const rotatable = listBackups(uuid).filter((b) => b.restorable && !b.file.startsWith('revision-'));
   for (const old of rotatable.slice(10)) unlinkSync(join(backupDir(uuid), old.file));
   return { file, sizeMb: Math.round((st.size / 1e6) * 10) / 10, createdAt: st.mtime.toISOString() };
 }

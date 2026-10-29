@@ -123,7 +123,7 @@ startTpsMonitor();
 startChunkyWatcher(log);
 startBootRestore(log);
 startCraftyDoctor(log);
-resumeCandidates(log);
+await resumeCandidates(log);
 resumePromotions(log);
 // pre-fill the joinability cache so a panel restart doesn't flash running servers as "starting"
 setTimeout(() => {

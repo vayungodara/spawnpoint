@@ -6,9 +6,10 @@ import { craftyApi } from '../clients/crafty.js';
 import { rconCommand } from '../clients/rcon.js';
 import { serverDir } from './servers.js';
 import { writeFileAtomic } from './platform.js';
-import { beginMaintenance, busyReason, endMaintenance, isRunningSafe, maintenanceOf, stopAndWait, strandMaintenance, waitForReady } from './maintenance.js';
+import { beginMaintenance, busyReason, createStoppedBackup, endMaintenance, isRunningSafe, maintenanceOf, stopAndWait, strandMaintenance, waitForReady } from './maintenance.js';
 import { markRunning } from './bootrestore.js';
-import { autoModpackActive } from './automodpack.js';
+import { autoModpackActive, holdHosting, releaseHosting, recoverHosting, extrasDir } from './automodpack.js';
+import { hashes, lockedPath, readLock, reportRevision, revisionState, setRevisionState, verifyActiveRevision, withStoppedRevision } from './revisions.js';
 import { candidate, candidateSet, applyReady, undoLast, lastChange, changeState, liveBootFailed, noteLive, assertModsWritable, afterCommit } from './packtxn.js';
 import { listPending } from './pendingmods.js';
 
@@ -33,7 +34,7 @@ import { listPending } from './pendingmods.js';
 export type Choice = 'now' | 'when-empty';
 
 export interface Promotion {
-  action: 'apply' | 'undo';
+  action: 'apply' | 'undo' | 'start';
   txn: string;
   /** the owner's pick while players are online */
   choice?: Choice;
@@ -49,6 +50,7 @@ export interface Promotion {
   startedAt?: number;
   /** rollback: why the change could not stay */
   reason?: string;
+  backup?: string | null;
   since: string;
 }
 
@@ -96,6 +98,15 @@ export function requestPromotion(id: string, action: Promotion['action'], txn: s
   log(`promote: ${action} ${txn} on ${id} waits for a restart`);
   schedule(log);
   return p;
+}
+
+/** All panel-owned starts (including maintenance and crash recovery) pass
+    through Crafty's client hook. Their verification survives panel restarts. */
+export function watchStart(id: string): void {
+  const { active } = revisionState(id);
+  if (!active || promotion(id)) return;
+  save(id, { action: 'start', txn: active, stage: 'applied', since: new Date().toISOString(), startedAt: Date.now() });
+  schedule(panelLog);
 }
 
 /** The owner's pick while players are online. */
@@ -161,6 +172,8 @@ function claimWaiting(id: string, log: (m: string) => void): boolean {
     record was never written (the panel stopped between the two writes). */
 export function resumePromotions(log: (m: string) => void): void {
   panelLog = log;
+  const locked = join(PATHS.data, 'locked-revisions');
+  for (const id of existsSync(locked) ? readdirSync(locked) : []) recoverHosting(id);
   const cands = join(PATHS.data, 'candidates');
   for (const id of existsSync(cands) ? readdirSync(cands) : []) {
     const c = candidate(id);
@@ -279,7 +292,7 @@ function current(id: string, p: Promotion): Promotion | null {
 }
 
 const what = (p: Promotion, start = false): string =>
-  p.action === 'apply' ? `${start ? 'A' : 'a'} tested mod update` : `${start ? 'An' : 'an'} undo of the last mod change`;
+  p.action === 'apply' ? `${start ? 'A' : 'a'} tested mod update` : p.action === 'start' ? 'the locked revision' : `${start ? 'An' : 'an'} undo of the last mod change`;
 
 /** Players online from RCON `list`. Without RCON, Crafty's count can only
     say someone is on (it lags about 30 s, so its 0 is not proof); null when
@@ -326,17 +339,27 @@ async function goLive(id: string, p: Promotion, log: (m: string) => void): Promi
     log(`promote: ${id} would not stop; trying again later`);
     return release(id, p);
   }
-  const outcome = await execute(id, p, log);
-  if (outcome === 'stuck') {
-    return strand(id, `the ${p.action === 'apply' ? 'mod change' : 'undo'} moved only some files and could not put them back; restarting the panel finishes that`, log);
+  let outcome: 'done' | 'unchanged' | 'stuck';
+  try {
+    outcome = await withStoppedRevision(id, async () => {
+      if (p.action !== 'start' && p.backup === undefined) {
+        p = save(id, { ...p, backup: await createStoppedBackup(id, `${p.txn}-${p.action}-${Date.now()}`) });
+        const revision = p.action === 'apply' ? candidate(id)?.revision : revisionState(id).active;
+        if (revision && p.backup) reportRevision(id, revision, { backup: p.backup });
+      }
+      if (revisionState(id).managedHosting) holdHosting(id);
+      const changed = await execute(id, p, log);
+      if (changed === 'stuck') throw new Error('an interrupted move needs journal recovery');
+      await afterCommit(id, log);
+      return changed;
+    });
+  } catch (e) {
+    return strand(id, `the stopped revision switch was refused: ${String(e).slice(0, 180)}`, log);
   }
   if (outcome === 'unchanged') {
     // dropped, not retried: retrying would restart the server every poll
     log(`promote: the ${p.action} on ${id} did not go in; starting the server as it was`);
-    await craftyApi.action(id, 'start_server').catch(() => {});
-    markRunning(id, true);
-    if (current(id, p)) rmSync(file(id), { force: true });
-    return release(id, p);
+    return bootAndVerify(id, save(id, { ...p, action: 'start', stage: 'applied', startedAt: undefined }), log);
   }
   await bootAndVerify(id, save(id, { ...p, stage: 'applied' }), log);
 }
@@ -344,6 +367,7 @@ async function goLive(id: string, p: Promotion, log: (m: string) => void): Promi
 /** Make the change while the server is stopped. The outcome is read from
     disk, not from whether a call threw. */
 async function execute(id: string, p: Promotion, log: (m: string) => void): Promise<'done' | 'unchanged' | 'stuck'> {
+  if (p.action === 'start') return 'done';
   try {
     if (p.action === 'apply') await applyReady(id, p.txn, log);
     else await undoLast(id, log, p.txn);
@@ -362,6 +386,7 @@ async function execute(id: string, p: Promotion, log: (m: string) => void): Prom
 /** The change is in: start the server (unless it already runs), and keep the
     change only if it boots. */
 async function bootAndVerify(id: string, p: Promotion, log: (m: string) => void): Promise<void> {
+  try {
   // repeated on purpose: a panel restart between the commit and its cleanup
   // (stage stopping or applied) must not boot on a stale friends' pack
   await afterCommit(id, log);
@@ -372,23 +397,43 @@ async function bootAndVerify(id: string, p: Promotion, log: (m: string) => void)
   markRunning(id, true);
   const since = p.startedAt ?? 0;
   if (!(await waitForReady(id, READY_TIMEOUT_S, since))) {
-    if (p.action === 'undo') {
-      log(`promote: ${id} did not come up after the undo; leaving it for the owner`);
-      return release(id, p);
-    }
     const why = await lastError(id);
+    const active = revisionState(id).active;
+    if (active) reportRevision(id, active, { tests: {
+      liveBoot: { result: 'failed', detail: `The live boot did not reach ready: ${why}`, renderer: 'none' },
+      publication: { result: 'skipped', detail: 'The live boot failed; the pack was not published', renderer: 'none' },
+    } });
+    if (p.action !== 'apply') {
+      log(`promote: ${id} did not come up after the undo; leaving it for the owner`);
+      return strand(id, 'the locked revision did not boot; publication remains held', log);
+    }
     return rollBack(id, p, `the server did not start with this change (${why})`, log);
   }
+  const active = revisionState(id).active;
+  if (active) reportRevision(id, active, { tests: { liveBoot: { result: 'passed', detail: 'This live boot reached ready', renderer: 'none' } } });
   const c = candidate(id);
-  const pack = await packCheck(id, since, p.action === 'apply' ? c?.pack : undefined);
-  if (p.action === 'apply' && pack?.failed && !c?.approved) {
-    // the join test proved this exact pack; anything else, or no proof, is untested for friends
-    return rollBack(id, p, pack.note, log);
+  const verify = async (): Promise<void> => {
+    await verifyActiveRevision(id);
+    const pack = await packCheck(id, since, p.action === 'apply' ? c?.pack : undefined);
+    if (pack) throw new Error(pack.note); // approval never waives byte integrity
+  };
+  await verify();
+  await releaseHosting(id, verify);
+  if (active) {
+    reportRevision(id, active, { tests: { publication: { result: autoModpackActive(id) ? 'passed' : 'skipped', detail: autoModpackActive(id) ? 'Fresh manifest and published bytes match the revision; hosting acknowledged' : 'AutoModpack is not configured', renderer: 'none' } } });
+    setRevisionState(id, { published: active });
   }
-  if (p.action === 'apply') noteLive(id, p.txn, 'applied', `tested and applied; the server restarted with it${pack ? `. ${pack.note}` : ''}`);
-  if (pack) log(`promote: ${id}: ${pack.note}`);
+  if (p.action === 'apply') noteLive(id, p.txn, 'applied', `${c?.approved ? 'applied with owner consent' : 'tested and applied'}; the live boot and friends' exact pack were verified`);
   log(`promote: ${p.action} ${p.txn} is live on ${id}`);
   release(id, p);
+  } catch (e) {
+    const why = String(e).slice(0, 220);
+    const active = revisionState(id).active;
+    if (active) reportRevision(id, active, { tests: { publication: { result: 'failed', detail: why, renderer: 'none' } } });
+    if (p.action === 'apply') return rollBack(id, p, why, log);
+    await stopAndWait(id);
+    return strand(id, `publication refused: ${why}; world was not restored`, log);
+  }
 }
 
 /** The applied change must not stay: undo exactly it, start the server
@@ -402,8 +447,10 @@ async function rollBack(id: string, p: Promotion, why: string, log: (m: string) 
       return strand(id, `${why}, and the server would not stop, so the change is still in`, log);
     }
     try {
-      const r = await undoLast(id, log, p.txn);
-      if (r.waiting || r.txn !== p.txn || !r.undone) throw new Error('the undo did not run');
+      await withStoppedRevision(id, async () => {
+        const r = await undoLast(id, log, p.txn);
+        if (r.waiting || r.txn !== p.txn || !r.undone) throw new Error('the undo did not run');
+      });
     } catch (e) {
       return strand(id, `${why}, and undoing it failed: ${String(e).slice(0, 120)}`, log);
     }
@@ -415,9 +462,12 @@ async function rollBack(id: string, p: Promotion, why: string, log: (m: string) 
   if (!(await isUp(id))) {
     const restartedAt = Date.now();
     await craftyApi.action(id, 'start_server').catch(() => {});
-    await waitForReady(id, READY_TIMEOUT_S, restartedAt);
+    if (!await waitForReady(id, READY_TIMEOUT_S, restartedAt)) return strand(id, 'the previous pack also failed to boot; the world was not restored', log);
+    p = { ...p, startedAt: restartedAt };
   }
-  release(id, p);
+  // Verify and republish the previous pack too. It may be an observed
+  // baseline rather than a client-certified revision; retain that report.
+  await bootAndVerify(id, save(id, { ...p, action: 'start', stage: 'applied' }), log);
 }
 
 async function lastError(id: string): Promise<string> {
@@ -449,7 +499,10 @@ export async function packCheck(id: string, since = 0, tested?: Record<string, s
   } catch {
     return { note: 'AutoModpack did not rebuild the friends\' pack when the server started (is generateModpackOnStart off?), so friends would not get exactly the tested files', failed: true };
   }
-  const expected = new Map(Object.entries(tested ?? Object.fromEntries(candidateSet(id, { files: [] }).client
+  const active = revisionState(id).active;
+  const locked = active && readLock(id, active);
+  const clientFiles = locked ? locked.files.filter((f) => f.side !== 'server').map((f) => ({ src: lockedPath(id, active!, f), rel: f.path })) : candidateSet(id, { files: [] }).client;
+  const expected = new Map(Object.entries(tested ?? Object.fromEntries(clientFiles
     // friends install AutoModpack itself from the starter pack; it never lists itself
     .filter((f) => !/^mods\/automodpack[^/]*\.jar$/i.test(f.rel))
     .map((f) => [`/${f.rel}`, createHash('sha1').update(readFileSync(f.src)).digest('hex')]))));
@@ -461,6 +514,17 @@ export async function packCheck(id: string, since = 0, tested?: Record<string, s
     missing.length && `leaves out: ${missing.join(', ')}`,
     changed.length && `serves different bytes for: ${changed.join(', ')}`,
   ].filter(Boolean);
+  if (locked) {
+    for (const f of locked.files.filter((f) => f.side !== 'server' && !/^mods\/automodpack[^/]*\.jar$/i.test(f.path))) {
+      // AutoModpack gives extras precedence over a same-path server file.
+      const extra = join(extrasDir(id), f.path);
+      const path = existsSync(extra) ? extra : join(serverDir(id), f.path);
+      try {
+        const actual = await hashes(path);
+        if (actual.sha512 !== f.sha512 || actual.size !== f.size) parts.push(`published bytes differ: ${f.path}`);
+      } catch { parts.push(`published file unavailable: ${f.path}`); }
+    }
+  }
   return parts.length ? { note: `AutoModpack's pack differs from the tested set (${parts.join('; ')})`, failed: true } : null;
 }
 

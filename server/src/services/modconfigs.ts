@@ -1,6 +1,8 @@
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { join, resolve, sep, extname } from 'node:path';
 import { serverDir } from './servers.js';
+import { revisionState } from './revisions.js';
+import { stageConfig } from './packtxn.js';
 
 // Mod config file browser/editor. Every server mod keeps its developer
 // options in text files under config/ (Fabric/Forge) or serverconfig/
@@ -79,9 +81,13 @@ export function readConfig(uuid: string, rel: string): { path: string; content: 
   return { path: rel, content: readFileSync(p, 'utf8').replace(/^﻿/, ''), tooBig: false };
 }
 
-export function writeConfig(uuid: string, rel: string, content: string): { ok: true; backup: string } {
+export function writeConfig(uuid: string, rel: string, content: string): { ok: true; backup?: string; staged?: boolean } {
   const p = confine(uuid, rel);
   if (!existsSync(p)) throw new Error('file not found — configs can only be edited, not created');
+  if (revisionState(uuid).active) {
+    stageConfig(uuid, rel.replaceAll(sep, '/'), Buffer.from(content, 'utf8'), () => {});
+    return { ok: true, staged: true };
+  }
   const bak = `${p}.bak`;
   copyFileSync(p, bak);
   writeFileSync(p, content, 'utf8'); // no BOM

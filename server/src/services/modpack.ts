@@ -7,6 +7,7 @@ import { detect } from './detect.js';
 import * as modrinth from '../clients/modrinth.js';
 import * as curseforge from '../clients/curseforge.js';
 import { chownToDirOwner } from './platform.js';
+import { assertUnsealed } from './revisions.js';
 
 /** Is `target` really inside `root`? A bare startsWith() accepts a SIBLING
     directory that merely shares the prefix (…/<uuid> vs …/<uuid>-evil) —
@@ -155,6 +156,7 @@ export async function installMrpackFile(
   serverUuid: string,
   packPath: string,
 ): Promise<ModpackResult | { error: string }> {
+  assertUnsealed(serverUuid);
   const dir = serverDir(serverUuid);
   const det = detect(dir, serverUuid);
 
@@ -273,6 +275,7 @@ export async function installCurseforgeZipFile(
   serverUuid: string,
   zipPath: string,
 ): Promise<ModpackResult | { error: string }> {
+  assertUnsealed(serverUuid);
   const dir = serverDir(serverUuid);
   const det = detect(dir, serverUuid);
 

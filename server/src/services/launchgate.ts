@@ -7,7 +7,8 @@ import { PATHS } from '../config.js';
 import { serverDir, javaFor } from './servers.js';
 import { detect, loaderVersion, type Detection } from './detect.js';
 import { killTree, IS_WIN, KILLABLE_SPAWN_OPTS, linkOrCopy, withMemory } from './platform.js';
-import { loaderLaunchArgs, linkLoader, excerptOf, type Verdict } from './preflight.js';
+import { loaderLaunchArgs, lockedLaunchArgs, linkLoader, excerptOf, type Verdict } from './preflight.js';
+import type { RevisionLock } from './revisions.js';
 
 // CLIENT BOOT TEST. AutoModpack mirrors whatever the server has; it does not
 // check that the result runs. So before a change reaches friends, this boots
@@ -172,6 +173,9 @@ export interface ClientSet {
   label: 'candidate' | 'live';
   /** file names this change adds; a change the test must leave out is untested */
   changed: string[];
+  /** Sealed server/config inputs for this revision; absent for legacy callers. */
+  sourceDir?: string;
+  lock?: RevisionLock;
 }
 
 /** Why the client test cannot run for this server, or null when it can. */
@@ -189,13 +193,14 @@ let chain: Promise<unknown> = Promise.resolve();
 export function clientGate(serverId: string, set: ClientSet, onStatus: (d: string) => void, log: (m: string) => void): Promise<Verdict> {
   const run = chain.then(() => clientGateInner(serverId, set, onStatus, log), () => clientGateInner(serverId, set, onStatus, log));
   chain = run.catch(() => {});
-  return run;
+  return run.then((v) => ({ ...v, renderer: gateMode() }));
 }
 
 async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: string) => void, log: (m: string) => void): Promise<Verdict> {
   const blocker = clientGateBlocker(serverId);
   if (blocker) return { result: 'unverified', detail: blocker };
-  const det = detect(serverDir(serverId), serverId) as Detection & { mc: string; loader: 'fabric' | 'forge' };
+  const sourceDir = set.sourceDir ?? serverDir(serverId);
+  const det = detect(sourceDir, serverId) as Detection & { mc: string; loader: 'fabric' | 'forge' };
   await waitForQuiet(onStatus);
   onStatus('preparing the test client (the first run downloads Minecraft)');
   const work = join(PATHS.data, 'launchgate', serverId);
@@ -204,7 +209,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   try {
     await ensureHeadlessMc();
     writeHmcConfig(rundir); // before any HeadlessMC command, or it installs into ~/.minecraft
-    version = await ensureVersion(det.mc, det.loader, loaderVersion(serverDir(serverId), det));
+    version = await ensureVersion(det.mc, det.loader, loaderVersion(sourceDir, det));
   } catch (e) {
     return { result: 'unverified', detail: `could not prepare the test client: ${String(e).slice(0, 140)}` };
   }
@@ -301,8 +306,12 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
       });
     });
   }));
-  if (typeof sp === 'string') return { result: 'unverified', detail: sp };
-  if (sp.result !== 'passed') return sp;
+  if (typeof sp === 'string') return { result: 'unverified', detail: sp, checks: { clientBoot: { result: 'inconclusive', detail: sp, renderer: gateMode() } } };
+  const checks: NonNullable<Verdict['checks']> = {
+    clientBoot: { result: sp.result === 'unverified' ? 'inconclusive' : sp.result, detail: sp.detail, renderer: gateMode() },
+    rendering: { result: gateMode() === 'headless' || left.length ? 'skipped' : sp.result === 'passed' ? 'passed' : 'inconclusive', detail: gateMode() === 'headless' ? 'LWJGL was stubbed; no rendering coverage' : left.length ? `Not rendered: ${left.join(', ')}` : sp.result === 'passed' ? 'Rendered with the complete client set; not a real-GPU certification' : 'The client did not complete its rendering check', renderer: gateMode() },
+  };
+  if (sp.result !== 'passed') return { ...sp, checks };
 
   await waitForQuiet(onStatus);
   // the join runs a client and a copy of the server at once
@@ -311,14 +320,19 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
     return joinTest(serverId, det, version, set, rundir, tested, log)
       .catch((e): Verdict => ({ result: 'unverified', detail: `the join test errored: ${String(e).slice(0, 140)}` }));
   });
-  if (typeof join_ === 'string') return { result: 'unverified', detail: `${sp.detail}, but the join could not be tested: ${join_}` };
-  if (join_.result !== 'passed') return { ...join_, detail: `${sp.detail}, but ${join_.detail}` };
+  if (typeof join_ === 'string') return { result: 'unverified', detail: `${sp.detail}, but the join could not be tested: ${join_}`, checks: { ...checks, join: { result: 'inconclusive', detail: join_, renderer: gateMode() } } };
+  if (join_.result !== 'passed') return { ...join_, detail: `${sp.detail}, but ${join_.detail}`, checks: { ...checks, join: { result: join_.result === 'unverified' ? 'inconclusive' : join_.result, detail: join_.detail, renderer: gateMode() }, handshake: { result: tested ? 'inconclusive' : 'skipped', detail: 'The complete AutoModpack handshake and inventory check did not pass', renderer: gateMode() } } };
   const notes = [
     gateMode() === 'headless' && 'graphics stubbed: install xvfb to test rendering too',
     gateMode() !== 'headless' && left.length && `${left.join(', ')} left out: it cannot run on the virtual display${handshakeOff ? ', so AutoModpack\'s handshake was not run' : ''}`,
     amOnForge && 'AutoModpack\'s handshake is only checked on Fabric',
   ].filter(Boolean);
-  return { result: 'passed', detail: `${sp.detail}, then ${join_.detail}${notes.length ? ` (${notes.join('; ')})` : ''}`, seconds: Math.round((Date.now() - started) / 1000) };
+  return { result: notes.length ? 'unverified' : 'passed', detail: `${sp.detail}, then ${join_.detail}${notes.length ? ` (${notes.join('; ')})` : ''}`, seconds: Math.round((Date.now() - started) / 1000),
+    checks: {
+      ...checks,
+      join: { result: 'passed', detail: join_.detail, renderer: gateMode() },
+      handshake: { result: tested ? 'passed' : 'skipped', detail: tested ? 'AutoModpack handshake and exact client inventory verified' : 'AutoModpack handshake was not run', renderer: gateMode() },
+    } };
 }
 
 // The join test boots a throwaway server (the candidate's jars, a fresh flat
@@ -343,7 +357,7 @@ interface AutoModpackFile {
     server's own sync/exclusion rules. Do not manufacture the host pack from
     the tested list: that would hide files AutoModpack serves but we never booted. */
 function prepareAutoModpack(serverId: string, srv: string, set: ClientSet): void {
-  const live = serverDir(serverId);
+  const live = set.sourceDir ?? serverDir(serverId);
   const am = join(live, 'automodpack');
   const cfgPath = join(am, 'automodpack-server.json');
   const cfg = existsSync(cfgPath) ? JSON.parse(readFileSync(cfgPath, 'utf8')) : {};
@@ -361,7 +375,7 @@ function prepareAutoModpack(serverId: string, srv: string, set: ClientSet): void
     if (root !== 'mods' && existsSync(join(live, root))) cpSync(join(live, root), join(srv, root), { recursive: true });
   }
   const extras = join(srv, 'automodpack', 'host-modpack', 'main');
-  if (existsSync(join(am, 'host-modpack', 'main'))) cpSync(join(am, 'host-modpack', 'main'), extras, { recursive: true });
+  if (!set.sourceDir && existsSync(join(am, 'host-modpack', 'main'))) cpSync(join(am, 'host-modpack', 'main'), extras, { recursive: true });
   mkdirSync(join(extras, 'mods'), { recursive: true });
   const record = join(am, '.spawnpoint-bridged.json');
   const bridged: string[] = existsSync(record) ? JSON.parse(readFileSync(record, 'utf8')) : [];
@@ -370,7 +384,10 @@ function prepareAutoModpack(serverId: string, srv: string, set: ClientSet): void
   for (const f of set.files) {
     const rel = relative(join(am, 'host-modpack', 'main'), f.src);
     const fromExtras = !isAbsolute(rel) && !rel.startsWith('..');
-    if (f.rel.startsWith('mods/') && !set.serverJars.includes(f.src) && !fromExtras) copyFileSync(f.src, join(extras, 'mods', basename(f.rel)));
+    if (!set.serverJars.includes(f.src) && (set.sourceDir || (f.rel.startsWith('mods/') && !fromExtras))) {
+      mkdirSync(dirname(join(extras, f.rel)), { recursive: true });
+      copyFileSync(f.src, join(extras, f.rel));
+    }
   }
   mkdirSync(join(srv, 'automodpack'), { recursive: true });
   writeFileSync(join(srv, 'automodpack', 'automodpack-server.json'), JSON.stringify({ ...cfg,
@@ -394,8 +411,9 @@ async function joinTest(
   const [maj, min] = det.mc.split('.').map((n) => parseInt(n, 10));
   if (maj === 1 && min < 20) return { result: 'unverified', detail: 'the join could not be tested (clients before 1.20 have no quick-play)' };
   const big = serverJars.length > 200;
-  const launchArgs = loaderLaunchArgs(serverDir(serverId), det, big ? '-Xmx4G' : '-Xmx2G');
-  const java = javaFor(det.mc, det.loader);
+  const heap = big ? '-Xmx4G' : '-Xmx2G';
+  const launchArgs = set.lock ? lockedLaunchArgs(set.lock, heap) : loaderLaunchArgs(set.sourceDir ?? serverDir(serverId), det, heap);
+  const java = set.lock?.java.executable ?? javaFor(det.mc, det.loader);
   if (!launchArgs || !java) return { result: 'unverified', detail: 'no boot recipe for this server' };
   const serverUpMs = (big ? 8 : 4) * 60_000;
   const totalMs = (big ? 20 : 8) * 60_000;
@@ -403,7 +421,7 @@ async function joinTest(
   const srv = join(PATHS.data, 'joingate', serverId);
   rmSync(srv, { recursive: true, force: true });
   mkdirSync(join(srv, 'mods'), { recursive: true });
-  linkLoader(serverDir(serverId), srv);
+  linkLoader(set.sourceDir ?? serverDir(serverId), srv, set.lock);
   for (const jar of serverJars) if (tested || !/automodpack/i.test(basename(jar))) linkOrCopy(jar, join(srv, 'mods', basename(jar)));
   if (tested) {
     try { prepareAutoModpack(serverId, srv, set); }
