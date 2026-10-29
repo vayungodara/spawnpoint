@@ -6,6 +6,7 @@ import { Agent, request } from 'undici';
 import { PATHS, loadSettings, saveSettings } from '../config.js';
 import { chownToDirOwner } from '../services/platform.js';
 import { hashPin, pinConfigured, sessionCookie, PIN_RULE, PIN_RULE_TEXT } from '../auth.js';
+import { supervisor } from '../services/native.js';
 
 // FIRST-RUN WIZARD: open until the panel has both a Crafty token and a PIN.
 // Step one connects Crafty (a pasted API key, or a one-time login that mints
@@ -14,7 +15,7 @@ import { hashPin, pinConfigured, sessionCookie, PIN_RULE, PIN_RULE_TEXT } from '
 // printed. No address is trusted: behind a reverse proxy on the same machine
 // every visitor would look local.
 export function wizardActive(): boolean {
-  return !existsSync(PATHS.craftyTokenFile) || !pinConfigured();
+  return (loadSettings().runtime !== 'standalone' && !existsSync(PATHS.craftyTokenFile)) || !pinConfigured();
 }
 
 const CODE_FILE = join(PATHS.data, 'setup-code.txt');
@@ -137,6 +138,7 @@ export default async function wizardRoutes(app: FastifyInstance) {
     const hasJdk = existsSync(tools) && readdirSync(tools).some((d) => d.startsWith('jdk-'));
     return {
       active: true,
+      runtime: s.runtime,
       craftyUrl: s.craftyUrl,
       craftyReachable,
       hasJdk,
@@ -144,6 +146,22 @@ export default async function wizardRoutes(app: FastifyInstance) {
       pinSet: pinConfigured(),
       claude: claudeCliReady(),
     };
+  });
+
+  app.post<{ Body: { code?: string } }>('/api/wizard/standalone', async (req, reply) => {
+    if (!wizardActive()) return reply.code(403).send({ error: 'setup is already complete' });
+    const wait = codeThrottled(req.ip);
+    if (wait) return reply.code(429).send({ error: `too many wrong setup codes, wait ${wait}s` });
+    if (!claimOk(String(req.body?.code ?? ''))) {
+      codeFailed(req.ip);
+      return reply.code(403).send({ error: 'setup code required' });
+    }
+    await supervisor('health');
+    const settings = loadSettings();
+    settings.runtime = 'standalone';
+    saveSettings(settings);
+    if (!wizardActive()) rmSync(CODE_FILE, { force: true });
+    return { ok: true, servers: 0 };
   });
 
   app.post<{ Body: { username?: string; password?: string; token?: string; url?: string; code?: string; allowInsecure?: boolean } }>(

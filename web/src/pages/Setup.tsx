@@ -3,13 +3,14 @@ import { Navigate, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { PixelDefs, Pi } from '../components/PixelIcons'
 
-// FIRST-RUN WIZARD, shown until the panel has a Crafty token and a PIN (see
-// server/src/routes/wizardRoutes.ts). Three steps: connect Crafty, set a
+// FIRST-RUN WIZARD, shown until the panel has a runtime and a PIN (see
+// server/src/routes/wizardRoutes.ts). Three steps: connect an owner, set a
 // PIN, optional keys. Both required steps need the setup code the installer
 // printed; its link (/setup#code=…) fills it in.
 
 type WizardStatus = {
   active: boolean
+  runtime?: 'crafty' | 'standalone'
   craftyUrl?: string
   craftyReachable?: boolean
   hasJdk?: boolean
@@ -35,14 +36,14 @@ export default function Setup() {
   })
 
   const [stepPicked, setStep] = useState<number | null>(null)
-  // a reload after connecting Crafty resumes at the PIN step
-  const step = stepPicked ?? (wiz?.craftyConnected ? 1 : 0)
+  // a reload after connecting an owner resumes at the PIN step
+  const step = stepPicked ?? (wiz?.craftyConnected || wiz?.runtime === 'standalone' ? 1 : 0)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
   // step 0 — crafty. API key is the recommended path (the panel then never
   // holds anything that can unlock the superuser); one-time login is fallback.
-  const [mode, setMode] = useState<'key' | 'login'>('key')
+  const [mode, setMode] = useState<'standalone' | 'key' | 'login'>('standalone')
   const [apiKey, setApiKey] = useState('')
   const [url, setUrl] = useState('')
   const [user, setUser] = useState('')
@@ -64,11 +65,11 @@ export default function Setup() {
     setBusy(true)
     setErr('')
     try {
-      const r = await fetch('/api/wizard/crafty-login', {
+      const r = await fetch(mode === 'standalone' ? '/api/wizard/standalone' : '/api/wizard/crafty-login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(
-          mode === 'key'
+          mode === 'standalone' ? { code } : mode === 'key'
             ? { token: apiKey.trim(), url: url || undefined, code }
             : { username: user, password: pass, url: url || undefined, code },
         ),
@@ -126,7 +127,7 @@ export default function Setup() {
     }
   }
 
-  const stepTag = ['STEP 1 / 3 · CONNECT CRAFTY', 'STEP 2 / 3 · LOCK THE PANEL', 'STEP 3 / 3 · OPTIONAL EXTRAS'][step]
+  const stepTag = ['STEP 1 / 3 · CHOOSE RUNTIME', 'STEP 2 / 3 · LOCK THE PANEL', 'STEP 3 / 3 · OPTIONAL EXTRAS'][step]
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6" style={{ background: 'var(--color-bedrock)', backgroundImage: 'var(--noise-dense)' }}>
@@ -140,6 +141,16 @@ export default function Setup() {
 
         {step === 0 && (
           <>
+            <div className="flex flex-wrap gap-2 mb-4" role="group" aria-label="Server runtime">
+              <button className={`btn px-3 py-2 text-sm ${mode === 'standalone' ? 'btn-emerald' : 'btn-block'}`} aria-pressed={mode === 'standalone'}
+                disabled={busy} onClick={() => { setMode('standalone'); setErr('') }}>Spawnpoint</button>
+              <button className={`btn px-3 py-2 text-sm ${mode !== 'standalone' ? 'btn-emerald' : 'btn-block'}`} aria-pressed={mode !== 'standalone'}
+                disabled={busy} onClick={() => { setMode('key'); setErr('') }}>Crafty Controller</button>
+            </div>
+            {mode === 'standalone' ? <p className="text-sm opacity-85 mb-4">
+              Use the independent Spawnpoint supervisor. It keeps Java and the console running when
+              the panel restarts. Install its OS service first; no Crafty account is required.
+            </p> : <>
             {mode === 'key' ? (
               <p className="text-sm opacity-85 mb-4">
                 In Crafty, open your user's <strong>API Keys</strong> page, create a key, and paste it
@@ -204,6 +215,7 @@ export default function Setup() {
             >
               {mode === 'key' ? 'No API key handy? Log in once instead' : 'Have an API key? Paste it instead (recommended)'}
             </button>
+            </>}
             <p className="text-xs opacity-70 mt-3 mb-2">
               The <strong>setup code</strong> proves you own this install. The installer and the panel log
               print it (on the panel machine:{' '}
@@ -219,10 +231,10 @@ export default function Setup() {
             {err && <div className="font-px text-[10px] text-redstone mt-3">{err.toUpperCase()}</div>}
             <button
               onClick={connect}
-              disabled={(mode === 'key' ? !apiKey.trim() : !user || !pass) || !code || busy}
+              disabled={(mode === 'standalone' ? false : mode === 'key' ? !apiKey.trim() : !user || !pass) || !code || busy}
               className="btn btn-emerald w-full py-2.5 text-sm mt-4"
             >
-              {busy ? 'Connecting…' : 'Connect Crafty'}
+              {busy ? 'Connecting…' : mode === 'standalone' ? 'Use standalone runtime' : 'Connect Crafty'}
             </button>
           </>
         )}
@@ -230,7 +242,7 @@ export default function Setup() {
         {step === 1 && (
           <>
             <p className="text-sm opacity-85 mb-1">
-              Crafty connected{serverCount !== null ? ` — found ${serverCount} server${serverCount === 1 ? '' : 's'}` : ''}.
+              {wiz?.runtime === 'standalone' || (serverCount !== null && mode === 'standalone') ? 'Independent supervisor connected.' : `Crafty connected${serverCount !== null ? ` — found ${serverCount} server${serverCount === 1 ? '' : 's'}` : ''}.`}
             </p>
             <p className="text-sm opacity-85 mb-4">
               Now set a PIN. Every browser needs it once every 30 days, this one included.

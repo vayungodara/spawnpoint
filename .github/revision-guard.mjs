@@ -2,7 +2,7 @@
 // promotion proof uses .github/setup-integration.mjs and the panel API.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -99,6 +99,18 @@ try {
   await fenceClosed;
   running = undefined;
   check('a completed mutation releases its fence', run().status === 0 && existsSync(join(dir, 'started')));
+  const movable = join(dir, 'movable'), moved = join(dir, 'native');
+  mkdirSync(movable);
+  running = spawn(python, [script, '--fence', movable], { cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] });
+  const transferClosed = once(running, 'close');
+  await once(running.stdout, 'data');
+  renameSync(movable, moved);
+  const movedFence = () => spawnSync(python, [script, '--fence'], { cwd: moved, input: '', encoding: 'utf8', timeout: 10000 });
+  check('a stopped transfer retains the exclusive fence through directory relocation', movedFence().status !== 0);
+  running.stdin.end();
+  await transferClosed;
+  running = undefined;
+  check('a relocated directory releases the same fence after transfer', movedFence().status === 0);
   if (process.platform === 'win32') {
     const identityChecks = spawnSync(python, ['-c', `
 import importlib.util, json, pathlib, subprocess, sys, _winapi

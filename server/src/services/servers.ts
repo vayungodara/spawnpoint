@@ -1,8 +1,9 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PATHS } from '../config.js';
 import { craftyApi, type CraftyServer } from '../clients/crafty.js';
 import { detect, type Detection } from './detect.js';
+import { nativeRecord, transferRecord } from './native.js';
 
 export interface ServerInfo {
   id: string;
@@ -20,6 +21,7 @@ export function getActiveUuid(): string | null {
 }
 
 export function setActiveUuid(uuid: string): void {
+  mkdirSync(PATHS.shared, { recursive: true });
   writeFileSync(PATHS.activeServerFile, uuid, 'ascii');
 }
 
@@ -32,6 +34,17 @@ export const isServerId = (id: string): boolean => SERVER_ID.test(id);
     not a server id, so no caller can build a path from untrusted input. */
 export function serverDir(uuid: string): string {
   if (!SERVER_ID.test(uuid)) throw new Error('not a server id');
+  const owned = nativeRecord(uuid);
+  if (owned) {
+    if (!existsSync(owned.path)) throw new Error('the native server directory is missing; recovery required');
+    return owned.path;
+  }
+  const transfer = transferRecord(uuid);
+  if (transfer) {
+    const path = transfer.phase === 'committing' && existsSync(transfer.destination) ? transfer.destination : transfer.path;
+    if (!existsSync(path)) throw new Error('the transferring server directory is missing; recovery required');
+    return path;
+  }
   const reported = craftyApi.reportedPath(uuid);
   return reported && existsSync(reported) ? reported : join(PATHS.craftyServers, uuid);
 }

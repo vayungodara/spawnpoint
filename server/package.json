@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "tsc && node -e \"require('node:fs').copyFileSync('src/services/launchguard.py', 'dist/services/launchguard.py')\"",
+    "build": "tsc && node -e \"for(const f of ['launchguard.py','supervisor.py','nativeservice.py']) require('node:fs').copyFileSync('src/services/'+f, 'dist/services/'+f)\"",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },

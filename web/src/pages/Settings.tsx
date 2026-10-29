@@ -68,6 +68,15 @@ export default function Settings() {
     queryKey: ['settings-summary'],
     queryFn: () => api<Summary>('/api/settings/summary'),
   })
+  const { data: runtime } = useQuery({
+    queryKey: ['runtime'],
+    queryFn: () => api<{ mode: 'crafty' | 'standalone'; supervisor: boolean }>('/api/runtime'),
+    refetchInterval: 10_000,
+  })
+  const setRuntime = useMutation({
+    mutationFn: (mode: 'crafty' | 'standalone') => api('/api/runtime', { method: 'POST', body: JSON.stringify({ mode }) }),
+    onSuccess: () => qc.invalidateQueries(),
+  })
 
   const save = useMutation({
     mutationFn: (body: Record<string, unknown>) =>
@@ -96,6 +105,32 @@ export default function Settings() {
       </div>
 
       {msg && <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{msg}</div>}
+
+      <div className="block px-5 py-4">
+        <div className="flex items-center gap-2.5 mb-2 flex-wrap">
+          <Pi i="anvil" className="pi pi-s" />
+          <h2 className="font-extrabold">Server runtime</h2>
+          <span className="hud !opacity-100">{runtime?.supervisor ? 'SUPERVISOR CONNECTED' : 'SUPERVISOR OFFLINE'}</span>
+        </div>
+        <p className="text-text-dim text-sm mb-3 max-w-[70ch]">
+          The independent Spawnpoint service owns Java and its console even while this panel restarts.
+          Install the OS service first; choosing it here does not import or stop any Crafty server.
+          Existing ownership can only change through Config → Server runtime.
+        </p>
+        <div className="flex flex-wrap gap-3" role="group" aria-label="Creation and server-list backend">
+          <button className={`btn px-4 py-2 text-sm ${runtime?.mode === 'standalone' ? 'btn-emerald' : 'btn-block'}`}
+            aria-pressed={runtime?.mode === 'standalone'} disabled={!runtime?.supervisor || setRuntime.isPending}
+            onClick={() => setRuntime.mutate('standalone')}>Use Spawnpoint only</button>
+          <button className={`btn px-4 py-2 text-sm ${runtime?.mode === 'crafty' ? 'btn-emerald' : 'btn-block'}`}
+            aria-pressed={runtime?.mode === 'crafty'} disabled={setRuntime.isPending}
+            onClick={() => setRuntime.mutate('crafty')}>Use Crafty + imported servers</button>
+        </div>
+        <p className="text-text-dim text-xs mt-3 max-w-[70ch]">
+          This choice controls new-server creation and whether unimported Crafty servers appear.
+          Imported servers always stay with Spawnpoint, with no fallback to Crafty.
+        </p>
+        {setRuntime.error && <p role="alert" className="text-sm mt-3">{setRuntime.error.message}</p>}
+      </div>
 
       <div className="block px-5 py-4">
         <div className="flex items-center gap-2.5 mb-1">
@@ -152,7 +187,7 @@ export default function Settings() {
           </span>
         </div>
         <p className="text-text-dim text-xs mb-3">
-          {data.craftyUrl} — the panel drives everything through Crafty's API with a scoped token.
+          {data.craftyUrl} — the legacy adapter manages only servers not yet imported into Spawnpoint.
         </p>
         <button onClick={() => refetch()} disabled={isFetching} className="btn btn-block px-4 py-2 text-sm">
           {isFetching ? 'testing…' : 'Test connection'}

@@ -37,6 +37,8 @@ export interface Settings {
       OAuth token from `claude setup-token` (sk-ant-oat…) */
   anthropicApiKey: string | null;
   craftyUrl: string;
+  /** Existing installations retain Crafty until the owner chooses cutover. */
+  runtime: 'crafty' | 'standalone';
   /** contact appended to the Modrinth User-Agent, as their API etiquette asks */
   modrinthContact: string | null;
 }
@@ -48,6 +50,7 @@ const DEFAULTS: Settings = {
   curseforgeApiKey: null,
   anthropicApiKey: null,
   craftyUrl: 'https://localhost:8443',
+  runtime: 'crafty',
   modrinthContact: null,
 };
 

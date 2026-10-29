@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { PATHS } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
 import { isUnderMaintenance } from './maintenance.js';
+import { nativeRecord } from './native.js';
 
 // BOOT RESTORE — after the machine reboots (update-manager restarts, power
 // cuts), bring back every Minecraft server that was running before it went
@@ -64,6 +65,7 @@ async function poll(): Promise<void> {
   const servers = await craftyApi.listServers();
   const st: RunState = { servers: {}, updatedAt: new Date().toISOString() };
   for (const srv of servers) {
+    if (nativeRecord(srv.server_id)) continue; // desired state belongs to the independent owner
     try {
       st.servers[srv.server_id] = (await craftyApi.getStats(srv.server_id)).running === true;
     } catch {
@@ -107,7 +109,7 @@ async function restore(st: RunState | null, log: (m: string) => void): Promise<v
   }
   const known = new Set(servers.map((s) => s.server_id));
   for (const id of wanted) {
-    if (!known.has(id) || isUnderMaintenance(id)) continue;
+    if (!known.has(id) || nativeRecord(id) || isUnderMaintenance(id)) continue;
     try {
       const stats = await craftyApi.getStats(id);
       if (stats.running) continue; // deploy restart, not a reboot — leave it be

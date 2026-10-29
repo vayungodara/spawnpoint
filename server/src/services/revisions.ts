@@ -136,7 +136,7 @@ export function assertPackPathWritable(id: string, path: string): void {
     Kernel locks survive neither process death nor namespace boundaries: a
     crashed panel releases its lock, while the persisted marker blocks starts
     until journal recovery has finished. */
-export async function withStoppedRevision<T>(id: string, fn: () => Promise<T>): Promise<T> {
+export async function withRuntimeFence<T>(id: string, fn: () => Promise<T>): Promise<T> {
   const dir = serverDir(id);
   // Provision once and retain the inode: Crafty and the panel may run as
   // different users. Replacing it would split their kernel locks.
@@ -146,7 +146,7 @@ export async function withStoppedRevision<T>(id: string, fn: () => Promise<T>): 
     const { uid, gid } = statSync(dir);
     chownSync(fence, uid, gid);
   }
-  const child = spawn(process.platform === 'win32' ? 'python' : 'python3', [fileURLToPath(new URL('./launchguard.py', import.meta.url)), '--fence'], { cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.platform === 'win32' ? 'python' : 'python3', [fileURLToPath(new URL('./launchguard.py', import.meta.url)), '--fence', dir], { cwd: dirname(dir), stdio: ['pipe', 'pipe', 'pipe'] });
   let errors = '';
   child.stderr.on('data', (b: Buffer) => { errors += b.toString(); });
   const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
@@ -155,20 +155,26 @@ export async function withStoppedRevision<T>(id: string, fn: () => Promise<T>): 
     child.once('exit', () => reject(new Error(`the stopped-server fence is unavailable: ${errors.slice(0, 160)}`)));
     child.stdout.once('data', () => resolve());
   });
-  const marker = join(dir, '.spawnpoint-mutation');
   try {
+    return await fn();
+  } finally {
+    child.stdin.end();
+    await closed;
+  }
+}
+export async function withStoppedRevision<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  return withRuntimeFence(id, async () => {
+    const marker = join(serverDir(id), '.spawnpoint-mutation');
     const { fullyStopped } = await import('./maintenance.js');
     if (!await fullyStopped(id)) throw new Error('revision mutation requires a confirmed stopped server');
     writeFileAtomic(marker, 'journal recovery required before starting\n');
     stoppedFences.add(id);
-    const result = await fn();
-    rmSync(marker, { force: true });
-    return result;
-  } finally {
-    stoppedFences.delete(id);
-    child.stdin.end();
-    await closed;
-  }
+    try {
+      const result = await fn();
+      rmSync(marker, { force: true });
+      return result;
+    } finally { stoppedFences.delete(id); }
+  });
 }
 const stoppedFences = new Set<string>();
 export function assertRevisionMutation(id: string): void {

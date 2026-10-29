@@ -98,14 +98,19 @@ async function ensureJdkInner(feature: 21 | 25, log: (m: string) => void): Promi
     } else {
       await run('nice', ['-n', '10', 'tar', '-xzf', archive, '-C', staging]);
     }
-    const rootDir = readdirSync(staging).find((d) => d.startsWith('jdk-') && usableJdk(join(staging, d)));
+    const rootDir = readdirSync(staging).find((d) => d.startsWith('jdk-')
+      && (usableJdk(join(staging, d)) || usableJdk(join(staging, d, 'Contents', 'Home'))));
     if (!rootDir) {
       log('java: the downloaded archive contained no usable JDK — aborting');
       return false;
     }
+    const extracted = join(staging, rootDir);
+    const home = usableJdk(extracted) ? extracted : join(extracted, 'Contents', 'Home');
     // atomic move: javaFor prefix-matches any jdk-* the moment it appears,
-    // so a half-extracted JDK must never be visible under Tools/ itself
-    renameSync(join(staging, rootDir), join(tools, rootDir));
+    // so a half-extracted JDK must never be visible under Tools/ itself.
+    // macOS archives wrap the Java home in Contents/Home. Keep every caller
+    // on the same Tools/jdk-*/bin/java recipe rather than special-casing it.
+    renameSync(home, join(tools, rootDir));
     await chownToDirOwner(join(tools, rootDir));
     log(`java: Temurin ${feature} installed at Tools/${rootDir}`);
     return true;

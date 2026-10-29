@@ -7,11 +7,13 @@
 Website: [spawnpoint.vayun.net](https://spawnpoint.vayun.net)
 
 Spawnpoint is a web panel you run on the machine that hosts your Minecraft
-servers. It works alongside [Crafty Controller](https://craftycontrol.com/),
-which starts and supervises the server processes. Spawnpoint adds mod and
-plugin installs from Modrinth and CurseForge, new servers from modpacks, a
-config editor, world slots, backups and a file manager. Tested mod revisions
-currently support Fabric, with three promises:
+servers. Its independent OS service owns Java and the console, so servers keep
+running when the panel exits. Existing [Crafty Controller](https://craftycontrol.com/)
+installations can keep using Crafty or import stopped, certified servers one
+at a time. Spawnpoint includes mod and plugin installs from Modrinth and
+CurseForge, new servers from modpacks, a config editor, world slots, backups
+and a file manager. Tested revisions support Fabric and certified Forge and
+NeoForge recipes, with three promises:
 
 - **Friends get exactly the tested version.** A change stays out of the
   server and out of the friend pack until it passes, or until you approve
@@ -32,21 +34,21 @@ Installs, updates and jars uploaded into `mods/` collect into a candidate
 for that server. A few seconds after the last change, the candidate is
 tested:
 
-1. **Whole-pack dependency check** (Fabric and certified Forge versions).
+1. **Whole-pack dependency check** (Fabric and certified Forge and NeoForge versions).
    The solver reads native jar metadata, nested libraries and side constraints.
    It checks compatible version histories against your Minecraft, loader and
    Java versions, keeping existing versions where possible. Requested mods
    stay in the pack, and an exact version request stays pinned. Downloads
    must match their declared hashes and size before they join the candidate.
 2. **Server boot test.** A sandbox boots the server's own loader with the
-   candidate's mods. Forge must finish starting in a fresh disposable world,
+   candidate's mods. Forge and NeoForge must finish starting in a fresh disposable world,
    because its EULA check happens before mod initialization. Runtime and
    mixin failures still stop the change.
 3. **Client test** (servers with AutoModpack). A real Minecraft client boots
    with the files your friends would receive, then joins a throwaway server
    with the same mods and a fresh world. This uses
    [HeadlessMC](https://github.com/headlesshq/headlessmc) on Minecraft 1.20
-   and newer. The Fabric and certified Forge joins also run
+   and newer. The Fabric and certified Forge and NeoForge joins also run
    AutoModpack's own handshake and check that the client ends up with
    exactly the tested files.
 
@@ -57,19 +59,20 @@ could not be fully tested (the pack already fails, the test is unreliable,
 no JDK yet, not enough free memory, an unsupported loader) waits for you:
 approve the test gaps, test again, or discard. Unsupported launch recipes
 and failed hash checks cannot be waived. Locked Forge revisions currently
-support Minecraft 1.20.1 with Forge 47.4.28. Other Forge versions and NeoForge
-are not yet supported by locked revisions.
+support Minecraft 1.20.1 with Forge 47.4.28. NeoForge supports Minecraft 1.21.1
+with NeoForge 21.1.219. Other FML recipes are refused by locked revisions.
 
-Before the first revision, you must approve a required Crafty launch guard
+Before the first revision, you must approve a required launch guard
 and managed AutoModpack publication. The guard checks the locked files and
 Java before every start, including starts from Crafty itself. It also keeps
-a start from racing a pack swap. This requires Python 3 on the Crafty host.
+a start from racing a pack swap. This requires Python 3 on the server host.
 The current Fabric recipe supports an explicit Tools Java path, heap flags,
 and `-jar fabric.jar nogui`; custom launch recipes are refused.
-The Forge recipe uses the official installer's unchanged argument file and
-optional heap-only `user_jvm_args.txt`. Forge AutoModpack support requires the
-unmodified 4.0.7 build for 1.20.1, an `automodpack*.jar` filename and an explicit
-managed-publication config with self-updating disabled. Unknown custom mod
+The Forge and NeoForge recipes use the official installer's unchanged argument
+file and optional heap-only `user_jvm_args.txt`, with Tools Java 21.
+AutoModpack requires the unmodified 4.0.7 build for that loader and Minecraft
+version and an explicit managed-publication config with self-updating disabled.
+Unknown custom mod
 discovery remains inconclusive, never a feasible plan.
 Forge AutoModpack 4.0.7 cannot publish an empty pack. Restoring a pack that
 contains only the AutoModpack bootstrap stops with publication refused.
@@ -150,27 +153,31 @@ shader pack.
 ## Requirements
 
 - Node.js 22 or newer
-- [Crafty Controller](https://craftycontrol.com/) on the same machine
+- Python 3 for the supervisor and revision guard
 - Linux, macOS or Windows. Java downloads automatically (Temurin) the first
   time a server needs it.
 - On Linux, `zip` and `unzip` for world backups (`sudo apt install zip unzip`).
+- Optional: Crafty Controller on the same machine for existing installations.
 
 ## Install
 
-Install Crafty Controller first. Then:
+On Linux or macOS, run as the unprivileged account that will own your servers:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install.sh | bash
 ```
 
-The installer checks for Node 22, creates the layout under `~/minecraft`,
-builds the panel, starts it on port **25570**, and prints a setup link with a
-one-time setup code. The setup page asks for:
+The installer creates the layout under `~/minecraft`, builds the panel,
+installs the independent supervisor as a user service, and starts the panel
+on port **25570**. It prints a setup link with a one-time setup code.
+Existing Crafty connections keep their backend. Set `SPAWNPOINT_RUNTIME=crafty`
+to skip supervisor installation and connect Crafty instead.
 
-1. A **Crafty API key**. Create it in Crafty from a non-admin account that can
-   see the servers this panel should manage. (You can log in with a Crafty
-   username and password instead; the panel keeps the token Crafty returns
-   and does not store the password.)
+The setup page asks for:
+
+1. A **runtime**. Choose Spawnpoint to connect its installed OS service without
+   a Crafty account. For Crafty, paste an API key from a non-admin account that
+   can see your servers, or log in once to mint a token. The password is not stored.
 2. A **PIN** of 6 to 12 digits. Every browser needs it once every 30 days.
 3. Optional keys: CurseForge (adds their catalog) and a genie credential.
 
@@ -185,13 +192,88 @@ git clone https://github.com/vayungodara/spawnpoint
 cd spawnpoint
 npm ci
 npm run build
+python3 server/dist/services/nativeservice.py install --root /path/to/your/layout --node "$(command -v node)"
 SPAWNPOINT_ROOT=/path/to/your/layout node server/dist/index.js
 ```
 
-`SPAWNPOINT_ROOT` is the folder that holds `Crafty/servers`, `Shared/`,
+`SPAWNPOINT_ROOT` is the folder that holds `Servers/`, `Crafty/servers`, `Shared/`,
 `Tools/` and `Spawnpoint/`. The panel log prints the setup link on first
 start.
 </details>
+
+### Run the supervisor as an OS service
+
+Use absolute paths and a layout path without spaces. Run the panel as the
+layout's owner. Do not run Java as root or install a second owner for the same layout.
+
+- **Linux:** the default installer uses `systemctl --user`. To start before
+  login, enable lingering with `sudo loginctl enable-linger "$USER"`.
+  On a host without a user service manager, install a system unit instead:
+  `sudo python3 server/dist/services/nativeservice.py install --system --user "$USER" --root /path/to/layout --node "$(command -v node)"`.
+  The layout must belong to that unprivileged user. Inspect with
+  `systemctl status spawnpoint-supervisor.service` (add `--user` for a user unit).
+- **macOS:** the default installer creates the current user's
+  `com.spawnpoint.supervisor` LaunchAgent. It starts at login and stops at
+  logout. Keep that user logged in for unattended servers. Inspect with
+  `launchctl print gui/$(id -u)/com.spawnpoint.supervisor`.
+- **Windows:** install Python 3 and Node 22 machine-wide, build the checkout,
+  then run an elevated PowerShell command:
+  `python server/dist/services/nativeservice.py install --root C:/MinecraftServers --node "C:/Program Files/nodejs/node.exe"`.
+  Run the panel as the layout's installing user with `SPAWNPOINT_ROOT` set to
+  the same directory. SCM runs `SpawnpointSupervisor` at boot as its own virtual
+  service account, with access limited to the layout. Inspect with
+  `sc.exe queryex SpawnpointSupervisor`. An existing service is not replaced;
+  stop it and use `sc.exe config` to update executable paths.
+
+The installer waits for the service's authenticated health response and checks
+its PID against the OS service manager. Service output is in the journal on
+Linux and `<layout>/Spawnpoint/data/runtime/service.log` on macOS and Windows.
+The runtime directory contains a private IPC capability. Never publish it.
+Keep the checkout, Python, Node and Tools Java readable by the service account.
+
+Native creation currently supports Fabric 1.21.1 / 0.20.1, Forge 1.20.1 / 47.4.28,
+and NeoForge 1.21.1 / 21.1.219. Installers are hash-pinned. A durable creation
+job stays fenced until the whole modpack and client sync are configured.
+Required downloads must match their source hashes and sizes, including files
+already present on a retry. Missing or disabled required downloads keep the
+job failed and stopped. Optional CurseForge files can be skipped with a warning.
+Interrupted installs retry at most three times; failed jobs remain stopped
+for inspection. To create other recipes, choose Crafty in **Settings → Server runtime**.
+
+Set per-server autostart in **Config → Server runtime**. The owner restarts a
+crashed runtime at most three times in ten minutes. Explicit Stop disables
+crash recovery; autostart still applies on the next service startup if enabled.
+Console output is drained without a browser, with a bounded live tail and
+three retained files of up to 8 MB each. On Unix, force-killing an unresponsive
+server restarts the whole owner service to reap its descendants. Other desired
+servers then recover through their restart budgets.
+
+### Import a Crafty server
+
+1. Stop the server and finish all Crafty imports, updates and backups. Adopt
+   and certify a revision with its required launch guard.
+2. In **Config → Server runtime**, approve **Prepare Crafty import**. This
+   freezes the source launch command and disables autostart, crash recovery
+   and update watching. Before commit, **Cancel** restores those settings.
+3. Stop the entire local Crafty service or container and confirm its workers
+   have exited. This also stops its other servers. A refused web connection
+   alone does not prove worker exit; the panel requires your explicit confirmation.
+4. Approve the displayed revision and **Commit exact revision**. The panel
+   checks the closed ports, directory identity, runtime fence and exact sealed
+   bytes, then atomically moves the whole directory into `Servers/<uuid>` on
+   the same filesystem. Linked or external worlds and cross-volume moves are refused.
+   World confinement is checked again at commit and recovery. Import requires
+   plain `key=value` properties; escaped keys, continuations and alternate
+   separators must be normalized before preparation.
+5. If commit is interrupted, complete forward recovery in the same section.
+   Never re-enable the old Crafty record. After commit, restart Crafty if needed
+   and start the imported server from Spawnpoint.
+
+The world and UUID remain unchanged. No world restore occurs. The Crafty
+watchdog stays paused while any transfer journal exists. Imported servers
+never fall back to Crafty, even if the supervisor is offline. **Settings →
+Server runtime** controls new creation and whether unimported Crafty servers
+appear; changing that choice does not transfer ownership.
 
 ## Security
 

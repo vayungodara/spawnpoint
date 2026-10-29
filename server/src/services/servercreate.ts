@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PATHS } from '../config.js';
+import { PATHS, loadSettings } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
+import { nativeInstallJob, nativeInstallJobs, NATIVE_RECIPES, queueNativeInstall } from './nativeinstall.js';
 import * as modrinth from '../clients/modrinth.js';
 import * as curseforge from '../clients/curseforge.js';
 import {
@@ -10,10 +11,11 @@ import {
   installMrpackFile, installCurseforgeZipFile, inspectPackFile,
   type ModpackResult,
 } from './modpack.js';
-import { javaFor } from './servers.js';
+import { javaFor, serverDir } from './servers.js';
 import { patchProperties } from './properties.js';
 import { derivedRcon, suggestGamePort } from './ports.js';
 import { chownToDirOwner } from './platform.js';
+import { hashes } from './revisions.js';
 
 // One-click "create a server FROM a modpack": Crafty's wizard API builds the
 // base server (it downloads Fabric / runs the Forge installer itself), then
@@ -33,7 +35,7 @@ export interface CreateJob {
 const jobs = new Map<string, CreateJob>();
 
 export function getJob(id: string): CreateJob | undefined {
-  return jobs.get(id);
+  return nativeInstallJob(id) ?? jobs.get(id);
 }
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -128,6 +130,10 @@ function cmpMcDesc(a: string, b: string): number {
 }
 
 export async function listLoaderVersions(loader: string): Promise<string[]> {
+  if (loadSettings().runtime === 'standalone') {
+    const recipe = NATIVE_RECIPES[loader as keyof typeof NATIVE_RECIPES];
+    return recipe ? [recipe.mc] : [];
+  }
   if (!CRAFTY_TYPE[loader]) throw new Error(`unknown loader "${loader}"`);
   const hit = catalogCache.get(loader);
   if (hit && Date.now() - hit.at < 60 * 60_000) return hit.versions;
@@ -137,7 +143,7 @@ export async function listLoaderVersions(loader: string): Promise<string[]> {
 }
 
 export function listLoaders(): string[] {
-  return Object.keys(CRAFTY_TYPE);
+  return Object.keys(loadSettings().runtime === 'standalone' ? NATIVE_RECIPES : CRAFTY_TYPE);
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +178,7 @@ export async function finalizeServer(
   opts: { mc: string | null; memGb?: number; loader?: string | null; gamePort?: number },
 ): Promise<string[]> {
   const notes: string[] = [];
-  const dir = join(PATHS.craftyServers, serverId);
+  const dir = serverDir(serverId);
 
   // 0. Uniquify rcon.port. Crafty hands every new server the same rcon.port from
   //    its template, so two servers would silently share it and the genie's RCON
@@ -281,6 +287,7 @@ export function startCreateServer(opts: {
   mc: string;
   memGb?: number;
 }): { jobId: string } {
+  if (loadSettings().runtime === 'standalone') return queueNativeInstall(opts);
   const id = randomUUID().slice(0, 8);
   const job: CreateJob = {
     id, status: 'starting…', done: false, error: null,
@@ -392,7 +399,7 @@ async function buildPackServer(
 
   // wait for the loader install (Forge installer can take a few minutes)
   job.status = `installing ${meta.loader} ${meta.mc} (Crafty is working)…`;
-  const dir = join(PATHS.craftyServers, serverId);
+  const dir = serverDir(serverId);
   const deadline = Date.now() + 8 * 60_000;
   while (!loaderReady(dir, meta.loader)) {
     if (Date.now() > deadline) throw new Error(`${meta.loader} install did not finish within 8 min — check Crafty`);
@@ -426,7 +433,8 @@ export function startCreateFromModpack(opts: {
   source: string;
   memGb?: number;
 }): { jobId: string } {
-  const id = randomUUID().slice(0, 8);
+  const native = loadSettings().runtime === 'standalone';
+  const id = native ? randomUUID() : randomUUID().slice(0, 8);
   const job: CreateJob = {
     id, status: 'resolving pack…', done: false, error: null,
     serverId: null, packName: null, warnings: [],
@@ -436,6 +444,11 @@ export function startCreateFromModpack(opts: {
   (async () => {
     const meta = await resolvePack(opts.source, opts.projectId, opts.versionId);
     job.packName = meta.title;
+    if (native) {
+      queueNativeInstall({ id, name: opts.name ?? meta.title, loader: meta.loader, mc: meta.mc, memGb: opts.memGb,
+        pack: { source: opts.source === 'curseforge' ? 'curseforge' : 'modrinth', projectId: opts.projectId, versionId: meta.fileId } });
+      return;
+    }
     await buildPackServer(job, meta, opts, (serverId) =>
       opts.source === 'curseforge'
         ? installCurseforgeModpack(serverId, { modId: opts.projectId, fileId: meta.fileId })
@@ -466,7 +479,8 @@ export function startCreateFromPackFile(opts: {
   }
   if (!info.mc) return { error: 'the pack does not state its Minecraft version' };
 
-  const id = randomUUID().slice(0, 8);
+  const native = loadSettings().runtime === 'standalone';
+  const id = native ? randomUUID() : randomUUID().slice(0, 8);
   const job: CreateJob = {
     id, status: 'reading the uploaded pack…', done: false, error: null,
     serverId: null, packName: info.name, warnings: [],
@@ -474,6 +488,11 @@ export function startCreateFromPackFile(opts: {
   jobs.set(id, job);
 
   (async () => {
+    if (native) {
+      queueNativeInstall({ id, name: opts.name ?? info.name, loader: info.loader!, mc: info.mc!, memGb: opts.memGb,
+        pack: { source: 'file', kind: info.kind, path: opts.path, sha512: (await hashes(opts.path)).sha512 } });
+      return;
+    }
     await buildPackServer(job, { loader: info.loader!, mc: info.mc!, title: info.name }, opts, (serverId) =>
       info.kind === 'curseforge'
         ? installCurseforgeZipFile(serverId, opts.path)
@@ -493,5 +512,6 @@ export function startCreateFromPackFile(opts: {
 /** All jobs this panel run knows about, newest first — the Servers page shows
     in-progress creations globally, so a server never "just appears". */
 export function listJobs(): CreateJob[] {
-  return [...jobs.values()].reverse();
+  const native = nativeInstallJobs();
+  return [...[...jobs.values()].filter((j) => !native.some((n) => n.id === j.id)), ...native].reverse();
 }

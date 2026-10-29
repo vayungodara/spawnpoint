@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { PATHS, craftyToken } from '../config.js';
-import { craftyApi } from '../clients/crafty.js';
+import { PATHS, craftyToken, loadSettings } from '../config.js';
+import { craftyApi } from '../clients/crafty-adapter.js';
 import { rconCommand } from '../clients/rcon.js';
+import { transferRecords } from './native.js';
 
 // CRAFTY WATCHDOG — Crafty can wedge silently: port 8443 keeps listening
 // but its accept queue fills and every panel command times out, so a
@@ -27,7 +28,10 @@ let lastRestartAt = 0;
 async function probe(): Promise<boolean> {
   // pre-wizard install: no token means "not connected yet", not "wedged" —
   // a doctor must not restart a Crafty the panel was never introduced to
-  if (!craftyToken()) return true;
+  if (loadSettings().runtime === 'standalone' || !craftyToken()) return true;
+  // Import deliberately stops the whole source service. Never resurrect its
+  // queued writers during an ownership cutover or interrupted recovery.
+  if (transferRecords().length) return true;
   try {
     await Promise.race([
       craftyApi.listServers(),
@@ -75,14 +79,16 @@ export function startCraftyDoctor(log: (msg: string) => void): void {
       log('craftydoctor: Crafty is wedged but players are ONLINE — waiting (a restart would kick them)');
       return;
     }
-    log(`craftydoctor: Crafty unresponsive ${consecutiveFails}x and nobody online — restarting crafty.service`);
-    lastRestartAt = Date.now();
-    consecutiveFails = 0;
     if (process.platform !== 'linux') {
       log('craftydoctor: Crafty looks wedged but auto-restart only knows systemd — restart Crafty manually');
       return;
     }
     try {
+      // Recheck after every asynchronous probe, with no await before restart.
+      if (loadSettings().runtime === 'standalone' || transferRecords().length) return;
+      log(`craftydoctor: Crafty unresponsive ${consecutiveFails}x and nobody online — restarting crafty.service`);
+      lastRestartAt = Date.now();
+      consecutiveFails = 0;
       execFileSync('systemctl', ['restart', 'crafty'], { timeout: 60_000 });
       log('craftydoctor: crafty.service restarted');
     } catch (e) {

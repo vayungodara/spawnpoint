@@ -190,7 +190,7 @@ function genieSound(player: string, s: keyof typeof SOUND): string {
 }
 
 function readNewLines(id: string): string[] {
-  const file = join(PATHS.craftyServers, id, 'logs', 'latest.log');
+  const file = join(serverDir(id), 'logs', 'latest.log');
   if (!existsSync(file)) return [];
   const size = statSync(file).size;
   let off = offsets.get(id);

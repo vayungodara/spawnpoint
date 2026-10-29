@@ -8,13 +8,16 @@ import { listServers, setActiveUuid, getActiveUuid, serverDir, pinJavaFor } from
 import { readProperties, patchProperties } from '../services/properties.js';
 import { setOverride, detect } from '../services/detect.js';
 import { serverPhase } from '../services/phase.js';
-import { loadSettings } from '../config.js';
+import { loadSettings, saveSettings } from '../config.js';
 import { markRunning } from '../services/bootrestore.js';
 import { applyPending, listPending } from '../services/pendingmods.js';
 import { derivedRcon } from '../services/ports.js';
 import { deleteServer } from '../services/serverdelete.js';
 import { maintenanceOf, busyReason, clearInterrupted, beginMaintenance, endMaintenance } from '../services/maintenance.js';
 import { restartServer, startServer } from '../services/promote.js';
+import { nativeRecord, nativeRecords, supervisor, transferRecord } from '../services/native.js';
+import { nativeInstallJob } from '../services/nativeinstall.js';
+import { prepareCraftyImport, commitCraftyImport, abortCraftyImport } from '../services/nativeimport.js';
 
 /** Wait for the JVM to actually let go of its jars, then apply what the player
  *  queued. Crafty reports "stopped" the moment the process exits, but Windows can
@@ -41,7 +44,7 @@ async function applyWhenDown(id: string, timeoutMs = 90_000): Promise<number> {
 export default async function serverRoutes(app: FastifyInstance) {
   app.get('/api/servers', async (_req, reply) => {
     try {
-      return { servers: await listServers(), active: getActiveUuid() };
+      return { servers: await listServers(), active: getActiveUuid(), warning: craftyApi.listingError };
     } catch (e) {
       // pre-setup there is no Crafty token yet — that's a state, not a 500
       if (String(e).includes('No Crafty API token')) {
@@ -100,6 +103,8 @@ export default async function serverRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const busy = busyReason(req.params.id);
       if (busy) return reply.code(409).send({ error: busy });
+      const install = nativeInstallJob(req.params.id);
+      if (req.body.action !== 'stop' && install && install.phase !== 'done') return reply.code(409).send({ error: 'finish or recover the complete server installation before starting it' });
       // Mod changes the player made while the server was running were queued
       // (Windows locks loaded jars). The server is down NOW, so apply them
       // before it comes back up — a disable requested mid-game takes effect on
@@ -235,4 +240,40 @@ export default async function serverRoutes(app: FastifyInstance) {
     return { url: loadSettings().craftyUrl.replace('localhost', host) };
   });
 
+  app.get('/api/runtime', async () => ({
+    mode: loadSettings().runtime,
+    supervisor: await supervisor('health').then(() => true, () => false),
+    native: nativeRecords().map((s) => ({ id: s.server_id, name: s.server_name, autoStart: s.auto_start, blocked: s.blocked })),
+  }));
+  app.post<{ Body: { mode: 'crafty' | 'standalone' } }>('/api/runtime', async (req, reply) => {
+    if (!['crafty', 'standalone'].includes(req.body?.mode)) return reply.code(400).send({ error: 'choose crafty or standalone' });
+    if (req.body.mode === 'standalone') await supervisor('health');
+    const settings = loadSettings();
+    settings.runtime = req.body.mode;
+    saveSettings(settings);
+    return { ok: true };
+  });
+  app.get<{ Params: { id: string } }>('/api/servers/:id/runtime', async (req) => {
+    const owned = nativeRecord(req.params.id), plan = transferRecord(req.params.id);
+    return { owner: owned ? 'standalone' : 'crafty', autoStart: owned?.auto_start, blocked: owned?.blocked,
+      transfer: plan ? { phase: plan.phase, revision: plan.revision } : null };
+  });
+  app.put<{ Params: { id: string }; Body: { autoStart: boolean } }>('/api/servers/:id/runtime', async (req, reply) => {
+    if (!nativeRecord(req.params.id) || typeof req.body?.autoStart !== 'boolean') return reply.code(400).send({ error: 'a native server and an explicit autostart choice are required' });
+    await craftyApi.patchServer(req.params.id, { auto_start: req.body.autoStart });
+    return { ok: true };
+  });
+  app.post<{ Params: { id: string }; Body: { action: 'prepare' | 'commit' | 'abort'; revision?: string; approve?: boolean; craftyStopped?: boolean } }>(
+    '/api/servers/:id/runtime/import', async (req, reply) => {
+      if (req.body?.approve !== true) return reply.code(409).send({ error: 'explicit ownership-transfer consent is required; worlds are never restored' });
+      if (req.body.action === 'commit' && req.body.craftyStopped !== true) return reply.code(409).send({ error: 'confirm the entire Crafty service or container and its workers have exited; a closed API port alone is not proof' });
+      try {
+        const id = req.params.id;
+        if (req.body.action === 'prepare') return { ok: true, revision: (await prepareCraftyImport(id)).revision };
+        if (req.body.action === 'commit') await commitCraftyImport(id, req.body.revision ?? '');
+        else if (req.body.action === 'abort') await abortCraftyImport(id);
+        else return reply.code(400).send({ error: 'choose prepare, commit or abort' });
+        return { ok: true };
+      } catch (error) { return reply.code(409).send({ error: String(error) }); }
+    });
 }

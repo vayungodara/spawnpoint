@@ -1,7 +1,8 @@
 # Working on Spawnpoint
 
-The panel is a Node.js/TypeScript server and a React/Vite web app. Crafty owns
-the Minecraft processes. Read `ARCHITECTURE.md` before changing pack tests,
+The panel is a Node.js/TypeScript server and a React/Vite web app. The independent
+supervisor owns native Minecraft processes; Crafty retains unimported servers.
+Read `ARCHITECTURE.md` before changing pack tests,
 promotion, publication, or process ownership.
 
 ## Checks
@@ -11,6 +12,7 @@ Run `npm ci` and `npm run build`, then:
 ```sh
 node .github/smoke-boot.mjs
 node .github/wizard-e2e.mjs
+node .github/native-runtime.mjs
 node .github/revision-guard.mjs
 node .github/publication-guard.mjs
 node .github/solver-test.mjs
@@ -28,12 +30,23 @@ suppress them to make a change look green.
 In a seeded orb, prepend the installed `Tools/jdk-21…/bin` directory to
 `PATH` for the installer checks. The setup script installs Java there.
 
+CI also runs `node .github/native-runtime.mjs --service` on each OS. This
+installs and removes a disposable systemd unit, LaunchAgent or SCM service,
+and refuses to replace an existing service. It uses Node as the Java stand-in;
+it does not replace real Minecraft lifecycle proof. Windows requires an elevated
+runner. A Linux system unit uses the current unprivileged account. The test
+must start with no runtime directory so fresh service-account permissions are exercised.
+
 ## Disposable orb integration environment
 
 `.agents/setup` installs prerequisites, JDKs 25 and 21, HeadlessMC and locked
 npm dependencies, then builds the panel. It is safe to rerun. Start supervised
 services with `amp orb services ensure`. The `sp` service exposes the panel
 through an Amp portal. Use its returned URL for user review.
+The disposable `owner` service runs the same packaged supervisor without OS
+installation. If testing the real systemd installer, stop `owner` first and do
+not run `services ensure` until the system unit is removed. Never run two owners
+against one layout.
 
 On a fresh orb only, run:
 

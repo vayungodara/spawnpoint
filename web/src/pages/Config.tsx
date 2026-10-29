@@ -62,6 +62,64 @@ function Section({ tag, title, children }: { tag: string; title: string; childre
   )
 }
 
+function RuntimeSection({ id }: { id: string }) {
+  const qc = useQueryClient()
+  const [approve, setApprove] = useState(false)
+  const [craftyStopped, setCraftyStopped] = useState(false)
+  const { data: runtime, error } = useQuery({
+    queryKey: ['server-runtime', id],
+    queryFn: () => api<{ owner: 'crafty' | 'standalone'; autoStart?: boolean; blocked?: string; transfer: { phase: string; revision: string } | null }>(`/api/servers/${id}/runtime`),
+    refetchInterval: 5000,
+  })
+  const change = useMutation({
+    mutationFn: (body: { autoStart: boolean } | { action: string; revision?: string; approve: boolean; craftyStopped?: boolean }) =>
+      api(`/api/servers/${id}/runtime${'action' in body ? '/import' : ''}`, { method: 'action' in body ? 'POST' : 'PUT', body: JSON.stringify(body) }),
+    onSuccess: () => { setApprove(false); setCraftyStopped(false); qc.invalidateQueries() },
+  })
+  return (
+    <div className="block px-5 py-4">
+      <h2 className="font-extrabold mb-2">Server runtime</h2>
+      {!runtime && <p className="text-sm">{error ? error.message : 'Checking ownership…'}</p>}
+      {runtime?.owner === 'standalone' && !runtime.transfer ? <>
+        <p className="text-text-dim text-sm max-w-[68ch]">Spawnpoint owns this server independently of the panel. Crafty is never used as a fallback.</p>
+        <label className="flex items-start gap-3 text-sm mt-3">
+          <input type="checkbox" className="mt-1" checked={runtime.autoStart === true} disabled={change.isPending}
+            onChange={(e) => change.mutate({ autoStart: e.target.checked })} />
+          <span>Start when the supervisor service starts<br /><span className="text-xs text-text-dim">Includes OS startup and service restarts. Interrupted transactions still block boot.</span></span>
+        </label>
+        {runtime.blocked && <p role="alert" className="text-sm mt-3">Automatic start paused: {runtime.blocked}. Resolve this, then use Start on the Dashboard.</p>}
+      </> : runtime && <>
+        <p className="text-text-dim text-sm max-w-[68ch]">
+          Import a stopped, revision-certified Crafty server. Its UUID, exact pack and world stay intact;
+          the directory moves into native storage on the same filesystem. No world restore occurs.
+        </p>
+        {runtime.transfer && <div className="mt-3 text-sm space-y-2">
+          <p className="font-bold">{runtime.transfer.phase === 'preparing' ? 'Freeze interrupted — cancel and retry preparation.' : runtime.transfer.phase === 'committing' ? 'Commit interrupted — complete forward recovery.' : 'Crafty launch settings frozen. Stop the entire local Crafty service before committing.'}</p>
+          <p className="text-text-dim">Stopping Crafty also stops its other servers. It can be restarted after this server has moved.</p>
+          <p className="break-all font-mono text-xs">Revision: {runtime.transfer.revision}</p>
+        </div>}
+        <label className="flex items-start gap-3 text-sm mt-4 max-w-[68ch]">
+          <input type="checkbox" className="mt-1" checked={approve} onChange={(e) => setApprove(e.target.checked)} />
+          <span>{runtime.transfer ? 'I approve importing this exact revision and leaving this server disabled in Crafty.' : 'I approve freezing this stopped server’s Crafty launch settings for transfer.'}</span>
+        </label>
+        {runtime.transfer && <label className="flex items-start gap-3 text-sm mt-3 max-w-[68ch]">
+          <input type="checkbox" className="mt-1" checked={craftyStopped} onChange={(e) => setCraftyStopped(e.target.checked)} />
+          <span>I checked that the entire Crafty service or container and its workers have exited. A closed web port is not enough.</span>
+        </label>}
+        <div className="flex flex-wrap gap-3 mt-3">
+          <button className="btn btn-emerald px-4 py-2 text-sm" disabled={!approve || change.isPending || runtime.transfer?.phase === 'preparing' || (!!runtime.transfer && !craftyStopped)}
+            onClick={() => change.mutate({ action: runtime.transfer ? 'commit' : 'prepare', approve: true, revision: runtime.transfer?.revision, craftyStopped })}>
+            {change.isPending ? 'Saving transfer…' : runtime.transfer ? 'Commit exact revision' : 'Prepare Crafty import'}
+          </button>
+          {runtime.transfer && runtime.transfer.phase !== 'committing' && <button className="btn btn-block px-4 py-2 text-sm" disabled={change.isPending}
+            onClick={() => change.mutate({ action: 'abort', approve: true })}>Cancel and restore Crafty settings</button>}
+        </div>
+      </>}
+      {change.error && <p role="alert" className="text-sm mt-3 break-words">{change.error.message}</p>}
+    </div>
+  )
+}
+
 export default function Config() {
   const { data: serversData } = useServers()
   const active = serversData?.servers.find((s) => s.active)
@@ -226,6 +284,8 @@ export default function Config() {
           Changes save to server.properties; most need a restart.
         </p>
       </div>
+
+      <RuntimeSection key={id} id={id!} />
 
       {audit && !audit.clean && (
         // Danger banner idiom (matches Servers.tsx / Dashboard.tsx): the red is

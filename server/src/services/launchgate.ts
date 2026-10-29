@@ -177,14 +177,20 @@ async function waitForQuiet(onStatus: (d: string) => void): Promise<void> {
   const { craftyApi } = await import('../clients/crafty.js');
   for (;;) {
     let online = 0;
+    let unknown = false;
     try {
       for (const s of await craftyApi.listServers()) {
         const st = await craftyApi.getStats(s.server_id).catch(() => null);
-        if (st?.running) online += st.online ?? 0;
+        if (!st) unknown = true;
+        if (st?.running) {
+          if (st.online < 0) unknown = true;
+          else online += st.online ?? 0;
+        }
       }
-    } catch { return; }
-    if (online === 0) return;
-    onStatus(`waiting for ${online} player(s) to log off before the client test`);
+      if (craftyApi.listingError) unknown = true;
+    } catch { unknown = true; }
+    if (online === 0 && !unknown) return;
+    onStatus(unknown ? 'waiting for a known player count before the client test' : `waiting for ${online} player(s) to log off before the client test`);
     await new Promise((r) => setTimeout(r, 60_000));
   }
 }

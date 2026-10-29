@@ -16,6 +16,9 @@ services:
       exec sudo docker wait crafty
     port: 8443
     platforms: [linux]
+  owner:
+    command: SPAWNPOINT_ROOT=/srv/sp SPAWNPOINT_NODE="$(command -v node)" python3 server/dist/services/supervisor.py
+    platforms: [linux]
   sp:
     command: SPAWNPOINT_ROOT=/srv/sp node server/dist/index.js
     port: 25570

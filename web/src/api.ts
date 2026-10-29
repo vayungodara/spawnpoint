@@ -49,7 +49,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export function useServers() {
   return useQuery({
     queryKey: ['servers'],
-    queryFn: () => api<{ servers: ServerInfo[]; active: string | null }>('/api/servers'),
+    queryFn: () => api<{ servers: ServerInfo[]; active: string | null; warning?: string }>('/api/servers'),
     refetchInterval: 10_000,
   })
 }

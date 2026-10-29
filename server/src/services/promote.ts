@@ -102,10 +102,10 @@ export function requestPromotion(id: string, action: Promotion['action'], txn: s
 
 /** All panel-owned starts (including maintenance and crash recovery) pass
     through Crafty's client hook. Their verification survives panel restarts. */
-export function watchStart(id: string): void {
+export function watchStart(id: string, startedAt = Date.now()): void {
   const { active } = revisionState(id);
   if (!active || promotion(id)) return;
-  save(id, { action: 'start', txn: active, stage: 'applied', since: new Date().toISOString(), startedAt: Date.now() });
+  save(id, { action: 'start', txn: active, stage: 'applied', since: new Date().toISOString(), startedAt });
   schedule(panelLog);
 }
 

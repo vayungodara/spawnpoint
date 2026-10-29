@@ -1,13 +1,15 @@
 import AdmZip from 'adm-zip';
-import { existsSync, mkdirSync, writeFileSync, renameSync, rmSync, cpSync, statSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, writeFileSync, renameSync, rmSync, cpSync, statSync } from 'node:fs';
 import { join, dirname, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { serverDir } from './servers.js';
 import { detect } from './detect.js';
 import * as modrinth from '../clients/modrinth.js';
 import * as curseforge from '../clients/curseforge.js';
 import { chownToDirOwner } from './platform.js';
-import { assertUnsealed } from './revisions.js';
+import { assertUnsealed, hashes } from './revisions.js';
 
 /** Is `target` really inside `root`? A bare startsWith() accepts a SIBLING
     directory that merely shares the prefix (…/<uuid> vs …/<uuid>-evil) —
@@ -36,6 +38,31 @@ function extractSubtree(zip: AdmZip, folder: string, extractRoot: string): boole
   return any;
 }
 
+/** A retry may reuse exact bytes, never a same-named partial or stale file. */
+async function installPackFile(dest: string, url: string, size: number, expected: { sha1?: string; sha512?: string }): Promise<void> {
+  if ((!expected?.sha1 && !expected?.sha512) || !Number.isSafeInteger(size) || size < 0) throw new Error(`missing checksum or size for ${dest}`);
+  const part = `${dest}.part`;
+  let path = dest;
+  try {
+    if (!existsSync(dest)) {
+      const dl = await fetch(url, { signal: AbortSignal.timeout(120_000), headers: { 'user-agent': 'spawnpoint/1.0' } });
+      if (!dl.ok || !dl.body) throw new Error(`download failed: ${dest} (${dl.status})`);
+      mkdirSync(dirname(dest), { recursive: true });
+      let seen = 0;
+      const capped = new Transform({ transform(chunk, _encoding, callback) {
+        seen += chunk.length;
+        callback(seen > size ? new Error(`download exceeds declared size: ${dest}`) : null, chunk);
+      } });
+      await pipeline(Readable.fromWeb(dl.body as import('node:stream/web').ReadableStream), capped, createWriteStream(part));
+      path = part;
+    }
+    const actual = await hashes(path);
+    if (actual.size !== size || (expected.sha1 && actual.sha1 !== expected.sha1.toLowerCase())
+      || (expected.sha512 && actual.sha512 !== expected.sha512.toLowerCase())) throw new Error(`checksum or size mismatch: ${dest}`);
+    if (path === part) renameSync(part, dest);
+  } finally { rmSync(part, { force: true }); }
+}
+
 // Installs a Modrinth modpack (.mrpack) into a newly created server (servercreate.ts):
 //  - downloads every server-side file from the pack index into the server dir
 //  - applies overrides/ and server-overrides/ (configs, datapacks, etc.)
@@ -49,6 +76,7 @@ interface MrpackIndex {
     path: string;
     downloads: string[];
     fileSize: number;
+    hashes: { sha1?: string; sha512?: string };
     env?: { client: string; server: string };
   }[];
 }
@@ -137,12 +165,10 @@ export async function installModpack(
   const file = version.files.find((f) => f.primary) ?? version.files[0];
   if (!file) return { error: 'pack version has no file' };
 
-  // download the .mrpack
-  const res = await fetch(file.url, { headers: { 'user-agent': 'spawnpoint/1.0' } });
-  if (!res.ok) return { error: `download failed (${res.status})` };
+  // Verify the exact carrier too: its overrides are part of the chosen pack.
   const tmp = join(tmpdir(), `spawnpoint-${Date.now()}.mrpack`);
-  writeFileSync(tmp, Buffer.from(await res.arrayBuffer()));
   try {
+    await installPackFile(tmp, file.url, file.size, file.hashes);
     return await installMrpackFile(serverUuid, tmp);
   } finally {
     rmSync(tmp, { force: true });
@@ -188,23 +214,9 @@ export async function installMrpackFile(
       }
       // path confinement: no absolute paths or ..
       const dest = resolve(dir, f.path);
-      if (!isInside(dir, dest)) {
-        warnings.push(`skipped suspicious path: ${f.path}`);
-        continue;
-      }
-      mkdirSync(dirname(dest), { recursive: true });
-      if (existsSync(dest)) {
-        installed++;
-        continue;
-      }
-      const dl = await fetch(f.downloads[0], { headers: { 'user-agent': 'spawnpoint/1.0' } });
-      if (!dl.ok) {
-        warnings.push(`failed: ${f.path} (${dl.status})`);
-        continue;
-      }
-      const part = `${dest}.part`;
-      writeFileSync(part, Buffer.from(await dl.arrayBuffer()));
-      renameSync(part, dest);
+      if (!isInside(dir, dest)) return { error: `suspicious required path: ${f.path}` };
+      try { await installPackFile(dest, f.downloads[0], f.fileSize, f.hashes); }
+      catch (error) { return { error: String(error) }; }
       installed++;
     }
 
@@ -218,6 +230,11 @@ export async function installMrpackFile(
       overridesApplied = true;
     }
 
+    if (overridesApplied) {
+      try {
+        for (const f of index.files.filter((f) => f.env?.server !== 'unsupported')) await installPackFile(resolve(dir, f.path), f.downloads[0], f.fileSize, f.hashes);
+      } catch (error) { return { error: String(error) }; }
+    }
     await chownToDirOwner(dir); // panel is root, the server is not — see platform.ts
     return { name: index.name, installed, skippedClientOnly, overridesApplied, warnings };
   }
@@ -256,11 +273,9 @@ export async function installCurseforgeModpack(
     return { error: 'The pack author disabled API downloads — download it from curseforge.com and install manually.' };
   }
 
-  const res = await fetch(file.downloadUrl, { headers: { 'user-agent': 'spawnpoint/1.0' } });
-  if (!res.ok) return { error: `download failed (${res.status})` };
   const tmp = join(tmpdir(), `spawnpoint-${Date.now()}.zip`);
-  writeFileSync(tmp, Buffer.from(await res.arrayBuffer()));
   try {
+    await installPackFile(tmp, file.downloadUrl, file.fileLength, { sha1: file.hashes.find((h) => h.algo === 1)?.value });
     return await installCurseforgeZipFile(serverUuid, tmp);
   } finally {
     rmSync(tmp, { force: true });
@@ -269,8 +284,8 @@ export async function installCurseforgeModpack(
 
 /** Install a LOCAL CurseForge client zip (manifest.json + overrides/) into an
     existing server. Mod downloads still come from the CF API — the zip only
-    carries references, so packs whose authors disabled API downloads will
-    surface per-file warnings just like the search flow. */
+    carries references. Missing required files keep creation fenced, including
+    files whose authors disabled API downloads. */
 export async function installCurseforgeZipFile(
   serverUuid: string,
   zipPath: string,
@@ -303,31 +318,22 @@ export async function installCurseforgeZipFile(
     let installed = 0;
     for (const ref of manifest.files) {
       const meta = byId.get(ref.fileID);
-      if (!meta) {
-        warnings.push(`file ${ref.fileID} not found on CurseForge`);
+      if (!meta || !meta.downloadUrl) {
+        const error = !meta ? `file ${ref.fileID} not found on CurseForge`
+          : `${meta.fileName}: author disabled API downloads — install manually from curseforge.com`;
+        if (ref.required !== false) return { error };
+        warnings.push(error);
         continue;
       }
-      if (!meta.downloadUrl) {
-        warnings.push(`${meta.fileName}: author disabled API downloads — install manually from curseforge.com`);
-        continue;
-      }
+      if (meta.modId !== ref.projectID) return { error: `CurseForge file ${ref.fileID} belongs to another project` };
       const dest = resolve(modsDir, meta.fileName);
-      if (!isInside(modsDir, dest)) {
-        warnings.push(`skipped suspicious filename: ${meta.fileName}`);
+      if (!isInside(modsDir, dest)) return { error: `suspicious filename: ${meta.fileName}` };
+      try { await installPackFile(dest, meta.downloadUrl, meta.fileLength, { sha1: meta.hashes.find((h) => h.algo === 1)?.value }); }
+      catch (error) {
+        if (ref.required !== false) return { error: String(error) };
+        warnings.push(String(error));
         continue;
       }
-      if (existsSync(dest)) {
-        installed++;
-        continue;
-      }
-      const dl = await fetch(meta.downloadUrl, { headers: { 'user-agent': 'spawnpoint/1.0' } });
-      if (!dl.ok) {
-        warnings.push(`failed: ${meta.fileName} (${dl.status})`);
-        continue;
-      }
-      const part = `${dest}.part`;
-      writeFileSync(part, Buffer.from(await dl.arrayBuffer()));
-      renameSync(part, dest);
       installed++;
     }
 
@@ -343,6 +349,14 @@ export async function installCurseforgeZipFile(
       }
     }
 
+    if (overridesApplied) {
+      try {
+        for (const ref of manifest.files.filter((f) => f.required !== false)) {
+          const meta = byId.get(ref.fileID)!;
+          await installPackFile(resolve(modsDir, meta.fileName), meta.downloadUrl!, meta.fileLength, { sha1: meta.hashes.find((h) => h.algo === 1)?.value });
+        }
+      } catch (error) { return { error: String(error) }; }
+    }
     warnings.push(
       "CF packs don't tag client-only mods — if the server crashes on boot, disable the client-only ones in Content → Installed",
     );

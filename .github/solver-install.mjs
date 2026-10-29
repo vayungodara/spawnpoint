@@ -25,6 +25,9 @@ const { NetworkCatalog } = await tsImport('../server/src/services/solver/catalog
 const { repairCandidate } = await tsImport('../server/src/services/repairs.ts', import.meta.url);
 const { setOverride } = await tsImport('../server/src/services/detect.ts', import.meta.url);
 const { revisionDir, setRevisionState } = await tsImport('../server/src/services/revisions.ts', import.meta.url);
+const { installMrpackFile, installCurseforgeZipFile } = await tsImport('../server/src/services/modpack.ts', import.meta.url);
+const { ensureJdk } = await tsImport('../server/src/services/temurin.ts', import.meta.url);
+const { javaFor } = await tsImport('../server/src/services/servers.ts', import.meta.url);
 const { PATHS } = await tsImport('../server/src/config.ts', import.meta.url);
 mkdirSync(join(root, 'Tools'), { recursive: true });
 symlinkSync(javaHome, join(root, 'Tools', 'jdk-25-fixture'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -555,6 +558,62 @@ try {
     && candidate(runtime.id).repairs[0].kind === 'wrong-java' && candidateSet(runtime.id, candidate(runtime.id)).serverJars.length === 1
     && runtime.bytes() === '[]');
   discard(runtime.id);
+
+  const pack = fixture([]), packPath = join(root, 'required.mrpack'), artifact = lib1.files[0];
+  const packIndex = { formatVersion: 1, name: 'required files', dependencies: { minecraft: '1.21.1', 'fabric-loader': '0.20.1' },
+    files: [{ path: 'mods/required.jar', downloads: [artifact.url], fileSize: artifact.size, hashes: artifact.hashes }] };
+  const writePack = () => { const zip = new AdmZip(); zip.addFile('modrinth.index.json', Buffer.from(JSON.stringify(packIndex))); zip.writeZip(packPath); };
+  writePack();
+  const validPack = await installMrpackFile(pack.id, packPath);
+  check('new modpacks install exact requested artifacts and can resume from verified bytes', !validPack.error && validPack.installed === 1
+    && !(await installMrpackFile(pack.id, packPath)).error && sha(readFileSync(join(pack.dir, 'mods/required.jar')), 'sha512') === artifact.hashes.sha512);
+  writeFileSync(join(pack.dir, 'mods/required.jar'), 'stale');
+  check('a same-named stale file cannot make an incomplete modpack ready', (await installMrpackFile(pack.id, packPath)).error?.includes('checksum or size mismatch'));
+  rmSync(join(pack.dir, 'mods/required.jar'));
+  packIndex.files[0].hashes = { ...artifact.hashes, sha512: '0'.repeat(128) }; writePack();
+  check('corrupt modpack downloads are refused without exposing partial jars', (await installMrpackFile(pack.id, packPath)).error?.includes('checksum')
+    && !existsSync(join(pack.dir, 'mods/required.jar')) && !existsSync(join(pack.dir, 'mods/required.jar.part')));
+  packIndex.files[0].hashes = artifact.hashes; writePack();
+  const conflictingOverrides = new AdmZip(packPath); conflictingOverrides.addFile('server-overrides/mods/required.jar', Buffer.from('conflicting override')); conflictingOverrides.writeZip(packPath);
+  check('overrides cannot replace a hash-locked required mod unnoticed', (await installMrpackFile(pack.id, packPath)).error?.includes('checksum or size mismatch'));
+  rmSync(join(pack.dir, 'mods/required.jar'));
+  packIndex.files[0].hashes = artifact.hashes; packIndex.files[0].downloads = ['https://fixture.invalid/v2/version/missing']; writePack();
+  check('HTTP download failures remain errors rather than partial success', (await installMrpackFile(pack.id, packPath)).error?.includes('404'));
+
+  const cfPack = join(root, 'required.zip');
+  for (const [required, meta] of [[true, null], [true, { id: 701, modId: 702, fileName: 'required.jar', downloadUrl: null }], [false, null],
+    [true, { id: 701, modId: 702, fileName: 'cf-required.jar', downloadUrl: artifact.url, fileLength: artifact.size, hashes: [{ algo: 1, value: artifact.hashes.sha1 }] }]]) {
+    const zip = new AdmZip();
+    zip.addFile('manifest.json', Buffer.from(JSON.stringify({ name: 'CF required files', minecraft: { version: '1.21.1', modLoaders: [{ id: 'fabric-0.20.1' }] },
+      files: [{ projectID: 702, fileID: 701, required }] })));
+    zip.writeZip(cfPack);
+    cf.get('https://api.curseforge.com').intercept({ path: '/v1/mods/files', method: 'POST', body: JSON.stringify({ fileIds: [701] }) }).reply(200, { data: meta ? [meta] : [] });
+    const result = await installCurseforgeZipFile(pack.id, cfPack);
+    check(`CurseForge ${required ? 'required' : 'optional'} ${meta?.downloadUrl ? 'verified' : meta ? 'disabled' : 'missing'} download preserves the pack requirement`, meta?.downloadUrl
+      ? !result.error && result.installed === 1 && sha(readFileSync(join(pack.dir, 'mods/cf-required.jar')), 'sha1') === artifact.hashes.sha1
+      : required ? !!result.error : !result.error && result.installed === 0 && result.warnings.some(w => w.includes('701')));
+  }
+
+  // Real extraction, controlled archives: normalize a macOS bundle and retain
+  // the ordinary flat layout. No fake Java process is presented as a boot.
+  for (const feature of [21, 25]) {
+    rmSync(join(root, 'Tools', `jdk-${feature}-fixture`));
+    const name = `jdk-${feature}-archive`, bundle = feature === 21 ? 'Contents/Home/' : '';
+    const java = process.platform === 'win32' ? 'java.exe' : 'java';
+    const zip = new AdmZip(); zip.addFile(`${name}/${bundle}bin/${java}`, Buffer.from('fixture executable bytes'));
+    let bytes = zip.toBuffer();
+    if (process.platform !== 'win32') {
+      const staging = join(root, `archive-${feature}`); mkdirSync(staging);
+      zip.extractAllTo(staging);
+      const file = join(root, `jdk-${feature}.tar.gz`);
+      assert.equal(spawnSync('tar', ['-czf', file, '-C', staging, name]).status, 0);
+      bytes = readFileSync(file);
+    }
+    const os = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'mac' : 'linux';
+    artifacts.set(`https://api.adoptium.net/v3/binary/latest/${feature}/ga/${os}/${process.arch === 'arm64' ? 'aarch64' : 'x64'}/jdk/hotspot/normal/eclipse`, bytes);
+    check(`JDK ${feature} ${bundle ? 'macOS bundle' : 'flat archive'} becomes the shared Tools Java recipe`, await ensureJdk(feature, () => {})
+      && javaFor(feature === 21 ? '1.20.1' : '1.21.1', feature === 21 ? 'forge' : 'fabric') === join(root, 'Tools', name, 'bin', java));
+  }
   console.log(`\n${checks}/${checks} installer checks passed`);
 } finally {
   globalThis.fetch = originalFetch;

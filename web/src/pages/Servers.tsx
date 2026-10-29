@@ -34,6 +34,10 @@ function NewServerPanel({ onDone }: { onDone: () => void }) {
   const [name, setName] = useState('')
   const [mem, setMem] = useState(6)
   const [jobId, setJobId] = useState<string | null>(null)
+  const { data: available } = useQuery({
+    queryKey: ['loaders'],
+    queryFn: async () => (await (await fetch('/api/loaders')).json()) as { loaders: string[] },
+  })
 
   const { data: versions, isFetching: loadingVersions } = useQuery({
     queryKey: ['loader-versions', loader],
@@ -86,7 +90,7 @@ function NewServerPanel({ onDone }: { onDone: () => void }) {
 
       {/* loader — the one choice that changes everything downstream */}
       <div className="flex flex-wrap gap-2 mb-4">
-        {LOADERS.map((l) => {
+        {LOADERS.filter((l) => available?.loaders.includes(l.key)).map((l) => {
           const on = loader === l.key
           return (
             <button
@@ -287,10 +291,9 @@ export default function Servers() {
           <div className="flex items-center gap-3 flex-wrap">
             <span className="lamp lamp-crash" />
             <div className="min-w-0">
-              <div className="font-bold text-sm">Can't reach Crafty</div>
+              <div className="font-bold text-sm">Can't reach the server runtime</div>
               <div className="text-text-dim text-xs mt-0.5">
-                Crafty Controller isn't responding on this machine — it may still be starting up.
-                The panel reconnects by itself once it's back.
+                Check the selected runtime in Settings. The panel reconnects by itself once the service is back.
               </div>
             </div>
             <button onClick={() => refetch()} disabled={isFetching} className="btn btn-block px-4 py-2 text-xs ml-auto">

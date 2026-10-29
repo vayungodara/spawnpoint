@@ -24,7 +24,7 @@ def windows_creation(process):
     return times[0]
 
 
-def lock_runtime(root):
+def lock_runtime(root, relocating=False):
     # File locks are shared across the bind mount and released by the kernel
     # even after SIGKILL. Never unlink this inode while anyone may hold it.
     if os.name == "nt":
@@ -33,7 +33,9 @@ def lock_runtime(root):
         # Share mode zero excludes other opens for as long as either Java
         # or this guard holds the inherited handle. The identity barrier
         # below also covers handle rundown before exit is signaled.
-        handle = _winapi.CreateFile(str(root / ".spawnpoint-runtime.lock"), 0xC0000000, 0, 0, 4, 0x80, 0)
+        # A stopped transfer may rename the enclosing directory, never the
+        # fence inode. Share-delete still excludes every read/write opener.
+        handle = _winapi.CreateFile(str(root / ".spawnpoint-runtime.lock"), 0xC0000000, 4 if relocating else 0, 0, 4, 0x80, 0)
         stream = os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDWR), "a+b")
         os.set_inheritable(stream.fileno(), True)
         try:
@@ -154,9 +156,10 @@ def windows_runtime(args, root):
 
 
 def main():
-    root = Path.cwd()
-    runtime = lock_runtime(root)
-    if sys.argv[1:] == ["--fence"]:
+    relocating = len(sys.argv) == 3 and sys.argv[1] == "--fence"
+    root = Path(sys.argv[2]).resolve() if relocating else Path.cwd()
+    runtime = lock_runtime(root, relocating)
+    if relocating or sys.argv[1:] == ["--fence"]:
         print("locked", flush=True)
         sys.stdin.buffer.read()
         return
@@ -194,7 +197,7 @@ def main():
                 if path.is_file() and path.relative_to(root).as_posix() not in listed:
                     raise ValueError(f"unlisted pack file: {path.relative_to(root)}")
         java = Path(sys.argv[1])
-        if str(java) != gate["java"]["executable"] or digest(java) != gate["java"]["sha512"]:
+        if java != Path(gate["java"]["executable"]) or digest(java) != gate["java"]["sha512"]:
             raise ValueError("Java differs from the locked runtime")
         for file in gate["java"]["files"]:
             if digest(Path(file["path"])) != file["sha512"]:

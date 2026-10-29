@@ -1,19 +1,16 @@
 # Spawnpoint architecture
 
 Spawnpoint is a Fastify and TypeScript API with a Vite and React frontend. It
-runs next to [Crafty Controller](https://craftycontrol.com/): Crafty starts,
-stops and supervises the Minecraft processes, and Spawnpoint handles
-everything around them (content, configuration, testing, backups, in-game
-features). If you remove Spawnpoint, your servers keep running in Crafty.
+uses an independent Python OS service to own Java, console pipes and restart
+intent across panel exits. An existing [Crafty Controller](https://craftycontrol.com/)
+installation can retain ownership of unimported servers. The panel handles
+content, configuration, testing, backups and in-game features for both backends.
+Stopping the panel does not stop either owner's Minecraft processes.
 
-```
-┌─────────────┐   HTTP    ┌──────────────┐   API + token   ┌────────────────┐
-│ web (React) │ ────────▶ │ server       │ ──────────────▶ │ Crafty         │
-│ :25570      │           │ (Fastify)    │                 │ Controller     │
-└─────────────┘           │              │   RCON          │  └─ MC servers │
-                          │              │ ──────────────▶ │                │
-                          └──────────────┘                 └────────────────┘
-```
+The browser talks to the panel on port 25570. The panel sends authenticated
+loopback RPCs to the standalone owner, or scoped API requests to Crafty.
+RCON handles in-game operations and boot identity; publication uses the
+owning backend's stdin and native console acknowledgements.
 
 ## Code layout
 
@@ -21,7 +18,9 @@ features). If you remove Spawnpoint, your servers keep running in Crafty.
 - `server/src/auth.ts`: PIN hashing, sessions, the admin token, throttling
 - `server/src/routes/`: HTTP routes, one file per area; routes stay thin
 - `server/src/services/`: the logic
-- `server/src/clients/`: Crafty, Modrinth, CurseForge and RCON clients
+- `server/src/clients/`: ownership router, Crafty adapter, catalog and RCON clients
+- `server/src/services/supervisor.py`: independent Java owner
+- `server/src/services/native*.ts`: standalone IPC, installation and ownership transfer
 - `web/src/pages/`: one file per panel page; pages other than Servers load
   on first visit
 - `data/` (under the layout's `Spawnpoint/`): runtime state and secrets
@@ -36,9 +35,60 @@ writes from another origin and rejects any `/api/servers/:id` request whose
 id is not a UUID, since ids become folder paths. File routes resolve real
 paths and refuse anything outside the server folder.
 
-The setup wizard is open until the panel has a Crafty token and a PIN. Its
-two write routes need the setup code printed by the installer and the panel
-log.
+The setup wizard is open until the panel has a connected runtime and a PIN.
+Standalone setup checks supervisor health without creating a Crafty token.
+The wizard write routes need the setup code printed by the installer and panel log.
+
+## Process ownership
+
+`clients/crafty.ts` preserves the existing caller contract and routes each UUID
+to its committed native ownership record or the legacy `crafty-adapter.ts`.
+Native outages never fall back to Crafty. The backend setting controls new
+creation and whether unimported Crafty servers are listed, not ownership.
+
+`supervisor.py` uses Python's standard library and a rotated private capability
+for bounded loopback HTTP RPCs. It retains stdin, drains output without viewers,
+keeps a 1000-chunk live tail and rotates three 8 MB console files. Its 16-command
+queue accepts one line of up to 500 characters, bound to the current attempt.
+Stats sample the actual Java PID, CPU and RSS, not the panel or Windows guard.
+Unknown player counts prevent quiet-test admission and automatic empty-server restarts.
+
+`nativeservice.py` installs a Linux systemd user unit or unprivileged system
+unit, a macOS per-user LaunchAgent, or a Windows SCM service with its own
+virtual account and layout ACLs. systemd cgroups, launchd's process group and
+Windows kill-on-close Job Objects contain descendants. Java never detaches.
+Windows additionally uses a per-server nested Job from the revision guard.
+On Unix, a force kill restarts the whole service so no descendant retains a
+runtime fence. Other desired servers recover through their durable budgets.
+
+Intent and boot attempts are atomic per-server records. Automatic recovery
+allows three starts in ten minutes, with ten seconds between retries. Explicit
+Stop persists before sending stdin. Per-server autostart applies on service
+startup. Mutation, publication, maintenance, creation and transfer journals
+block automatic starts. `nativeprepare.ts` reuses active revision checks and
+pauses hosting before all native boots. The panel reconciles publication only
+after a new attempt has passed its launch guard, never while the old boot stops.
+
+`nativeinstall.ts` queues hash-pinned Fabric, Forge and NeoForge recipes in
+`data/runtime/installs/`. An independent worker installs a loader into disposable
+staging, seals its entire inventory, then renames and registers it. Recovery
+checks prepared bytes before registering an interrupted rename. A dead helper
+forces full-owner containment cleanup before another installer can use staging.
+Attempts are bounded to three, with a fifteen-minute deadline per installer.
+Only the panel writes shared detection and mod metadata while configuring the
+whole pack and auto-sync. A durable phase fences every start until that finishes.
+Modpack jobs retain exact source versions or a private hash-checked uploaded pack.
+
+`nativeimport.ts` freezes a stopped, certified Crafty source under maintenance,
+then requires the owner to stop the entire local Crafty service or container
+and attest that its workers exited. A refused loopback TCP connection is an
+additional check, not automatic proof of worker exit. The Crafty watchdog stays
+paused while any transfer journal exists. Commit holds the JVM fence, checks
+directory device/inode, closed game port and exact sealed bytes, persists a
+mutation marker, then atomically renames the directory into `Servers/<uuid>`.
+Linked trees, external worlds and cross-volume copies are refused. One native
+registry write commits ownership. Abort restores Crafty settings before commit;
+an interrupted commit recovers forward. The world, UUID and client shelf survive.
 
 ## Mod changes are transactions (`packtxn.ts`)
 
@@ -157,7 +207,7 @@ before/after bytes before approving config writes. Report entries retain
 passed, failed, skipped or inconclusive results and their renderer. An
 observed rollback baseline is explicitly not a client-certified revision.
 
-The owner must first approve the mandatory Crafty launch guard and managed
+The owner must first approve the mandatory launch guard and managed
 publication. Locked revisions currently accept Fabric's explicit Tools Java
 command with heap flags and `-jar fabric.jar nogui`, or the certified Forge
 1.20.1/47.4.28 and NeoForge 1.21.1/21.1.219 installers' exact OS argument files
@@ -249,7 +299,7 @@ On a locked revision, hosting stays off in the on-disk startup configuration.
 After fresh boot proof, `packCheck` compares the manifest with the promoted
 client inventory and SHA-512-checks the actual served bytes, including shelf
 mirrors. Only then does `releaseHosting` reload the enabled configuration and
-start the host through Crafty's console, waiting for each command's terminal
+start the host through the owning backend's console, waiting for each command's terminal
 log acknowledgement. RCON returns before AutoModpack's asynchronous commands
 finish, and disabled RCON broadcasts hide their later feedback. One open,
 non-reconnecting RCON session checks that publication stays on the same boot.
@@ -275,8 +325,10 @@ Started once in `index.ts`: idle shutdown, in-game status bar, automatic
 backups, the genie, death insurance, the dependency doctor (reads crash
 logs and fixes missing dependencies through a candidate), player triggers,
 scheduled tasks, TPS sampling, the chunk pre-generation watcher, crash
-recovery after a reboot, and a Crafty watchdog. Crafty calls are cached
+recovery after a reboot, native boot/creation reconciliation, and a Crafty watchdog. Crafty calls are cached
 briefly (server list 10 s, stats 2 s) and shared between watchers.
+Native restart intent belongs exclusively to the independent owner. Panel boot
+restore skips native UUIDs.
 
 ## Self-guarding restarts
 

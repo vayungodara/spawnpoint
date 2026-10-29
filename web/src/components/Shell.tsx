@@ -119,7 +119,7 @@ export default function Shell() {
     queryFn: async () => (await (await fetch('/api/auth/check')).json()) as { ok: boolean },
     staleTime: 5 * 60_000,
   })
-  // until Crafty is connected and a PIN is set, the wizard owns the first visit
+  // until an owner is connected and a PIN is set, the wizard owns the first visit
   const { data: wiz, isLoading: wizLoading } = useQuery({
     queryKey: ['wizard'],
     queryFn: async () => (await (await fetch('/api/wizard/status')).json()) as { active: boolean },
@@ -259,6 +259,7 @@ export default function Shell() {
       </aside>
 
       <main className="flex-1 min-w-0 p-4 sm:p-6 md:p-8 max-w-6xl">
+        {data?.warning && <p role="status" className="block px-4 py-3 text-sm mb-5">{data.warning} Import recovery remains available in Config → Server runtime.</p>}
         {/* key on pathname: strata switches crossfade instead of hard-cutting */}
         <div key={pathname} className="route-in">
           <Outlet />

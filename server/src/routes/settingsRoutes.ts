@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { PATHS, loadSettings, saveSettings } from '../config.js';
-import { craftyApi } from '../clients/crafty.js';
+import { craftyApi } from '../clients/crafty-adapter.js';
 import { loadAutobackup, saveAutobackup, type AutobackupConfig } from '../services/autobackup.js';
 import { authed, hashPin, login, pinConfigured, sessionCookie, throttled, PIN_RULE, PIN_RULE_TEXT } from '../auth.js';
 

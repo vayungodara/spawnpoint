@@ -2,7 +2,8 @@
 # Spawnpoint installer — one command from a fresh box to the first-run wizard.
 #   curl -fsSL https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install.sh | bash
 # Re-runnable: an existing checkout/layout is updated, never clobbered.
-# Env overrides: SPAWNPOINT_ROOT (layout dir), SPAWNPOINT_DIR (checkout dir).
+# Env overrides: SPAWNPOINT_ROOT (layout dir), SPAWNPOINT_DIR (checkout dir),
+# SPAWNPOINT_RUNTIME=crafty (keep using an existing Crafty service).
 set -euo pipefail
 
 say()  { printf '\033[1;32m[spawnpoint]\033[0m %s\n' "$*"; }
@@ -55,6 +56,18 @@ npm ci
 say "building the panel"
 npm run build
 
+# Fresh installations use the independent owner. Existing Crafty connections
+# keep their backend; a service install must not transfer server ownership.
+RUNTIME="${SPAWNPOINT_RUNTIME:-standalone}"
+if [ -z "${SPAWNPOINT_RUNTIME+x}" ] && [ -f "$ROOT/Shared/crafty-token.txt" ]; then RUNTIME=crafty; fi
+case "$RUNTIME" in standalone|crafty) ;; *) fail "SPAWNPOINT_RUNTIME must be standalone or crafty";; esac
+if [ "$RUNTIME" = standalone ]; then
+  command -v python3 >/dev/null 2>&1 || fail "Python 3 is required for the independent supervisor and revision guard"
+  say "installing the independent supervisor as your OS user service"
+  python3 "$DIR/server/dist/services/nativeservice.py" install --root "$ROOT" --node "$(command -v node)" \
+    || fail "supervisor installation failed — see README for the Linux system-service alternative; the panel has not started"
+fi
+
 # ---- start -----------------------------------------------------------------
 # the same BOM tolerance loadSettings() has — a PowerShell-written settings
 # file really does start with one, and reading the wrong port here would make
@@ -94,12 +107,11 @@ for _ in $(seq 1 30); do
     else
       say "  Open http://localhost:$PORT"
     fi
-    if ! curl -fskS "https://localhost:8443" >/dev/null 2>&1; then
+    if [ "$RUNTIME" = crafty ] && ! curl -fskS "https://localhost:8443" >/dev/null 2>&1; then
       say ""
       say "  Heads up: nothing is answering on https://localhost:8443, so Crafty"
-      say "  Controller does not look installed yet. Spawnpoint manages servers"
-      say "  THROUGH Crafty — install it first (https://craftycontrol.com), then"
-      say "  finish the wizard."
+      say "  Controller does not look installed yet. Install it first"
+      say "  (https://craftycontrol.com), then choose Crafty in the wizard."
     fi
     if [ "$(uname)" = Linux ] && [ -z "${DISPLAY:-}" ] && ! command -v xvfb-run >/dev/null 2>&1; then
       say ""
@@ -107,8 +119,8 @@ for _ in $(seq 1 30); do
       say "  render on this headless machine. Without it, rendering is not tested."
     fi
     say ""
-    say "  stop:    kill $PANEL_PID"
-    say "  start:   SPAWNPOINT_ROOT=\"$ROOT\" node \"$DIR/server/dist/index.js\""
+    say "  stop panel:    kill $PANEL_PID (Minecraft keeps running in its owner service)"
+    say "  start panel:   SPAWNPOINT_ROOT=\"$ROOT\" node \"$DIR/server/dist/index.js\""
     say "  (tip: wrap that start command in a systemd unit or login item to run on boot)"
     exit 0
   fi

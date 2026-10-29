@@ -28,6 +28,7 @@ import { resumePromotions } from './services/promote.js';
 import { listJobs } from './services/servercreate.js';
 import { isServerId } from './services/servers.js';
 import { craftyApi } from './clients/crafty.js';
+import { startNativeWatcher } from './services/native.js';
 
 const VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 const settings = loadSettings();
@@ -125,6 +126,7 @@ startBootRestore(log);
 startCraftyDoctor(log);
 await resumeCandidates(log);
 await resumePromotions(log);
+startNativeWatcher(log);
 // pre-fill the joinability cache so a panel restart doesn't flash running servers as "starting"
 setTimeout(() => {
   void import('./services/phase.js').then(({ warmPhaseCache }) =>

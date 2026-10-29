@@ -138,6 +138,7 @@ export async function provisionAutoModpack(serverId: string, loader: string): Pr
         modpackName: '',
         modpackHost: true,
         generateModpackOnStart: true,
+        selfUpdater: false,
         requireAutoModpackOnClient: true,
         acceptedLoaders: [loader === 'quilt' ? 'fabric' : loader],
         // synced resource and shader packs must land in the client's real
