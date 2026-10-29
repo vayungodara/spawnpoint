@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { channel } from 'node:diagnostics_channel';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, readdirSync, statSync, renameSync, symlinkSync, unlinkSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo, homedir } from 'node:os';
@@ -28,7 +29,8 @@ const { supervisor } = await import('../server/dist/services/native.js');
 if (service && process.platform === 'linux') assert.ok(!existsSync('/etc/systemd/system/spawnpoint-supervisor.service'), 'never replace an installed service in a test');
 if (service && process.platform === 'darwin') assert.ok(!existsSync(join(homedir(), 'Library/LaunchAgents/com.spawnpoint.supervisor.plist')), 'never replace an installed service in a test');
 if (service && process.platform === 'win32') assert.equal(spawnSync('sc.exe', ['query', 'SpawnpointSupervisor']).status, 1060, 'never replace an installed service in a test');
-let panel, owner, failure, installed = false, cookie = '';
+let panel, owner, failure, previousAgent, installed = false, cookie = '';
+channel('undici:request:error').subscribe(({ error }) => console.error('HTTP transport failure:', error.code ?? error.cause?.code));
 let checks = 0;
 const check = (name, condition) => { assert.ok(condition, name); checks++; console.log('PASS:', name); };
 const command = (...args) => execFileSync(args[0], args.slice(1), { stdio: 'pipe', timeout: 90_000 });
@@ -78,7 +80,7 @@ async function stopOwner() {
   if (!installed) return;
   if (process.platform === 'linux') system('stop');
   else if (process.platform === 'win32') {
-    command('powershell', '-NoProfile', '-Command', `
+    const output = command('powershell', '-NoProfile', '-Command', `
 $ErrorActionPreference = 'Stop'
 $service = Get-Service -Name SpawnpointSupervisor
 if ($service.Status -eq 'StartPending') { $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(90)) }
@@ -87,11 +89,19 @@ if (-not $processId) { throw 'SCM owner identity unavailable; retain the layout 
 $owner = [System.Diagnostics.Process]::GetProcessById($processId)
 [void]$owner.get_Handle()
 $service.Refresh()
-if ($service.Status -eq 'Running') { $service.Stop() }
+if ($service.Status -eq 'Running') {
+  try { $service.Stop() } catch {
+    $service.Refresh()
+    if ($service.Status -notin @('Stopped', 'StopPending')) { throw }
+    $reason = $_.Exception.GetBaseException()
+    Write-Output "SCM stop control: $($reason.GetType().FullName), native=$($reason.NativeErrorCode), state=$($service.Status): $($reason.Message)"
+  }
+}
 elseif ($service.Status -notin @('Stopped', 'StopPending')) { throw "Unexpected SCM state: $($service.Status)" }
 $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(90))
 if (-not $owner.WaitForExit(90000)) { throw 'SCM owner process did not exit' }
-`);
+`).toString().trim();
+    if (output) console.log(output);
   } else {
     const target = 'gui/' + process.getuid() + '/com.spawnpoint.supervisor';
     command('launchctl', 'bootout', target);
@@ -108,10 +118,10 @@ try {
   await startPanel();
   await startOwner();
   if (service && process.platform === 'darwin') {
-    const previous = (await supervisor('health')).pid;
-    console.log('LaunchAgent owner before reinstall:', previous);
+    previousAgent = (await supervisor('health')).pid;
+    console.log('LaunchAgent owner before reinstall:', previousAgent);
     command(python, script, 'install', '--root', root, '--node', process.execPath);
-    check('reinstalling a loaded LaunchAgent waits for the previous owner to exit', (await supervisor('health')).pid !== previous);
+    check('reinstalling a loaded LaunchAgent waits for the previous owner to exit', (await supervisor('health')).pid !== previousAgent);
   }
   assert.equal(readFileSync(accessFile, 'utf8'), 'before installation');
   writeFileSync(accessFile, 'panel write');
@@ -286,6 +296,24 @@ createInterface({input:process.stdin}).on('line',async line=>{
       const output = process.platform === 'darwin'
         ? (state.stdout || '').split('\n').filter((line) => /^\s*(state|pid|runs|last exit code|program|path) =/.test(line)).join('\n') : state.stdout;
       console.error('OS service metadata:', state.status, output, state.stderr);
+      if (process.platform === 'darwin') {
+        const pid = state.stdout?.match(/\bpid = (\d+)/)?.[1];
+        const executable = state.stdout?.match(/^\s*program = (.+)$/m)?.[1];
+        const commands = [
+          ['lsof', '-nP', join(runtime, 'owner', '.spawnpoint-runtime.lock')],
+          ...(pid ? [
+            ['ps', '-p', [previousAgent, pid].filter(Boolean).join(','), '-o', 'pid,ppid,state,etime,command'],
+            ['sample', pid, '1', '1'],
+          ] : []),
+          ...(executable ? [[executable, '-VV']] : []),
+        ];
+        for (const args of commands) {
+          const detail = spawnSync(args[0], args.slice(1), { encoding: 'utf8', timeout: 10_000 });
+          console.error('Owner diagnostic:', args[0], detail.status,
+            (detail.stdout || '').split('\n').slice(0, 160).join('\n'),
+            (detail.stderr || '').split('\n').slice(0, 10).join('\n'));
+        }
+      }
       const log = join(runtime, 'service.log');
       if (existsSync(log)) console.error('Owner service log:', readFileSync(log, 'utf8').split('\n').slice(-100).join('\n'));
     }
