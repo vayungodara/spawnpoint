@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { join, resolve, sep, extname } from 'node:path';
 import { serverDir } from './servers.js';
-import { revisionState } from './revisions.js';
+import { assertPackPathWritable, revisionState } from './revisions.js';
 import { stageConfig } from './packtxn.js';
 
 // Mod config file browser/editor. Every server mod keeps its developer
@@ -89,6 +89,8 @@ export function writeConfig(uuid: string, rel: string, content: string): { ok: t
     return { ok: true, staged: true };
   }
   const bak = `${p}.bak`;
+  assertPackPathWritable(uuid, p);
+  assertPackPathWritable(uuid, bak);
   copyFileSync(p, bak);
   writeFileSync(p, content, 'utf8'); // no BOM
   return { ok: true, backup: `${rel}.bak` };

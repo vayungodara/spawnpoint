@@ -206,9 +206,98 @@ createInterface({input:process.stdin}).on('line',async line=>{
   const execution_command = [python, '.spawnpoint-launch.py', ...args].map((s) => JSON.stringify(s)).join(' ');
   writeFileSync(join(dir, '.spawnpoint-revision.json'), JSON.stringify({ revision: 'contract', command: execution_command,
     roots: ['mods'], files: [], java: { executable: process.execPath, sha512: createHash('sha512').update(readFileSync(process.execPath)).digest('hex'), files: [] } }));
-  await supervisor('register', { server: { server_id: id, server_name: 'Owner contract', path: dir, execution_command, executable: 'fixture.mjs', type: 'minecraft_java', server_port: 25575, server_ip: '127.0.0.1', auto_start: false } });
+  const aliasedServers = join(root, 'Servers-alias');
+  symlinkSync(join(root, 'Servers'), aliasedServers, 'junction');
+  await supervisor('register', { server: { server_id: id, server_name: 'Owner contract', path: join(aliasedServers, id), execution_command, executable: 'fixture.mjs', type: 'minecraft_java', server_port: 25575, server_ip: '127.0.0.1', auto_start: false } });
   await api('/servers/active', { id });
   check('fresh standalone layout can select its registered server', (await api('/servers')).active === id);
+  const { revisionDir, setRevisionState } = await import('../server/dist/services/revisions.js');
+  mkdirSync(revisionDir(id, 'control-paths'), { recursive: true });
+  writeFileSync(join(revisionDir(id, 'control-paths'), 'lock.json'), JSON.stringify({ schema: 1, id: 'control-paths', files: [] }));
+  const controlNames = ['.spawnpoint-runtime.lock', '.SPAWNPOINT-RUNTIME.LOCK'];
+  for (const name of controlNames) writeFileSync(join(dir, name), 'internal fence');
+  writeFileSync(join(dir, 'ordinary.txt'), 'ordinary file');
+  const identities = controlNames.map((name) => statSync(join(dir, name), { bigint: true }));
+  const aliases = [];
+  if (process.platform === 'win32') {
+    const short = execFileSync('cmd.exe', ['/d', '/c', `for %I in ("${join(dir, controlNames[0])}") do @echo %~snxI`], { windowsVerbatimArguments: true, encoding: 'utf8', timeout: 10000 }).trim();
+    const identity = statSync(join(dir, short), { bigint: true });
+    assert.equal(identity.ino, identities[0].ino); assert.equal(identity.dev, identities[0].dev);
+    if (!/^\.spawnpoint-/i.test(short)) aliases.push(short);
+    console.log('Windows fence short-name alias:', aliases.length ? short : 'not assigned by this filesystem');
+  } else {
+    symlinkSync(controlNames[0], join(dir, 'control-alias'));
+    aliases.push('control-alias');
+  }
+  for (const active of [undefined, 'control-paths']) {
+    setRevisionState(id, { active });
+    for (const [index, name] of controlNames.entries()) {
+      for (const [route, body, method] of [
+        ['files/delete', { path: name }],
+        ['files/rename', { from: name, to: 'moved.txt' }],
+        ['files/rename', { from: 'ordinary.txt', to: name }],
+        ['files/content', { path: name, content: 'replaced' }, 'PUT'],
+        ['files/mkdir', { path: name + '-directory/child' }],
+        ['packfile/create-server', { path: name }],
+      ]) {
+        const result = await api(`/servers/${id}/${route}`, body, method, 400);
+        assert.match(result.error, /Spawnpoint control files are managed internally/);
+      }
+      const upload = await fetch(`http://127.0.0.1:25574/api/servers/${id}/files/upload-stream?filename=${encodeURIComponent(name)}`, {
+        method: 'POST', headers: { cookie, 'content-type': 'application/octet-stream', connection: 'close' }, body: 'replacement bytes',
+      });
+      assert.equal(upload.status, 400);
+      assert.match((await upload.json()).error, /Spawnpoint control files are managed internally/);
+      const identity = statSync(join(dir, name), { bigint: true });
+      assert.equal(identity.ino, identities[index].ino); assert.equal(identity.dev, identities[index].dev);
+      assert.equal(readFileSync(join(dir, name), 'utf8'), 'internal fence');
+    }
+    for (const name of aliases) {
+      const edit = await api(`/servers/${id}/files/content`, { path: name, content: 'alias replacement' }, 'PUT', 400);
+      const remove = await api(`/servers/${id}/files/delete`, { path: name }, 'POST', 400);
+      assert.match(edit.error, /Spawnpoint control files are managed internally/);
+      assert.match(remove.error, /Spawnpoint control files are managed internally/);
+    }
+    await api(`/servers/${id}/files/content`, { path: 'ordinary.txt', content: 'ordinary edit' }, 'PUT');
+    check(`${active ? 'sealed' : 'unsealed'} HTTP writers preserve reserved control names and permit ordinary edits`, readFileSync(join(dir, 'ordinary.txt'), 'utf8') === 'ordinary edit'
+      && readFileSync(join(dir, controlNames[0]), 'utf8') === 'internal fence'
+      && !existsSync(join(dir, 'moved.txt')) && !existsSync(join(dir, controlNames[0] + '-directory')) && !existsSync(join(dir, controlNames[1] + '-directory')));
+  }
+  setRevisionState(id, { active: undefined });
+  mkdirSync(join(dir, 'config'));
+  symlinkSync(dir, join(dir, 'config/control'), 'junction');
+  const configRefused = await api(`/servers/${id}/configs/file`, { path: 'config/control/.spawnpoint-runtime.lock', content: 'config replacement' }, 'PUT', 500);
+  assert.match(configRefused.message, /Spawnpoint control files are managed internally/);
+  unlinkSync(join(dir, 'config/control'));
+  writeFileSync(join(dir, 'config/ordinary.json'), '{}');
+  await api(`/servers/${id}/configs/file`, { path: 'config/ordinary.json', content: '{"ordinary":true}' }, 'PUT');
+  check('unsealed config edits reserve aliased control targets while preserving ordinary edits and backups', readFileSync(join(dir, controlNames[0]), 'utf8') === 'internal fence'
+    && readFileSync(join(dir, 'config/ordinary.json'), 'utf8') === '{"ordinary":true}' && readFileSync(join(dir, 'config/ordinary.json.bak'), 'utf8') === '{}');
+  if (process.platform !== 'win32') {
+    unlinkSync(join(dir, 'config/ordinary.json.bak'));
+    for (const name of [controlNames[0], '.spawnpoint-mutation']) {
+      symlinkSync('../' + name, join(dir, 'config/ordinary.json.bak'));
+      const backupRefused = await api(`/servers/${id}/configs/file`, { path: 'config/ordinary.json', content: 'must not land' }, 'PUT', 500);
+      assert.match(backupRefused.message, name === controlNames[0] ? /Spawnpoint control files are managed internally/ : /ENOENT/);
+      check(`an aliased config backup cannot write ${name} or apply the edit`, readFileSync(join(dir, controlNames[0]), 'utf8') === 'internal fence'
+        && !existsSync(join(dir, '.spawnpoint-mutation')) && readFileSync(join(dir, 'config/ordinary.json'), 'utf8') === '{"ordinary":true}');
+      unlinkSync(join(dir, 'config/ordinary.json.bak'));
+    }
+  }
+  const holder = spawn(python, [resolve('server/dist/services/launchguard.py'), '--fence', dir], { cwd: root, stdio: ['pipe', 'pipe', 'inherit'] });
+  const holderClosed = once(holder, 'close');
+  try {
+    await Promise.race([once(holder.stdout, 'data'), holderClosed.then(([code]) => { throw new Error(`HTTP contract fence exited before readiness: ${code}`); })]);
+    const refused = await api(`/servers/${id}/files/delete`, { path: controlNames[0] }, 'POST', 400);
+    assert.match(refused.error, /Spawnpoint control files are managed internally/);
+    const contender = spawnSync(python, [resolve('server/dist/services/launchguard.py'), '--fence'], { cwd: dir, input: '', encoding: 'utf8', timeout: 10000 });
+    const held = statSync(join(dir, controlNames[0]), { bigint: true });
+    check('HTTP deletion cannot split a held fence or admit a competing guard', holder.exitCode === null && contender.status !== null && contender.status !== 0
+      && held.ino === identities[0].ino && held.dev === identities[0].dev);
+  } finally {
+    if (holder.exitCode === null) holder.stdin.end();
+    await holderClosed;
+  }
   mkdirSync(join(runtime, 'installs'), { recursive: true });
   const unfinished = join(runtime, 'installs', id + '.json');
   writeFileSync(unfinished, JSON.stringify({ id, phase: 'failed', done: true, error: 'incomplete configuration' }));

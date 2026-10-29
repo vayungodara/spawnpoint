@@ -203,6 +203,7 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (req, reply) => {
       try {
         const p = confine(req.params.id, req.body.path);
+        assertPackPathWritable(req.params.id, p);
         const { startCreateFromPackFile } = await import('../services/servercreate.js');
         const r = startCreateFromPackFile({ path: p, name: req.body.name, memGb: req.body.memGb });
         if ('error' in r) return reply.code(400).send(r);

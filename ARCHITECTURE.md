@@ -65,6 +65,10 @@ On Windows, stopped mutations open the same fence by native file ID, so a
 fenced import can rename the directory without a pathname-open descendant.
 Unsupported file-ID opens, multiple hard links, or legacy fence aliases refuse
 mutation and require owner recovery. The guard never replaces the fence.
+HTTP writers reserve root `.spawnpoint-*` control paths even before sealing,
+including case variants and existing aliases. All writers must preserve the
+fence inode: kernel fencing does not prevent a local filesystem owner from
+unlinking and replacing its name.
 
 Intent and boot attempts are atomic per-server records. Automatic recovery
 allows three starts in ten minutes, with ten seconds between retries. Explicit

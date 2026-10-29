@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chownSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, constants } from 'node:fs';
+import { chownSync, closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, constants } from 'node:fs';
 import { copyFile, mkdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
@@ -127,10 +127,16 @@ export function assertUnsealed(id: string): void {
   if (revisionState(id).active) throw new Error('this server has a locked revision; direct pack/config/runtime edits are refused. Stage a tested mod change instead');
 }
 export function assertPackPathWritable(id: string, path: string): void {
+  // Resolve existing final aliases too (including Windows short names).
+  // A new upload has no final entry yet; its parent is already confined.
+  const dir = realpathSync.native(serverDir(id));
+  let target = path;
+  try { target = realpathSync.native(path); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT' || lstatSync(path, { throwIfNoEntry: false })) throw e; }
+  if ([path, target].some((p) => /^\.spawnpoint-/i.test(relative(dir, p)))) throw new Error('Spawnpoint control files are managed internally');
+  const rel = relative(dir, target).replace(/\\/g, '/');
   const { active } = revisionState(id);
   if (!active) return;
-  const rel = relative(serverDir(id), path).replace(/\\/g, '/');
-  if (!rel || rel.startsWith('.spawnpoint-') || [...PACK_ROOTS, 'automodpack'].some((p) => rel === p || rel.startsWith(`${p}/`) || p.startsWith(`${rel}/`)) || readLock(id, active).files.some((f) => f.location === 'server' && (f.path === rel || f.path.startsWith(`${rel}/`)))) assertUnsealed(id);
+  if (!rel || [...PACK_ROOTS, 'automodpack'].some((p) => rel === p || rel.startsWith(`${p}/`) || p.startsWith(`${rel}/`)) || readLock(id, active).files.some((f) => f.location === 'server' && (f.path === rel || f.path.startsWith(`${rel}/`)))) assertUnsealed(id);
 }
 /** The same OS lock is held for the JVM's entire lifetime by Crafty's guard.
     Kernel locks survive neither process death nor namespace boundaries: a
