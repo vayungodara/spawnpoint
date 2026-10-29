@@ -9,7 +9,7 @@ import { hashes } from '../revisions.js';
 import { writeFileAtomic } from '../platform.js';
 import { readFabricJar } from './fabric.js';
 import { readForgeJar } from './forge.js';
-import { modIds, type Catalog, type NativeMeta } from './index.js';
+import { modIds, type Catalog, type NativeMeta, type SolveInput } from './index.js';
 
 /** A bounded catalog session. Domains are complete or fail, while discovered
  * provider mappings are explicitly partial: a search hit is never proof that
@@ -23,7 +23,7 @@ export class NetworkCatalog implements Catalog {
   readonly manualDownloads: { title: string; url: string }[] = [];
 
   constructor(
-    private filter: { mc: string; loader: 'fabric' | 'forge'; loaderVersion?: string },
+    private filter: { mc: string; loader: SolveInput['loader']; loaderVersion?: string },
     private local: Map<string, { version: Version; path: string; clientOnly?: boolean }> = new Map(),
     private limits = { downloads: 64, bytes: 256 * 1024 * 1024 },
   ) {}
@@ -123,10 +123,9 @@ export class NetworkCatalog implements Catalog {
       // Local filenames survive the solver witness. Forge discovery (including
       // service bootstraps and automatic module names) must see that same name.
       const filename = this.local.has(version.id) ? basename(path) : file.filename;
-      if (this.filter.loader === 'forge' && !this.filter.loaderVersion) throw new Error('Forge metadata needs the installed loader version');
-      const meta = this.filter.loader === 'forge'
-        ? readForgeJar(readFileSync(path), filename, { mc: this.filter.mc, forge: this.filter.loaderVersion! })
-        : readFabricJar(readFileSync(path));
+      if (this.filter.loader !== 'fabric' && !this.filter.loaderVersion) throw new Error('FML metadata needs the installed loader version');
+      const meta = this.filter.loader === 'fabric' ? readFabricJar(readFileSync(path))
+        : readForgeJar(readFileSync(path), filename, { mc: this.filter.mc, forge: this.filter.loaderVersion!, loader: this.filter.loader });
       const shelved = [...this.local.values()].some((f) => f.version.project_id === version.project_id && f.clientOnly);
       const project = version.project_id.startsWith('cf:') || version.project_id.startsWith('local:')
         ? undefined : await modrinth.getProject(version.project_id);

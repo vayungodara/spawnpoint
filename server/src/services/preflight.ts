@@ -108,7 +108,7 @@ async function dryBootInner(serverId: string, jars: string[], dir: string, lock?
   mkdirSync(join(sandbox, 'mods'), { recursive: true });
   linkLoader(dir, sandbox, lock);
   for (const jar of jars) copyFileSync(jar, join(sandbox, 'mods', basename(jar)), constants.COPYFILE_FICLONE);
-  const fullBoot = det.loader === 'forge';
+  const fullBoot = det.loader === 'forge' || det.loader === 'neoforge';
   const pass = fullBoot ? /Done \([\d.]+s\)!/ : PASS_RE;
   writeFileSync(join(sandbox, 'eula.txt'), `eula=${fullBoot}\n`, 'utf8');
   if (fullBoot) {

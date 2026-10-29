@@ -120,11 +120,12 @@ async function hmcCmd(args: string[]): Promise<void> {
 
 /** Install this MC version with the server's own loader version into
     HeadlessMC (once) and return the installed version's name. */
-async function ensureVersion(mc: string, loader: 'fabric' | 'forge', uid: string | null, java: string): Promise<string> {
+async function ensureVersion(mc: string, loader: 'fabric' | 'forge' | 'neoforge', uid: string | null, java: string): Promise<string> {
   const versions = join(HMC, 'mc', 'versions');
   const wanted = (d: string): boolean => loader === 'fabric'
     ? uid ? d === `fabric-loader-${uid}-${mc}` : d.startsWith('fabric-loader-') && d.endsWith(`-${mc}`)
-    : uid ? d === `${mc}-forge-${uid}` : d.startsWith(`${mc}-forge-`);
+    : loader === 'neoforge' ? uid ? d === `neoforge-${uid}` : d.startsWith('neoforge-')
+      : uid ? d === `${mc}-forge-${uid}` : d.startsWith(`${mc}-forge-`);
   const find = (): string | undefined => (existsSync(versions) ? readdirSync(versions).find(wanted) : undefined);
   const runtime = await execFileP(java, ['-XshowSettings:properties', '-version'], { timeout: 5_000 });
   const major = Number(/^\s*java.specification.version = (\d+)\s*$/m.exec(runtime.stderr)?.[1]);
@@ -156,8 +157,8 @@ function clientUsesJava(output: string, java: string): boolean {
 }
 
 /** The mc-runtime-test jar for this MC (asset names use the version, then its minor family). */
-async function runtimeTestJar(mc: string, loader: 'fabric' | 'forge'): Promise<string | null> {
-  const assetLoader = loader === 'forge' ? 'lexforge' : 'fabric';
+async function runtimeTestJar(mc: string, loader: 'fabric' | 'forge' | 'neoforge'): Promise<string | null> {
+  const assetLoader = loader === 'forge' ? 'lexforge' : loader;
   const names = [mc, mc.split('.').slice(0, 2).join('.')]
     .map((v) => `mc-runtime-test-${v}-${RUNTIME_TEST_VERSION}-${assetLoader}-release.jar`);
   for (const name of names) if (existsSync(join(HMC, name))) return join(HMC, name);
@@ -205,7 +206,7 @@ export interface ClientSet {
 /** Why the client test cannot run for this server, or null when it can. */
 export function clientGateBlocker(serverId: string): string | null {
   const det = detect(serverDir(serverId), serverId);
-  if ((det.loader !== 'fabric' && det.loader !== 'forge') || !det.mc) return `the client test supports Fabric and Forge, not ${det.loader}`;
+  if (!['fabric', 'forge', 'neoforge'].includes(det.loader) || !det.mc) return `the client test supports Fabric, Forge and NeoForge, not ${det.loader}`;
   if (!gateJava()) return 'the client test needs a JDK under Tools/; one downloads the first time a server starts';
   return null;
 }
@@ -224,7 +225,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   const blocker = clientGateBlocker(serverId);
   if (blocker) return { result: 'unverified', detail: blocker };
   const sourceDir = set.sourceDir ?? serverDir(serverId);
-  const det = detect(sourceDir, serverId) as Detection & { mc: string; loader: 'fabric' | 'forge' };
+  const det = detect(sourceDir, serverId) as Detection & { mc: string; loader: 'fabric' | 'forge' | 'neoforge' };
   await waitForQuiet(onStatus);
   onStatus('preparing the test client (the first run downloads Minecraft)');
   const work = join(PATHS.data, 'launchgate', serverId);
@@ -435,7 +436,7 @@ function prepareAutoModpack(serverId: string, srv: string, set: ClientSet): void
 
 async function joinTest(
   serverId: string,
-  det: Detection & { mc: string; loader: 'fabric' | 'forge' },
+  det: Detection & { mc: string; loader: 'fabric' | 'forge' | 'neoforge' },
   version: string,
   set: ClientSet,
   rundir: string,

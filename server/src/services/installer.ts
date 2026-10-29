@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, 
 import { join, basename } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { parse } from 'smol-toml';
 import { chownToDirOwner, writeFileAtomic } from './platform.js';
 import { PATHS } from '../config.js';
 import { serverDir, clientShelfDir, javaFor } from './servers.js';
@@ -18,7 +19,7 @@ import { assertUnsealed, revisionState, hashes } from './revisions.js';
 import { NetworkCatalog } from './solver/catalog.js';
 import { modIds, solve, type Pin, type SolveResult } from './solver/index.js';
 import { readFabricJar } from './solver/fabric.js';
-import { FORGE_PROFILES, readForgeJar } from './solver/forge.js';
+import { FORGE_PROFILES, NEOFORGE_PROFILES, readForgeJar } from './solver/forge.js';
 
 // The install engine: picks the right build for the server's MC version and
 // loader (releases first), resolves required dependencies (keeping any copy
@@ -206,9 +207,14 @@ export function solveCandidate(
       const det = detect(serverDir(id), id);
       const loader = loaderVersion(serverDir(id), det);
       const java = javaFor(det.mc, det.loader);
-      if ((det.loader !== 'fabric' && det.loader !== 'forge') || !det.mc || !loader || !java) throw new Error('The solver needs known Minecraft, supported loader and Java versions');
-      const profile = det.loader === 'forge' ? FORGE_PROFILES[`${det.mc}-${loader}`] : undefined;
-      if (det.loader === 'forge' && !profile) throw new Error('This Forge runtime metadata profile is not certified');
+      if ((det.loader !== 'fabric' && det.loader !== 'forge' && det.loader !== 'neoforge') || !det.mc || !loader || !java) throw new Error('The solver needs known Minecraft, supported loader and Java versions');
+      const profile = det.loader === 'fabric' ? undefined : (det.loader === 'forge' ? FORGE_PROFILES : NEOFORGE_PROFILES)[`${det.mc}-${loader}`];
+      if (det.loader !== 'fabric' && !profile) throw new Error('This FML runtime metadata profile is not certified');
+      const fml = join(serverDir(id), 'config', 'fml.toml');
+      if (det.loader === 'neoforge' && existsSync(fml)) {
+        const overrides = parse(readFileSync(fml, 'utf8')).dependencyOverrides;
+        if (overrides !== undefined && Object.keys(overrides as object).length) throw new Error('NeoForge dependency overrides are not certified by the solver');
+      }
       const snapshot = async () => {
         const changes = stagedFiles(id);
         const inventory = async (files: StagedFile[], entries: LedgerEntry[]) => {
@@ -236,7 +242,8 @@ export function solveCandidate(
       const pinsByPath = new Map<string, Pin>();
       const idsByPath = new Map<string, string[]>();
       for (const row of [...before.live, ...before.rows]) {
-        const meta = det.loader === 'forge' ? readForgeJar(readFileSync(row.path), basename(row.path), { mc: det.mc, forge: loader }) : readFabricJar(readFileSync(row.path));
+        const meta = det.loader === 'fabric' ? readFabricJar(readFileSync(row.path))
+          : readForgeJar(readFileSync(row.path), basename(row.path), { mc: det.mc, forge: loader, loader: det.loader });
         const ids = modIds(meta);
         idsByPath.set(row.path, ids);
         const entry = row.entry;
@@ -342,7 +349,7 @@ export function solveCandidate(
 export async function install(serverUuid: string, opts: InstallOpts, log: (m: string) => void = noLog): Promise<InstallResult> {
   const { type } = opts;
   const det = detect(serverDir(serverUuid), serverUuid);
-  if (type === 'mod' && (det.loader === 'fabric' || det.loader === 'forge') && !opts.direct) return solveCandidate(serverUuid,
+  if (type === 'mod' && (det.loader === 'fabric' || det.loader === 'forge' || det.loader === 'neoforge') && !opts.direct) return solveCandidate(serverUuid,
     [{ projectId: opts.projectId, versionId: opts.versionId, requested: !opts.dependency }], log);
   const isServerContent = type === 'mod' || type === 'plugin' || type === 'datapack';
   const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: isServerContent };
@@ -442,7 +449,7 @@ export async function installCurseforge(
 ): Promise<InstallResult> {
   const type: ContentType = opts.type ?? 'mod';
   const det = detect(serverDir(serverUuid), serverUuid);
-  if (type === 'mod' && (det.loader === 'fabric' || det.loader === 'forge') && !opts.direct) return solveCandidate(serverUuid,
+  if (type === 'mod' && (det.loader === 'fabric' || det.loader === 'forge' || det.loader === 'neoforge') && !opts.direct) return solveCandidate(serverUuid,
     [{ projectId: `cf:${opts.modId}`, versionId: opts.fileId ? `cf:${opts.fileId}` : undefined }], log);
   const isServerContent = type === 'mod' || type === 'plugin' || type === 'datapack';
   const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: isServerContent };

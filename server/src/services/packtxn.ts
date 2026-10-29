@@ -407,7 +407,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       const gen = generation.get(id) ?? 0;
       status('checking declared dependencies');
       let set = candidateSet(id, c);
-      const solvedLoader = ['fabric', 'forge'].includes(detect(serverDir(id), id).loader);
+      const solvedLoader = ['fabric', 'forge', 'neoforge'].includes(detect(serverDir(id), id).loader);
       if (solvedLoader) {
         status('solving the complete server and friend pack');
         const { solveCandidate } = await import('./installer.js');
@@ -677,7 +677,7 @@ function activate(id: string, c: Candidate, log: (m: string) => void, approved =
     const touches = touchesServer(id, c);
     const wait = !applying || await isRunningSafe(id);
     if (!c.revision || !c.baseline) throw new Error('this change has no revision lock; test it again');
-    if (['fabric', 'forge'].includes(readLock(id, c.revision).loader) && revisionReport(id, c.revision).tests.solver?.result !== 'passed') {
+    if (['fabric', 'forge', 'neoforge'].includes(readLock(id, c.revision).loader) && revisionReport(id, c.revision).tests.solver?.result !== 'passed') {
       throw new Error('the exact revision solver inventory check must pass before approval or promotion; test this change again');
     }
     await verifyRevision(id, c.revision);

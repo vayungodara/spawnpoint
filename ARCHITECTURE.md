@@ -47,7 +47,7 @@ write to the server. They download into one candidate per server
 (`data/candidates/<id>/`). Twelve seconds after the last addition, the
 candidate is tested:
 
-1. **Whole-pack solver** (`solver/`, Fabric and certified Forge profiles):
+1. **Whole-pack solver** (`solver/`, Fabric and certified Forge and NeoForge profiles):
    reads native dependency ranges, breaks, provides aliases, nested jars and
    environment scopes. The catalog
    loads complete compatible Modrinth or paginated CurseForge domains and
@@ -62,14 +62,14 @@ candidate is tested:
 2. **Server boot test** (`preflight.ts`): a sandbox gets the locked loader,
    libraries, configs and copies of the candidate's jars. Fabric uses
    `eula=false`, resolves dependencies, applies mixins and runs mod
-   initialisers before the EULA check. Forge initializes after that check,
-   so it must reach `Done` in a fresh flat world on a loopback-only ephemeral
+   initialisers before the EULA check. Forge and NeoForge initialize after that
+   check, so they must reach `Done` in a fresh flat world on a loopback-only ephemeral
    port, then stop before configs are captured. A client-only mod that
    crashes the server can be moved to the client shelf and retested. Fabric
-   and Forge no longer guess missing dependencies from crash text. Other
+   and both FML loaders no longer guess missing dependencies from crash text. Other
    loaders retain the legacy dependency scan and repair path, but are not
    supported by locked revisions yet.
-3. **Client test** (`launchgate.ts`, Fabric and certified Forge AutoModpack revisions):
+3. **Client test** (`launchgate.ts`, Fabric and certified Forge and NeoForge AutoModpack revisions):
    HeadlessMC boots the matching Minecraft version and loader version with
    the files a player would receive, then quick-plays into a throwaway copy
    of the server on port 25999. A crash, a failed join or a kick fails the
@@ -136,8 +136,12 @@ observed rollback baseline is explicitly not a client-certified revision.
 The owner must first approve the mandatory Crafty launch guard and managed
 publication. Locked revisions currently accept Fabric's explicit Tools Java
 command with heap flags and `-jar fabric.jar nogui`, or the certified Forge
-1.20.1/47.4.28 installer's exact OS argument file and heap-only user arguments.
-Forge seals `defaultconfigs/` and refuses custom `defaultConfigPath` values.
+1.20.1/47.4.28 and NeoForge 1.21.1/21.1.219 installers' exact OS argument files
+and heap-only user arguments. The NeoForge recipe requires Java 21.
+Both FML loaders seal `defaultconfigs/` and refuse custom `defaultConfigPath`
+values. NeoForge dependency overrides and artifacts competing with its bundled
+MixinExtras or coremods libraries return inconclusive rather than a feasible
+solver witness. Unknown discovery services also prevent a feasible witness.
 Unsupported loaders and custom recipes are refused before adoption, not
 treated as verified.
 Direct config, pack, import or runtime edits cannot bypass an active lock.

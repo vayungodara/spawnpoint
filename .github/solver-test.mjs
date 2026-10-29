@@ -547,5 +547,88 @@ for (const [name, filename, libraryBytes] of [
   check(`a provisional nested ${name} identity cannot suppress its discovery uncertainty`, result.status === 'inconclusive' && !result.tentative);
 }
 
+// NeoForge 21.1.219 / FML 4.0.42 counterfactuals exercise the public solver.
+// Shared FML ranges/JarJar are covered above; NeoForge differs in dependency
+// types, language version, namespace, and per-mod (not per-file) ordering.
+const nruntime = { loader: 'neoforge', mc: '1.21.1', forge: '21.1.219' };
+const njar = (name, raw = {}, services = []) => {
+  const zip = new AdmZip();
+  zip.addFile('META-INF/neoforge.mods.toml', Buffer.from(stringify({ modLoader: 'lowcodefml', loaderVersion: '[4,5)', license: 'MIT',
+    mods: [{ modId: name, version: '1' }], ...raw })));
+  for (const service of services) zip.addFile(`META-INF/services/${service}`, Buffer.from('example.Custom'));
+  const version = { ...model(name, `${name}-neo`, '1'), loaders: ['neoforge'] };
+  return { version, bytes: zip.toBuffer() };
+};
+const nsolve = async (files, fields = {}, limits) => solve({ ...input([], files.map(f => exact(f.version))), loader: 'neoforge',
+  loaderVersion: nruntime.forge, languageVersions: { lowcodefml: '4.0.42', javafml: '4.0.42' }, side: 'both', ...fields }, {
+  versions: async id => files.filter(f => f.version.project_id === id).map(f => f.version),
+  jarMeta: async v => readForgeJar(files.find(f => f.version.id === v.id).bytes, v.files[0].filename, nruntime),
+  providers: async () => [],
+}, limits);
+const nlib = njar('neo_library', { mods: [{ modId: 'neo_library', version: '1' }, { modId: 'neo_secondary', version: '7.4' }] });
+const ndep = (type, range = '[7,8)', extra = {}) => njar('neo_user', { dependencies: { neo_user: [{ modId: 'neo_secondary', versionRange: range, type, ...extra }] } });
+result = await nsolve([nlib, ndep('required')]);
+check('NeoForge case-insensitive required dependencies use independently versioned secondary IDs', result.status === 'ok' && result.plan.length === 2);
+result = await nsolve([njar('neo_user', { dependencies: { neo_user: [{ modId: 'neo_missing', mandatory: false }] } })]);
+check('NeoForge defaults to REQUIRED even when the old mandatory boolean is false', result.status === 'conflict');
+check('NeoForge optional targets constrain only installed versions', (await nsolve([ndep('OPTIONAL')])).status === 'ok'
+  && (await nsolve([nlib, ndep('OPTIONAL', '[8,9)')])).status === 'conflict');
+check('NeoForge incompatibility rejects the matching range, not versions outside it', (await nsolve([nlib, ndep('INCOMPATIBLE')])).status === 'conflict'
+  && (await nsolve([nlib, ndep('INCOMPATIBLE', '[8,9)')])).status === 'ok');
+result = await nsolve([nlib, ndep('DISCOURAGED')]);
+check('NeoForge discouraged dependencies warn without discarding either requested root', result.status === 'ok' && result.plan.length === 2
+  && result.warnings.some(w => w.includes('discourages neo_secondary')));
+for (const type of ['REQUIRED', 'OPTIONAL', 'INCOMPATIBLE', 'DISCOURAGED']) {
+  const user = njar('neo_user', { dependencies: { neo_user: [{ modId: 'neo_secondary', type }] } });
+  result = await nsolve([nlib, user]);
+  check(`NeoForge omitted ${type} range matches every installed version`, type === 'INCOMPATIBLE' ? result.status === 'conflict'
+    : result.status === 'ok' && result.plan.length === 2 && (type !== 'DISCOURAGED' || result.warnings.some(w => w.includes('discourages neo_secondary'))));
+}
+check('NeoForge explicitly empty ranges remain distinct from omitted ranges', (await nsolve([nlib, ndep('INCOMPATIBLE', '')])).status === 'ok'
+  && (await nsolve([nlib, ndep('REQUIRED', '')])).status === 'conflict');
+check('NeoForge client-only incompatible requirements also constrain the friend pack', (await nsolve([nlib, ndep('INCOMPATIBLE', '[7,8)', { side: 'CLIENT' })])).status === 'conflict');
+const ncycle = njar('neo_cycle', { mods: [{ modId: 'neo_cycle' }, { modId: 'neo_other' }], dependencies: {
+  neo_cycle: [{ modId: 'neo_other', ordering: 'BEFORE', side: 'CLIENT' }], neo_other: [{ modId: 'neo_cycle', ordering: 'BEFORE' }],
+} });
+result = await nsolve([ncycle]);
+check('NeoForge detects ordering cycles between secondary IDs inside one jar without side filtering', result.status === 'conflict'
+  && result.explanation.some(reason => reason.includes('ordering has a cycle')));
+const ncompatible = njar('neo_compatible', { dependencies: { neo_compatible: [{ modId: 'minecraft', versionRange: '[1.21]' }, { modId: 'neoforge', versionRange: '[21.0.166]' }] } });
+check('NeoForge native compatibility fallback admits Minecraft 1.21 and NeoForge 21.0.166', (await nsolve([ncompatible])).status === 'ok');
+check('NeoForge language constraints use FML 4.0.42, not NeoForge 21.1.219', (await nsolve([njar('neo_language', { loaderVersion: '[21,)' })])).status === 'conflict');
+check('NeoForge uses its own global version substitution', (await nsolve([njar('neo_global', { mods: [{ modId: 'neo_global', version: '${global.neoForgeVersion}' }] })])).status === 'ok');
+for (const [name, raw] of [['missing license', { license: '' }], ['invalid dependency type', { dependencies: { neo_invalid: [{ modId: 'neo_missing', type: 'suggested' }] } }]]) {
+  result = await nsolve([njar('neo_invalid', raw)]);
+  check(`NeoForge ${name} cannot produce a feasible witness`, result.status === 'inconclusive' && !result.tentative);
+}
+for (const service of ['net.neoforged.neoforgespi.locating.IModFileReader', 'net.neoforged.neoforgespi.locating.IDependencyLocator',
+  'net.neoforged.neoforgespi.locating.IModFileCandidateLocator', 'net.neoforged.neoforgespi.earlywindow.GraphicsBootstrapper',
+  'net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider']) {
+  result = await nsolve([njar('neo_custom', {}, [service])]);
+  check(`NeoForge custom ${service.split('.').pop()} has no tentative graph`, result.status === 'inconclusive' && !result.tentative);
+}
+// javac --release 17: module example.custom provides IModFileReader with
+// example.Custom. Early service discovery applies even with mod TOML present.
+const serviceDescriptor = Buffer.from('yv66vgAAAD0ADgcAAgEAC21vZHVsZS1pbmZvAQAKU291cmNlRmlsZQEAEG1vZHVsZS1pbmZvLmphdmEBAAZNb2R1bGUTAAcBAA5leGFtcGxlLmN1c3RvbRMACQEACWphdmEuYmFzZQcACwEAMW5ldC9uZW9mb3JnZWQvbmVvZm9yZ2VzcGkvbG9jYXRpbmcvSU1vZEZpbGVSZWFkZXIHAA0BAA5leGFtcGxlL0N1c3RvbYAAAAEAAAAAAAAAAAACAAMAAAACAAQABQAAABwABgAAAAAAAQAIgAAAAAAAAAAAAAABAAoAAQAM', 'base64');
+const descriptorMod = njar('neo_descriptor'), descriptorZip = new AdmZip(descriptorMod.bytes);
+descriptorZip.addFile('module-info.class', serviceDescriptor);
+result = await nsolve([{ ...descriptorMod, bytes: descriptorZip.toBuffer() }]);
+check('NeoForge TOML does not hide descriptor-provided discovery services', result.status === 'inconclusive' && !result.tentative);
+for (const [group, artifact, module] of [['io.github.llamalad7', 'mixinextras-neoforge', 'mixinextras.neoforge'],
+  ['net.neoforged', 'neoforge-coremods', 'neoforge.coremods']]) {
+  const parent = njar('neo_overlap'), zip = new AdmZip(parent.bytes);
+  zip.addFile('META-INF/jarjar/metadata.json', Buffer.from(JSON.stringify({ jars: [{ identifier: { group, artifact },
+    version: { range: '[99,100)', artifactVersion: '99' }, path: 'library.jar' }] })));
+  zip.addFile('library.jar', nlib.bytes);
+  result = await nsolve([{ ...parent, bytes: zip.toBuffer() }]);
+  check(`NeoForge overlapping runtime coordinate ${artifact} cannot claim feasibility`, result.status === 'inconclusive' && !result.tentative);
+  const library = new AdmZip();
+  library.addFile('META-INF/MANIFEST.MF', Buffer.from(`Manifest-Version: 1.0\r\nFMLModType: GAMELIBRARY\r\nAutomatic-Module-Name: ${module}\r\n\r\n`));
+  result = await nsolve([{ ...parent, bytes: library.toBuffer() }]);
+  check(`NeoForge overlapping runtime identity ${module} cannot suppress a native bundle`, result.status === 'inconclusive' && !result.tentative);
+}
+result = await nsolve([nlib], {}, { maxNodes: 1 });
+check('NeoForge exhausted search returns inconclusive without an untested plan', result.status === 'inconclusive' && !result.tentative);
+
 console.log(`\n${checks - fails.length}/${checks} checks passed`);
 if (fails.length) process.exit(1);

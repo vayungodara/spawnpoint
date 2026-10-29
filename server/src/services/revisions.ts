@@ -252,11 +252,16 @@ async function launchSpec(id: string, dir = serverDir(id)) {
   const det = detect(dir, id);
   const loader = loaderVersion(dir, det);
   if (!det.mc || !loader) throw new Error('Minecraft and loader versions must be known before sealing a revision');
-  if (det.loader !== 'fabric' && !(det.loader === 'forge' && det.mc === '1.20.1' && loader === '47.4.28')) throw new Error('locked revisions support Fabric and the certified Forge 1.20.1 / 47.4.28 recipe');
+  if (det.loader !== 'fabric' && !(det.loader === 'forge' && det.mc === '1.20.1' && loader === '47.4.28')
+    && !(det.loader === 'neoforge' && det.mc === '1.21.1' && loader === '21.1.219')) throw new Error('locked revisions support Fabric, Forge 1.20.1 / 47.4.28 and NeoForge 1.21.1 / 21.1.219');
   const command = (await craftyApi.getServer(id)).execution_command;
   const javaCommand = command.startsWith(GUARD) ? command.slice(GUARD.length) : command;
   const executable = /^"([^"]+)"|^(\S+)/.exec(javaCommand)?.slice(1).find(Boolean);
   if (!executable || executable !== javaFor(det.mc, det.loader)) throw new Error('the server and test must use the same explicit Tools/ Java runtime');
+  if (det.loader === 'neoforge') {
+    const version = await run(executable, ['-XshowSettings:properties', '-version'], { timeout: 5_000 });
+    if (!/^\s*java.specification.version = 21\s*$/m.test(version.stderr)) throw new Error('the certified NeoForge recipe requires Java 21');
+  }
   const parsed = await run(process.platform === 'win32' ? 'python' : 'python3', ['-c', 'import json,shlex,sys; print(json.dumps(shlex.split(sys.argv[1])))', javaCommand]);
   let argv = JSON.parse(parsed.stdout) as string[];
   const heap = (arg: string): boolean => /^-Xm[sx]\d+[kKmMgG]$/.test(arg);
@@ -268,6 +273,7 @@ async function launchSpec(id: string, dir = serverDir(id)) {
     if (existsSync(fml)) {
       const config = parse(readFileSync(fml, 'utf8'));
       if (config.defaultConfigPath !== undefined && config.defaultConfigPath !== 'defaultconfigs') throw new Error('Forge defaultConfigPath overrides are not supported by locked revisions');
+      if (det.loader === 'neoforge' && config.dependencyOverrides !== undefined && Object.keys(config.dependencyOverrides as object).length) throw new Error('NeoForge dependency overrides are not certified by the solver');
     }
     const autoModpack = join(dir, 'automodpack', 'automodpack-server.json');
     const mods = join(dir, 'mods');
@@ -279,7 +285,7 @@ async function launchSpec(id: string, dir = serverDir(id)) {
       if (cfg.DO_NOT_CHANGE_IT !== 2 || cfg.modpackHost !== true || cfg.generateModpackOnStart !== true || cfg.selfUpdater !== false) throw new Error('Locked Forge AutoModpack requires a version 2 managed-publication config with hosting and generation enabled, and selfUpdater:false');
     }
     const name = process.platform === 'win32' ? 'win_args.txt' : 'unix_args.txt';
-    const argfile = `libraries/net/minecraftforge/forge/${det.mc}-${loader}/${name}`;
+    const argfile = det.loader === 'neoforge' ? `libraries/net/neoforged/neoforge/${loader}/${name}` : `libraries/net/minecraftforge/forge/${det.mc}-${loader}/${name}`;
     const index = argv.indexOf(`@${argfile}`);
     const prefix = argv.slice(1, index);
     if (argv[0] !== executable || index < 1 || argv.slice(index).join(' ') !== `@${argfile} nogui`
@@ -287,9 +293,11 @@ async function launchSpec(id: string, dir = serverDir(id)) {
     // Exact official installer data, not an allowlist that could admit agents,
     // absolute classpaths, nested @files, a different target or world options.
     const bytes = readFileSync(join(dir, argfile));
-    const expected = name === 'win_args.txt'
-      ? 'f86ee984b4577121b7fcbc41f4c5db5457370e7037841e97ceb348b9f9e928fcd5d9fae8320e3ce8399a1e8e46737d62044be5ce2bbe29cfb9fedc1b856c8e30'
-      : '667b0896ec529f99355eaf05761c6d0411c9b14b5c92a2eb9ba1dc3fbff82d1c6f60c27ac07e00f78ceeb40b705bad66ce3e5a64b0aac3c767849e4fb05094e5';
+    const expected = det.loader === 'neoforge' ? name === 'win_args.txt'
+      ? 'ac7c4cfad7e3c7904cafaaa80ce41288c08bbd4c77bf2ca4c0f0a6d050f0f0ad1bf48366e158be9b840387de71412faa6f21ae25d368d3d8fb73c6316c5ded13'
+      : 'bcfb91eafd64e138016fa689658baa756047a95e3060b70d194540abc50d4fd0a9c60edf3d69ac1afe7ce6341b2503db3a6119828821bc6edf018a27756ac740'
+      : name === 'win_args.txt' ? 'f86ee984b4577121b7fcbc41f4c5db5457370e7037841e97ceb348b9f9e928fcd5d9fae8320e3ce8399a1e8e46737d62044be5ce2bbe29cfb9fedc1b856c8e30'
+        : '667b0896ec529f99355eaf05761c6d0411c9b14b5c92a2eb9ba1dc3fbff82d1c6f60c27ac07e00f78ceeb40b705bad66ce3e5a64b0aac3c767849e4fb05094e5';
     if (createHash('sha512').update(bytes).digest('hex') !== expected) throw new Error('Forge loader arguments differ from the certified official installer');
     const flags = prefix.flatMap((arg) => arg !== '@user_jvm_args.txt' ? [arg]
       : readFileSync(join(dir, 'user_jvm_args.txt'), 'utf8').replace(/#[^\r\n]*/g, '').split(/\s+/).filter(Boolean));

@@ -22,6 +22,7 @@ const { install, solveCandidate, deleteInstalled } = await tsImport('../server/s
 const { candidate, candidateSet, discard, stage, stageConfig, stagingPath, approve, applyReady } = await tsImport('../server/src/services/packtxn.ts', import.meta.url);
 const { updateLedger, ledgerEntries } = await tsImport('../server/src/services/ledger.ts', import.meta.url);
 const { NetworkCatalog } = await tsImport('../server/src/services/solver/catalog.ts', import.meta.url);
+const { setOverride } = await tsImport('../server/src/services/detect.ts', import.meta.url);
 const { revisionDir, setRevisionState } = await tsImport('../server/src/services/revisions.ts', import.meta.url);
 const { PATHS } = await tsImport('../server/src/config.ts', import.meta.url);
 mkdirSync(join(root, 'Tools'), { recursive: true });
@@ -34,6 +35,8 @@ const sha = (bytes, algorithm) => createHash(algorithm).update(bytes).digest('he
 const record = (project, id, number, fields = {}, relations = [], loader = 'fabric') => {
   const zip = new AdmZip();
   if (loader === 'forge') zip.addFile('META-INF/mods.toml', Buffer.from(stringify({ modLoader: 'javafml', loaderVersion: '[47,)',
+    mods: [{ modId: project, version: number }], ...fields })));
+  else if (loader === 'neoforge') zip.addFile('META-INF/neoforge.mods.toml', Buffer.from(stringify({ modLoader: 'javafml', loaderVersion: '[4,5)', license: 'MIT',
     mods: [{ modId: project, version: number }], ...fields })));
   else zip.addFile('fabric.mod.json', Buffer.from(JSON.stringify({ schemaVersion: 1, id: project, version: number, ...fields })));
   const bytes = zip.toBuffer();
@@ -72,6 +75,10 @@ const fixture = (items, kind = 'fabric') => {
   const dir = join(PATHS.craftyServers, id);
   mkdirSync(join(dir, 'mods'), { recursive: true });
   if (kind === 'forge') mkdirSync(join(dir, 'libraries/net/minecraftforge/forge/1.20.1-47.4.28'), { recursive: true });
+  else if (kind === 'neoforge') {
+    mkdirSync(join(dir, 'libraries/net/neoforged/neoforge/21.1.219'), { recursive: true });
+    setOverride(id, { loader: 'neoforge', mc: '1.21.1' });
+  }
   else {
     mkdirSync(join(dir, 'libraries/net/fabricmc/fabric-loader/0.20.1'), { recursive: true });
     const loader = new AdmZip(); loader.addFile('install.properties', Buffer.from('game-version=1.21.1'));
@@ -119,6 +126,26 @@ try {
     && candidate(forge.id).files.find((s) => s.entry.projectId === 'forgelib').entry.via === 'dependency');
   check('Forge whole-pack planning does not write live files or ledger', forge.bytes() === forgeBefore.bytes && forge.ledger() === forgeBefore.ledger);
   discard(forge.id);
+
+  const neoOld = record('neolib', 'neolib1', '1.0.0', {}, [], 'neoforge');
+  const neoNew = record('neolib', 'neolib2', '2.0.0', {}, [], 'neoforge');
+  const neoUser = record('neouser', 'neouser1', '1.0.0', {
+    dependencies: { neouser: [{ modId: 'neolib', versionRange: '[2,3)' }] },
+  }, [{ project_id: 'neolib', version_id: null, dependency_type: 'required' }], 'neoforge');
+  const neo = fixture([[neoOld, false]], 'neoforge');
+  const neoBefore = { bytes: neo.bytes(), ledger: neo.ledger() };
+  const neoResult = await install(neo.id, { projectId: 'neouser', versionId: neoUser.id, type: 'mod' });
+  check('NeoForge native dependency type defaults reach public install without the legacy repair path', !neoResult.error
+    && neoResult.solver.status === 'ok' && neoResult.solver.changes.changed[0].to.versionId === neoNew.id
+    && candidate(neo.id).files.find(s => s.entry.projectId === 'neouser').entry.via === 'direct'
+    && candidate(neo.id).files.find(s => s.entry.projectId === 'neolib').entry.via === 'dependency');
+  check('NeoForge planning preserves live bytes and ledger before consent', neo.bytes() === neoBefore.bytes && neo.ledger() === neoBefore.ledger);
+  discard(neo.id);
+  mkdirSync(join(neo.dir, 'config'));
+  writeFileSync(join(neo.dir, 'config/fml.toml'), '[dependencyOverrides]\nneouser=["-neolib"]\n');
+  const overridden = await install(neo.id, { projectId: 'neouser', versionId: neoUser.id, type: 'mod' });
+  check('NeoForge dependency overrides cannot produce a silently weakened feasible pack', overridden.error?.includes('dependency overrides')
+    && candidate(neo.id)?.status === 'rejected' && neo.bytes() === neoBefore.bytes && neo.ledger() === neoBefore.ledger);
 
   const moduleLibrary = record('module_library', 'upstream-library-1', '1.0.0', {}, [], 'forge');
   const libraryZip = new AdmZip();

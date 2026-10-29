@@ -14,7 +14,7 @@ export interface Pin {
 }
 export interface SolveInput {
   mc: string;
-  loader: 'fabric' | 'forge';
+  loader: 'fabric' | 'forge' | 'neoforge';
   java: string;
   loaderVersion: string;
   languageVersions?: Record<string, string>;
@@ -29,11 +29,11 @@ export interface SolveInput {
 }
 export interface Catalog {
   /** Complete compatible domain, including installed and explicitly pinned versions. */
-  versions(projectId: string, filter: { mc: string; loader: 'fabric' | 'forge' }): Promise<Version[]>;
+  versions(projectId: string, filter: { mc: string; loader: SolveInput['loader'] }): Promise<Version[]>;
   jarMeta(version: Version): Promise<NativeMeta>;
   /** Complete provider index for a native id (including nested ids).
    * Missing capability is unknown, not evidence that no provider exists. */
-  providers?(modId: string, filter: { mc: string; loader: 'fabric' | 'forge' }): Promise<string[] | { projects: string[]; complete: boolean }>;
+  providers?(modId: string, filter: { mc: string; loader: SolveInput['loader'] }): Promise<string[] | { projects: string[]; complete: boolean }>;
   /** Needed only for required Modrinth dependencies with a version id but no project id. */
   version?(versionId: string): Promise<Version>;
 }
@@ -115,7 +115,7 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
   const meta = async (version: Version): Promise<NativeMeta> => {
     if (!metadata.has(version.id)) metadata.set(version.id, await call(() => catalog.jarMeta(version)));
     const result = metadata.get(version.id)!;
-    if (('loader' in result) !== (input.loader === 'forge')) throw new Error(`Wrong native metadata for ${input.loader}`);
+    if ('loader' in result ? result.loader !== input.loader : input.loader !== 'fabric') throw new Error(`Wrong native metadata for ${input.loader}`);
     return result;
   };
 
@@ -258,11 +258,11 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
       if (!providers.get(id)!.complete) return uncertain(`The provider index for ${id} is incomplete; no allowed indexed provider satisfied ${range}.`);
       return reject(`${owner} requires ${id} ${range}, but no allowed provider can satisfy it for Minecraft ${input.mc} / ${input.loader}.`);
     };
-    if (input.loader === 'forge') {
+    if (input.loader === 'forge' || input.loader === 'neoforge') {
       const warnings = new Set<string>();
       for (const environment of environments) {
         const result = validateForge([...selected].map(([owner, pick]) => ({ owner, meta: pick.meta as ForgeJar })), environment === 1 ? 'server' : 'client', {
-          mc: input.mc, forge: input.loaderVersion, java: input.java, languages: input.languageVersions ?? {}, features: input.features,
+          mc: input.mc, loader: input.loader, forge: input.loaderVersion, java: input.java, languages: input.languageVersions ?? {}, features: input.features,
         }, () => tick(true));
         if (result.status === 'conflict') return reject(result.reason);
         if (result.status === 'inconclusive') return uncertain(result.reason);
@@ -321,7 +321,7 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
 
   try {
     tick();
-    if (!input.mc || !input.java || !input.loaderVersion || !['fabric', 'forge'].includes(input.loader)) {
+    if (!input.mc || !input.java || !input.loaderVersion || !['fabric', 'forge', 'neoforge'].includes(input.loader)) {
       return { status: 'inconclusive', reason: 'Minecraft, Java and a supported loader version are required.' };
     }
     if (installed.size !== input.installed.length) return { status: 'inconclusive', reason: 'Installed pins contain duplicate project ids.' };
