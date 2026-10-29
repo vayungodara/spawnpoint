@@ -9,7 +9,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, exis
 import { tmpdir, userInfo, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const root = mkdtempSync(join(tmpdir(), 'spawnpoint-owner-'));
+// The dedicated service account cannot use a layout inside a private user Temp.
+mkdirSync('.amp/in', { recursive: true });
+const root = mkdtempSync(process.platform === 'win32' ? resolve('.amp/in/spawnpoint-owner-') : join(tmpdir(), 'spawnpoint-owner-'));
 process.env.SPAWNPOINT_ROOT = root;
 process.env.SPAWNPOINT_NODE = process.execPath;
 const data = join(root, 'Spawnpoint/data'), runtime = join(data, 'runtime');
@@ -25,7 +27,8 @@ const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const { supervisor } = await import('../server/dist/services/native.js');
 if (service && process.platform === 'linux') assert.ok(!existsSync('/etc/systemd/system/spawnpoint-supervisor.service'), 'never replace an installed service in a test');
 if (service && process.platform === 'darwin') assert.ok(!existsSync(join(homedir(), 'Library/LaunchAgents/com.spawnpoint.supervisor.plist')), 'never replace an installed service in a test');
-let panel, owner, installed = false, cookie = '';
+if (service && process.platform === 'win32') assert.equal(spawnSync('sc.exe', ['query', 'SpawnpointSupervisor']).status, 1060, 'never replace an installed service in a test');
+let panel, owner, failure, installed = false, cookie = '';
 let checks = 0;
 const check = (name, condition) => { assert.ok(condition, name); checks++; console.log('PASS:', name); };
 const command = (...args) => execFileSync(args[0], args.slice(1), { stdio: 'pipe', timeout: 90_000 });
@@ -61,9 +64,9 @@ async function startOwner() {
   if (service) {
     if (!installed) {
       const args = [python, script, 'install', '--root', root, '--node', process.execPath];
+      installed = true; // A failed installer may already have created the unit.
       if (process.platform === 'linux') command('sudo', ...args, '--system', '--user', userInfo().username);
       else command(...args);
-      installed = true;
     } else if (process.platform === 'linux') system('start');
     else if (process.platform === 'win32') command('sc.exe', 'start', 'SpawnpointSupervisor');
     else command('launchctl', 'bootstrap', 'gui/' + process.getuid(), join(homedir(), 'Library/LaunchAgents/com.spawnpoint.supervisor.plist'));
@@ -75,8 +78,20 @@ async function stopOwner() {
   if (!installed) return;
   if (process.platform === 'linux') system('stop');
   else if (process.platform === 'win32') {
-    command('sc.exe', 'stop', 'SpawnpointSupervisor');
-    await until(() => /STOPPED/.test(command('sc.exe', 'query', 'SpawnpointSupervisor').toString()), 'SCM stop timeout');
+    command('powershell', '-NoProfile', '-Command', `
+$ErrorActionPreference = 'Stop'
+$service = Get-Service -Name SpawnpointSupervisor
+if ($service.Status -eq 'StartPending') { $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(90)) }
+$processId = (Get-CimInstance Win32_Service -Filter "Name='SpawnpointSupervisor'").ProcessId
+if (-not $processId) { throw 'SCM owner identity unavailable; retain the layout for inspection' }
+$owner = [System.Diagnostics.Process]::GetProcessById($processId)
+[void]$owner.get_Handle()
+$service.Refresh()
+if ($service.Status -eq 'Running') { $service.Stop() }
+elseif ($service.Status -notin @('Stopped', 'StopPending')) { throw "Unexpected SCM state: $($service.Status)" }
+$service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(90))
+if (-not $owner.WaitForExit(90000)) { throw 'SCM owner process did not exit' }
+`);
   } else {
     const target = 'gui/' + process.getuid() + '/com.spawnpoint.supervisor';
     command('launchctl', 'bootout', target);
@@ -94,6 +109,7 @@ try {
   await startOwner();
   if (service && process.platform === 'darwin') {
     const previous = (await supervisor('health')).pid;
+    console.log('LaunchAgent owner before reinstall:', previous);
     command(python, script, 'install', '--root', root, '--node', process.execPath);
     check('reinstalling a loaded LaunchAgent waits for the previous owner to exit', (await supervisor('health')).pid !== previous);
   }
@@ -258,12 +274,27 @@ createInterface({input:process.stdin}).on('line',async line=>{
   }
   console.log(`native runtime contract: ${checks} checks passed on ${process.platform}${service ? ' with the native OS service' : ''}`);
 } catch (error) {
+  failure = error;
   console.error('Primary failure:', error);
-  console.error('Failure evidence:', await supervisor('stats', { id }).catch(String), await supervisor('logs', { id }).then((lines) => lines.slice(-5), String));
+  try {
+    console.error('Failure evidence:', await supervisor('stats', { id }).catch(String), await supervisor('logs', { id }).then((lines) => lines.slice(-100), String));
+    if (service) {
+      const args = process.platform === 'win32' ? ['sc.exe', 'queryex', 'SpawnpointSupervisor']
+        : process.platform === 'darwin' ? ['launchctl', 'print', 'gui/' + process.getuid() + '/com.spawnpoint.supervisor']
+          : ['systemctl', 'show', '-p', 'MainPID,ActiveState,SubState,Result,ExecMainStatus', 'spawnpoint-supervisor.service'];
+      const state = spawnSync(args[0], args.slice(1), { encoding: 'utf8' });
+      const output = process.platform === 'darwin'
+        ? (state.stdout || '').split('\n').filter((line) => /^\s*(state|pid|runs|last exit code|program|path) =/.test(line)).join('\n') : state.stdout;
+      console.error('OS service metadata:', state.status, output, state.stderr);
+      const log = join(runtime, 'service.log');
+      if (existsSync(log)) console.error('Owner service log:', readFileSync(log, 'utf8').split('\n').slice(-100).join('\n'));
+    }
+  } catch (diagnosticError) { console.error('Diagnostic failure:', diagnosticError); }
   throw error;
 } finally {
-  await stopChild(panel);
-  try { await stopOwner(); } finally {
+  try {
+    await stopChild(panel);
+    await stopOwner(); // Never remove a live owner's service or layout.
     if (installed) {
       if (process.platform === 'linux') {
         system('disable'); command('sudo', 'rm', '/etc/systemd/system/spawnpoint-supervisor.service'); command('sudo', 'systemctl', 'daemon-reload');
@@ -273,5 +304,8 @@ createInterface({input:process.stdin}).on('line',async line=>{
       }
     }
     rmSync(root, { recursive: true, force: true });
+  } catch (cleanupError) {
+    console.error('Cleanup failure:', cleanupError);
+    if (!failure) throw cleanupError;
   }
 }
