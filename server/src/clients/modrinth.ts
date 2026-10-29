@@ -28,7 +28,7 @@ const TTL = 60_000;
 async function mr<T>(path: string): Promise<T> {
   const hit = cache.get(path);
   if (hit && Date.now() - hit.at < TTL) return hit.data as T;
-  const res = await fetch(`${BASE}${path}`, { headers: { 'user-agent': UA } });
+  const res = await fetch(`${BASE}${path}`, { signal: AbortSignal.timeout(15_000), headers: { 'user-agent': UA } });
   if (!res.ok) throw new Error(`Modrinth ${path} -> ${res.status}`);
   const data = (await res.json()) as T;
   cache.set(path, { at: Date.now(), data });

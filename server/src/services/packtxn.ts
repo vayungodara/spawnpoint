@@ -12,7 +12,9 @@ import { autoModpackActive, extrasDir, publishPack } from './automodpack.js';
 import { clientGate, type ClientSet } from './launchgate.js';
 import { isRunningSafe, busyReason } from './maintenance.js';
 import { promotion, requestPromotion, restarting } from './promote.js';
-import { sealRevision, verifyRevision, revisionInputs, revisionMoves, withStoppedRevision, lockedPath, revisionDir, reportRevision, revisionState, setRevisionState, installLaunchGuard, writeLaunchGate, packPath, hashes, readLock, type RevisionInput } from './revisions.js';
+import { detect } from './detect.js';
+import { sealRevision, verifyRevision, revisionInputs, revisionMoves, withStoppedRevision, lockedPath, revisionDir, reportRevision, revisionReport, revisionState, setRevisionState, installLaunchGuard, writeLaunchGate, packPath, hashes, readLock, type RevisionInput } from './revisions.js';
+import type { SolveInput, SolveResult } from './solver/index.js';
 
 // PACK TRANSACTIONS. A mod change never touches a live folder until it has
 // passed its tests. Installs download into one candidate per server
@@ -29,8 +31,10 @@ export interface StagedFile {
   to: 'mods' | 'shelf';
   /** A pack config edit, staged and tested rather than written live. */
   path?: string;
-  /** Explicit owner-requested removal; never an automatic repair. */
+  /** Proposed removal; always needs owner consent before promotion. */
   remove?: boolean;
+  /** Dependency-only removal proposed by the solver, not an owner exclusion. */
+  automatic?: boolean;
   /** a live file this one supersedes (an older version of the same mod) */
   replaces?: string;
   /** ledger record to write on apply; absent for hand-uploaded jars */
@@ -57,6 +61,9 @@ export interface Candidate {
   revision?: string;
   baseline?: string;
   consent?: string[];
+  solver?: SolveResult;
+  /** Owner intent survives retests; staged dependency choices are not pins. */
+  requests?: SolveInput['add'];
   updatedAt: string;
 }
 
@@ -101,7 +108,7 @@ export function stagingPath(id: string, file: string): string {
 /** Files already staged for this server (planning treats them as installed). */
 export function stagedFiles(id: string): StagedFile[] {
   const c = candidate(id);
-  return isOpen(c) ? c.files.filter((f) => !f.remove) : [];
+  return isOpen(c) ? c.files : [];
 }
 
 const timers = new Map<string, NodeJS.Timeout>();
@@ -117,7 +124,7 @@ export function txnBusy(): boolean {
 }
 
 /** Add downloaded files to this server's candidate and (re)start its quiet timer. */
-export function stage(id: string, files: StagedFile[], log: (m: string) => void): Candidate {
+export function stage(id: string, files: StagedFile[], log: (m: string) => void, planning?: Pick<Candidate, 'solver' | 'requests'> & { keep?: string[] }): Candidate {
   assertCanStage(id);
   const prev = candidate(id);
   const c: Candidate = isOpen(prev) ? prev : { txn: new Date().toISOString().replace(/[:.]/g, '-'), status: 'collecting', detail: '', files: [], updatedAt: '' };
@@ -125,9 +132,13 @@ export function stage(id: string, files: StagedFile[], log: (m: string) => void)
     for (const old of c.files.filter((x) => x.file === f.file || (f.entry && x.entry?.projectId === f.entry.projectId))) {
       if (old.file !== f.file) rmSync(join(filesDir(id), old.file), { force: true });
       // a staged update of a staged mod replaces what the first one replaced
-      if (!f.replaces || f.replaces === old.file) f.replaces = old.replaces;
+      if (!old.remove && (!f.replaces || f.replaces === old.file)) f.replaces = old.replaces;
     }
     c.files = c.files.filter((x) => x.file !== f.file && !(f.entry && x.entry?.projectId === f.entry.projectId)).concat(f);
+  }
+  if (planning?.keep) {
+    for (const f of c.files) if (!planning.keep.includes(f.file)) rmSync(join(filesDir(id), f.file), { force: true });
+    c.files = c.files.filter((f) => planning.keep!.includes(f.file));
   }
   generation.set(id, (generation.get(id) ?? 0) + 1);
   // an approval or a tested pack was for the files before this batch
@@ -135,6 +146,8 @@ export function stage(id: string, files: StagedFile[], log: (m: string) => void)
   c.pack = undefined;
   c.revision = undefined;
   c.consent = undefined;
+  c.solver = planning?.solver ?? (files.some((f) => f.file.endsWith('.jar') || f.remove || f.replaces) ? undefined : c.solver);
+  c.requests = planning?.requests ?? c.requests;
   if (c.status !== 'testing') {
     c.status = 'collecting';
     c.detail = 'waiting a few seconds for more changes, then boot-testing';
@@ -343,7 +356,10 @@ export function candidateSet(id: string, c: Pick<Candidate, 'files'>): { serverJ
 function inputsFor(id: string, c: Pick<Candidate, 'files'>): RevisionInput[] {
   const set = candidateSet(id, c);
   const ledger = ledgerEntries(id);
-  const entry = (src: string): LedgerEntry | undefined => c.files.find((f) => f.file === basename(src))?.entry ?? ledger.find((e) => e.file === basename(src));
+  const entry = (src: string): LedgerEntry | undefined => {
+    const staged = c.files.find((f) => f.file === basename(src));
+    return staged ? staged.entry : ledger.find((e) => e.file === basename(src));
+  };
   const inputs = revisionInputs(id).filter((f) => !c.files.some((s) => s.path === f.path) && (!f.path.startsWith('mods/') || (!f.path.endsWith('.jar') && !c.files.some((s) => [s.file, s.replaces].includes(basename(f.path))))));
   for (const f of c.files.filter((f) => !f.remove && !f.file.endsWith('.jar'))) inputs.push({ src: join(filesDir(id), f.file), path: f.path ?? `mods/${f.file}`, side: 'server', location: f.to === 'mods' ? 'server' : 'shelf', entry: f.entry });
   for (const src of set.serverJars) inputs.push({ src, path: `mods/${basename(src)}`, side: isServerOnly(src) ? 'server' : 'both', location: 'server', entry: entry(src) });
@@ -391,12 +407,21 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       const gen = generation.get(id) ?? 0;
       status('checking declared dependencies');
       let set = candidateSet(id, c);
-
-      const missing = scanJars(set.serverJars).missing.filter((m) => !healed.has(m));
-      if (missing.length && missing.length <= 6) {
-        missing.forEach((m) => healed.add(m));
-        status(`installing missing dependencies: ${missing.join(', ')}`);
-        if ((await healMissing(id, missing)).length) continue;
+      const fabric = detect(serverDir(id), id).loader === 'fabric';
+      if (fabric) {
+        status('solving the complete server and friend pack');
+        const { solveCandidate } = await import('./installer.js');
+        const solved = await solveCandidate(id, [], log);
+        c = save(id, { ...candidate(id)!, solver: solved.solver });
+        if (solved.error) return wait(id, {}, solved.error, log);
+        if (solved.candidate) continue;
+      } else {
+        const missing = scanJars(set.serverJars).missing.filter((m) => !healed.has(m));
+        if (missing.length && missing.length <= 6) {
+          missing.forEach((m) => healed.add(m));
+          status(`installing missing dependencies: ${missing.join(', ')}`);
+          if ((await healMissing(id, missing)).length) continue;
+        }
       }
 
       const baseline = revisionState(id).active ?? `${c.txn}-baseline`;
@@ -413,7 +438,26 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       c = save(id, { ...candidate(id)!, revision, baseline });
       const sealed = sealedSet(id, revision);
       set = sealed;
-
+      const witness = c.solver?.status === 'ok' ? c.solver : c.solver?.status === 'inconclusive' ? c.solver.tentative : undefined;
+      if (fabric) {
+        const paths = [...new Set([...set.serverJars, ...set.client.filter((f) => f.rel.startsWith('mods/') && f.rel.endsWith('.jar')).map((f) => f.src)])];
+        let matches = !!witness && paths.length === witness.plan.length;
+        for (const path of paths) {
+          const actual = await hashes(path);
+          if (!witness?.plan.some((p) => p.file === basename(path) && p.sha1 === actual.sha1)) matches = false;
+        }
+        if (!matches) {
+          const why = 'The sealed mod inventory differs from the complete solver plan; test the new inventory again';
+          reportRevision(id, revision, { tests: { solver: { result: 'failed', detail: why, renderer: 'none' } } });
+          return wait(id, {}, why, log);
+        }
+      }
+      reportRevision(id, revision, { tests: {
+        solver: witness ? { result: 'passed', detail: 'Loader metadata, exact source relations and both client/server constraints satisfied', renderer: 'none' }
+          : { result: 'inconclusive', detail: 'This loader has not been solved', renderer: 'none' },
+        optimality: c.solver?.status === 'ok' ? { result: 'passed', detail: 'Minimum existing-version changes proved against the original live inventory', renderer: 'none' }
+          : { result: 'inconclusive', detail: c.solver?.status === 'inconclusive' ? `${c.solver.reason} Fewer replacements may be possible.` : 'Minimum changes not checked', renderer: 'none' },
+      } });
       status('boot-testing the server with this change');
       // every verdict below is only acted on if nothing changed meanwhile
       const stale = (): boolean => (generation.get(id) ?? 0) !== gen;
@@ -429,7 +473,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
         if (stale()) continue;
         // the loader names missing mod ids: install them and test again
         const named = missingFromExcerpt(server.excerpt ?? []).filter((m) => !healed.has(m));
-        if (named.length && named.length <= 4) {
+        if (!fabric && named.length && named.length <= 4) {
           named.forEach((m) => healed.add(m));
           status(`installing missing dependencies: ${named.join(', ')}`);
           if ((await healMissing(id, named)).length) continue;
@@ -633,6 +677,9 @@ function activate(id: string, c: Candidate, log: (m: string) => void, approved =
     const touches = touchesServer(id, c);
     const wait = !applying || await isRunningSafe(id);
     if (!c.revision || !c.baseline) throw new Error('this change has no revision lock; test it again');
+    if (readLock(id, c.revision).loader === 'fabric' && revisionReport(id, c.revision).tests.solver?.result !== 'passed') {
+      throw new Error('the exact revision solver inventory check must pass before approval or promotion; test this change again');
+    }
     await verifyRevision(id, c.revision);
     const pack = autoModpackActive(id) ? await packHashes(sealedSet(id, c.revision).client) : undefined;
     // a second approval queued behind the first finds it already applied

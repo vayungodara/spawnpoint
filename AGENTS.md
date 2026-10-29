@@ -12,14 +12,18 @@ Run `npm ci` and `npm run build`, then:
 node .github/smoke-boot.mjs
 node .github/wizard-e2e.mjs
 node .github/revision-guard.mjs
+node .github/solver-test.mjs
+node .github/solver-install.mjs
 npx oxlint server/src
 npm run lint -w web
 ```
 
 The guard checks run on Linux, macOS, and Windows in CI. They exercise real
 processes, file locks, hash drift and TCP listeners, but do not replace the
-Crafty/Fabric proof below. The current baseline has five server lint warnings
-and two web lint warnings. Do not suppress them to make a change look green.
+Crafty/Fabric proof below. The installer checks need Java on `PATH` and use
+an isolated layout with controlled catalog/CDN responses. The current
+baseline has five server lint warnings and two web lint warnings. Do not
+suppress them to make a change look green.
 
 ## Disposable orb integration environment
 
@@ -57,6 +61,12 @@ Fabric before pushing. Do not turn an inconclusive test into a pass.
 - Install FerriteCore `bwKMSBhn` (7.0.2-hotfix) over 7.0.3. Confirm the final
   sealed configs pass server, client, join and AutoModpack handshake checks.
   Verify nothing live changes before explicit replacement/config consent.
+- Promote Balm `Pz0YXByM` and Waystones `pCpQ1Jxr` together, then request
+  Waystones `nSAwjAk4`. It needs Balm `EghJxg4h` because the native mod ID
+  changed. Verify that only those two projects change, all requested roots
+  remain, and feasibility passes while optimality stays inconclusive with
+  the partial provider index. Repeat the full boot, handshake and publication
+  checks, including consent and unchanged live bytes before promotion.
 - Refuse absent consent, stale-revision approval and altered sealed bytes.
   Tamper a locked config and a shelf mirror while stopped. Direct Crafty
   starts must refuse before Java; publication must reject changed bytes even

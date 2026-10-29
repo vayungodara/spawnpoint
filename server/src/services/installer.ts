@@ -1,18 +1,23 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, statSync, copyFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { chownToDirOwner, writeFileAtomic } from './platform.js';
 import { PATHS } from '../config.js';
-import { serverDir, clientShelfDir } from './servers.js';
-import { detect, type Detection } from './detect.js';
+import { serverDir, clientShelfDir, javaFor } from './servers.js';
+import { detect, loaderVersion, type Detection } from './detect.js';
 import * as modrinth from '../clients/modrinth.js';
 import * as curseforge from '../clients/curseforge.js';
 import type { ContentType, Version } from '../clients/modrinth.js';
 import { queueChange, listPending, applyPending, type PendingAction } from './pendingmods.js';
 import { ledgerEntries, updateLedger, type LedgerEntry } from './ledger.js';
-import { stage, stagedFiles, stagingPath, invalidate, assertModsWritable, assertCanStage, type Candidate, type StagedFile } from './packtxn.js';
+import { stage, stagedFiles, stagingPath, invalidate, assertModsWritable, assertCanStage, candidate, candidateSet, exclusive, type Candidate, type StagedFile } from './packtxn.js';
 import { scanJars } from './jardeps.js';
-import { assertUnsealed, revisionState } from './revisions.js';
+import { assertUnsealed, revisionState, hashes } from './revisions.js';
+import { NetworkCatalog } from './solver/catalog.js';
+import { solve, type Pin, type SolveResult } from './solver/index.js';
+import { readFabricJar } from './solver/fabric.js';
 
 // The install engine: picks the right build for the server's MC version and
 // loader (releases first), resolves required dependencies (keeping any copy
@@ -34,6 +39,7 @@ export interface InstallResult {
   candidate?: Candidate;
   /** why this install went live without a boot test */
   untested?: string;
+  solver?: SolveResult;
 }
 
 export interface InstallOpts {
@@ -53,6 +59,8 @@ interface Planned {
   url: string;
   size?: number;
   sha1?: string;
+  sha512?: string;
+  src?: string;
   entry: LedgerEntry;
   replaces?: string;
 }
@@ -86,7 +94,10 @@ function knownProjects(serverUuid: string): Map<string, LedgerEntry> {
   for (const e of ledgerEntries(serverUuid)) {
     if (dirs.some((d) => existsSync(join(d, e.file)))) known.set(e.projectId, e);
   }
-  for (const f of stagedFiles(serverUuid)) if (f.entry) known.set(f.entry.projectId, f.entry);
+  for (const f of stagedFiles(serverUuid)) {
+    for (const [id, entry] of known) if (entry.file === f.file || entry.file === f.replaces) known.delete(id);
+    if (f.entry && !f.remove) known.set(f.entry.projectId, f.entry);
+  }
   return known;
 }
 
@@ -96,11 +107,12 @@ const titleKey = (t: string): string => t.toLowerCase().replace(/[^a-z0-9]/g, ''
 
 class Refusal extends Error {}
 
-async function fetchFile(url: string, sha1?: string): Promise<Buffer> {
-  const res = await fetch(url, { headers: { 'user-agent': 'spawnpoint/1.0' }, redirect: 'follow' });
-  if (!res.ok) throw new Error(`download failed (${res.status})`);
-  const buf = Buffer.from(await res.arrayBuffer());
+async function fetchFile(url: string, sha1?: string, sha512?: string, src?: string): Promise<Buffer> {
+  const res = src ? undefined : await fetch(url, { signal: AbortSignal.timeout(15_000), headers: { 'user-agent': 'spawnpoint/1.0' }, redirect: 'follow' });
+  if (res && !res.ok) throw new Error(`download failed (${res.status})`);
+  const buf = src ? readFileSync(src) : Buffer.from(await res!.arrayBuffer());
   if (sha1 && createHash('sha1').update(buf).digest('hex') !== sha1) throw new Error('download failed its checksum');
+  if (sha512 && createHash('sha512').update(buf).digest('hex') !== sha512) throw new Error('download failed its SHA-512 checksum');
   return buf;
 }
 
@@ -108,7 +120,8 @@ async function fetchFile(url: string, sha1?: string): Promise<Buffer> {
 
 /** Download a plan and either stage it (mods on modded servers) or write it
     straight into the live folders. */
-async function commit(serverUuid: string, det: Detection, type: ContentType, plan: Planned[], direct: boolean, result: InstallResult, log: (m: string) => void): Promise<InstallResult> {
+async function commit(serverUuid: string, det: Detection, type: ContentType, plan: Planned[], direct: boolean, result: InstallResult, log: (m: string) => void,
+  planning?: { removals: StagedFile[]; requests: Candidate['requests']; keep: string[]; beforeWrite: () => Promise<void> }): Promise<InstallResult> {
   const viaCandidate = type === 'mod' && MOD_LOADERS.has(det.loader) && !direct;
   if (direct && type === 'mod') assertUnsealed(serverUuid);
   const staged: { file: StagedFile; buf: Buffer }[] = [];
@@ -117,7 +130,8 @@ async function commit(serverUuid: string, det: Detection, type: ContentType, pla
   // or library is a failed request, never a smaller successful pack.
   const downloaded = new Map<Planned, Buffer>();
   try {
-    for (const p of plan) downloaded.set(p, await fetchFile(p.url, p.sha1));
+    for (const p of plan) downloaded.set(p, await fetchFile(p.url, p.sha1, p.sha512, p.src));
+    await planning?.beforeWrite();
   } catch (e) {
     return { ...result, error: `Nothing was installed: ${(e as Error).message}` };
   }
@@ -139,7 +153,9 @@ async function commit(serverUuid: string, det: Detection, type: ContentType, pla
   }
   // one synchronous step from the first staged byte to stage(): a running
   // test sees the generation change before any file under it is replaced
-  if (staged.length) {
+  const intentChanged = planning && JSON.stringify(candidate(serverUuid)?.requests ?? []) !== JSON.stringify(planning.requests);
+  const overlayChanged = planning && stagedFiles(serverUuid).some((f) => !planning.keep.includes(f.file));
+  if (staged.length || planning?.removals.length || overlayChanged || (intentChanged && stagedFiles(serverUuid).length)) {
     // a running test must not pass on bytes about to be replaced, even if a
     // write below fails before stage() registers the batch
     assertCanStage(serverUuid);
@@ -156,7 +172,8 @@ async function commit(serverUuid: string, det: Detection, type: ContentType, pla
       for (const f of written) if (!known.has(f)) rmSync(stagingPath(serverUuid, f), { force: true });
       throw e;
     }
-    result.candidate = stage(serverUuid, staged.map((s) => s.file), log);
+    result.candidate = stage(serverUuid, staged.map((s) => s.file).concat(planning?.removals ?? []), log,
+      { solver: result.solver, requests: planning?.requests, keep: planning?.keep });
   }
   if (written.length) {
     const names = new Set(written.map((e) => e.file));
@@ -172,9 +189,157 @@ async function commit(serverUuid: string, det: Detection, type: ContentType, pla
 
 const noLog = (): void => {};
 
+/** Solve the whole proposed pack, retaining unrecognized jars as immutable
+    owner roots. No bytes or ledger entries change until the full plan and the
+    inventory it was computed against have both been verified. */
+export function solveCandidate(
+  id: string,
+  add: { projectId: string; versionId?: string; requested?: boolean }[] = [],
+  log: (m: string) => void = noLog,
+): Promise<InstallResult> {
+  return exclusive(id, async () => {
+    const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: true };
+    let catalog: NetworkCatalog | undefined;
+    try {
+      assertCanStage(id);
+      const det = detect(serverDir(id), id);
+      const loader = loaderVersion(serverDir(id), det);
+      const java = javaFor(det.mc, det.loader);
+      if (det.loader !== 'fabric' || !det.mc || !loader || !java) throw new Error('The solver needs known Minecraft, Fabric loader and Java versions');
+      const snapshot = async () => {
+        const changes = stagedFiles(id);
+        const inventory = async (files: StagedFile[], entries: LedgerEntry[]) => {
+          const set = candidateSet(id, { files });
+          const paths = [...new Set([...set.serverJars, ...set.client.filter((f) => f.rel.startsWith('mods/') && f.rel.endsWith('.jar')).map((f) => f.src)])].sort();
+          const rows = [];
+          for (const path of paths) rows.push({ path, clientOnly: !set.serverJars.includes(path),
+            entry: entries.find((e) => e.file === basename(path)), ...await hashes(path) });
+          return rows;
+        };
+        const rows = await inventory(changes, [...knownProjects(id).values()]);
+        const live = await inventory([], ledgerEntries(id));
+        const requests = changes.length ? candidate(id)?.requests : undefined;
+        const runtime = { detection: detect(serverDir(id), id), loader: loaderVersion(serverDir(id), det),
+          java: javaFor(det.mc, det.loader), hash: await hashes(java) };
+        return { rows, live, requests, changes, key: JSON.stringify({ rows, live, requests, changes, runtime }) };
+      };
+      const before = await snapshot();
+      const output = await promisify(execFile)(java, ['-version'], { timeout: 5_000 });
+      const javaVersion = /version "([^"]+)"/.exec(output.stderr + output.stdout)?.[1];
+      if (!javaVersion) throw new Error('Java did not report its runtime version');
+      const local = new Map<string, { version: Version; path: string; clientOnly: boolean }>();
+      const installed: Pin[] = [];
+      const rowsByProject = new Map<string, typeof before.rows[number]>();
+      const pinsByPath = new Map<string, Pin>();
+      const idsByPath = new Map<string, string[]>();
+      for (const row of [...before.live, ...before.rows]) {
+        const meta = readFabricJar(readFileSync(row.path));
+        idsByPath.set(row.path, meta.ids);
+        const entry = row.entry;
+        if (entry && entry.sha1.toLowerCase() !== row.sha1) throw new Error(`Installed bytes disagree with the source ledger for ${entry.file}`);
+        const prefix = entry?.source === 'curseforge' ? 'cf:' : '';
+        const projectId = entry ? prefix + entry.projectId : `local:${meta.ids[0]}`;
+        const versionId = entry ? prefix + entry.versionId : `local:${row.sha512}`;
+        const file = basename(row.path);
+        const version: Version = { id: versionId, project_id: projectId, name: entry?.title ?? meta.name ?? file,
+          version_number: meta.version, game_versions: [det.mc], loaders: ['fabric'], version_type: 'release',
+          date_published: entry?.installedAt || '1970-01-01T00:00:00Z', downloads: 0, dependencies: [],
+          files: [{ filename: file, url: '', primary: true, size: row.size, hashes: { sha1: row.sha1, sha512: row.sha512 } }] };
+        local.set(versionId, { version, path: row.path, clientOnly: row.clientOnly });
+        if (before.rows.includes(row)) rowsByProject.set(projectId, row);
+        const pin = { projectId, versionId, file, sha1: row.sha1, requested: entry?.via !== 'dependency' };
+        pinsByPath.set(row.path, pin);
+        if (before.live.includes(row)) installed.push(pin);
+      }
+      catalog = new NetworkCatalog({ mc: det.mc, loader: 'fabric' }, local);
+      // Removal/disable proposals stay removed; the solver may not silently
+      // reinstall a library that the owner has explicitly taken out.
+      const removedNames = new Set(before.changes.filter((f) => (f.remove && !f.automatic) || f.file.endsWith('.disabled')).map((f) => f.replaces ?? f.file));
+      const removed = before.live.filter((row) => removedNames.has(basename(row.path)));
+      const remove = removed.map((row) => pinsByPath.get(row.path)!.projectId);
+      for (const upload of before.changes.filter((f) => !f.entry && !f.remove && f.replaces && f.file.endsWith('.jar'))) {
+        const previous = before.live.find((row) => basename(row.path) === upload.replaces);
+        if (!previous) continue;
+        const path = stagingPath(id, upload.file);
+        const old = pinsByPath.get(previous.path)!;
+        if (!idsByPath.get(path)?.includes(idsByPath.get(previous.path)![0])) throw new Error('An uploaded replacement must retain the requested native mod identity; explicitly remove the old mod to change it');
+        // The owner replaced these bytes, not their provenance. Retain the
+        // upload as an immutable local root without inventing source IDs.
+        if (old.projectId !== pinsByPath.get(path)?.projectId) remove.push(old.projectId);
+      }
+      // Local upload pins come from the current overlay, not earlier bytes
+      // which the owner may have replaced or removed since the last solve.
+      const requests = new Map((before.requests ?? []).filter((r) => !r.projectId.startsWith('local:') && !remove.includes(r.projectId)).map((r) => [r.projectId, r]));
+      for (const file of before.changes.filter((f) => !f.remove && f.file.endsWith('.jar') && (!f.entry || (!before.requests && f.entry.via !== 'dependency')))) {
+        const pin = pinsByPath.get(stagingPath(id, file.file))!;
+        if (!remove.includes(pin.projectId)) requests.set(pin.projectId, { projectId: pin.projectId, versionId: pin.versionId });
+      }
+      for (const request of add) {
+        const projectId = request.projectId.startsWith('cf:') ? request.projectId : (await modrinth.getProject(request.projectId)).id;
+        requests.set(projectId, { ...request, projectId, requested: requests.get(projectId)?.requested === true || request.requested !== false });
+      }
+      const solved = await solve({ mc: det.mc, loader: 'fabric', loaderVersion: loader, java: javaVersion,
+        installed, add: [...requests.values()], remove, exclude: removed.map((row) => idsByPath.get(row.path)![0]), side: 'both' }, catalog, { maxMs: 60_000 });
+      result.solver = solved;
+      const selection = solved.status === 'ok' ? solved : solved.status === 'inconclusive' ? solved.tentative : undefined;
+      if (!selection) return { ...result, error: `Nothing was installed. Solver ${solved.status}: ${solved.status === 'conflict' ? solved.explanation.join(' ') : solved.status === 'inconclusive' ? solved.reason : ''}`,
+        manualDownloads: catalog.manualDownloads };
+      result.warnings = selection.warnings;
+      const plan: Planned[] = [];
+      const localReplacements: StagedFile[] = [];
+      for (const pin of selection.plan) {
+        const row = rowsByProject.get(pin.projectId);
+        const existing = row?.entry;
+        if (pin.projectId.startsWith('local:')) {
+          const old = installed.find((p) => p.projectId === pin.projectId);
+          const upload = before.changes.find((f) => f.file === pin.file && !f.remove);
+          if (old && upload && old.file !== pin.file && upload.replaces !== old.file) {
+            localReplacements.push({ ...upload, replaces: old.file });
+          }
+          continue;
+        }
+        const version = await catalog.version(pin.versionId);
+        const src = await catalog.artifact(version);
+        const checksum = await hashes(src);
+        const clientOnly = (await catalog.jarMeta(version)).environment === 'client';
+        if (existing?.versionId === pin.versionId.replace(/^cf:/, '')
+          && (existing.via !== 'dependency') === pin.requested && row?.clientOnly === clientOnly) continue;
+        const file = version.files.find((f) => f.primary) ?? version.files[0];
+        if (file.filename !== pin.file || checksum.sha1 !== pin.sha1 || basename(pin.file) !== pin.file || !pin.file.endsWith('.jar')) throw new Error('The selected artifact does not match its solver pin');
+        const cf = pin.projectId.startsWith('cf:');
+        const project = cf ? await curseforge.getMod(pin.projectId.slice(3)) : await modrinth.getProject(pin.projectId);
+        plan.push({ url: file.url, src, sha1: checksum.sha1, sha512: checksum.sha512, size: checksum.size,
+          replaces: row ? basename(row.path) : installed.find((p) => p.projectId === pin.projectId)?.file,
+          entry: { file: pin.file, projectId: pin.projectId.replace(/^cf:/, ''), versionId: pin.versionId.replace(/^cf:/, ''),
+            versionNumber: version.version_number, title: 'title' in project ? project.title : project.name,
+            source: cf ? 'curseforge' : 'modrinth', sha1: checksum.sha1, installedAt: new Date().toISOString(),
+            via: pin.requested ? 'direct' : 'dependency', clientOnly,
+            categories: cf ? curseforge.mapCategories((project as curseforge.CfMod).categories) : (project as modrinth.ProjectDetail).categories } });
+      }
+      const removals: StagedFile[] = selection.changes.removed.filter((pin) => !remove.includes(pin.projectId)
+        && !before.changes.some((f) => f.remove && f.file === pin.file)).map((pin) => {
+        if (pin.requested) throw new Error('The solver cannot remove an owner-requested mod');
+        return { file: pin.file, to: rowsByProject.get(pin.projectId)!.clientOnly ? 'shelf' : 'mods', remove: true, automatic: true };
+      });
+      const keep = [...selection.plan.map((p) => p.file), ...removals.map((f) => f.file),
+        ...before.changes.filter((f) => f.path || f.file.endsWith('.disabled')
+          || (f.remove && (!f.automatic || selection.changes.removed.some((p) => p.file === f.file)))).map((f) => f.file)];
+      return commit(id, det, 'mod', plan, false, result, log, { removals: removals.concat(localReplacements), keep, requests: [...requests.values()], beforeWrite: async () => {
+        assertCanStage(id);
+        if ((await snapshot()).key !== before.key) throw new Error('The pack changed during planning; solve the new inventory before installing');
+      } });
+    } catch (error) {
+      return { ...result, solver: { status: 'inconclusive', reason: (error as Error).message },
+        error: `Nothing was installed. Solver inconclusive: ${(error as Error).message}`, manualDownloads: catalog?.manualDownloads };
+    }
+  });
+}
+
 export async function install(serverUuid: string, opts: InstallOpts, log: (m: string) => void = noLog): Promise<InstallResult> {
   const { type } = opts;
   const det = detect(serverDir(serverUuid), serverUuid);
+  if (type === 'mod' && det.loader === 'fabric' && !opts.direct) return solveCandidate(serverUuid,
+    [{ projectId: opts.projectId, versionId: opts.versionId, requested: !opts.dependency }], log);
   const isServerContent = type === 'mod' || type === 'plugin' || type === 'datapack';
   const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: isServerContent };
   const known = knownProjects(serverUuid);
@@ -273,6 +438,8 @@ export async function installCurseforge(
 ): Promise<InstallResult> {
   const type: ContentType = opts.type ?? 'mod';
   const det = detect(serverDir(serverUuid), serverUuid);
+  if (type === 'mod' && det.loader === 'fabric' && !opts.direct) return solveCandidate(serverUuid,
+    [{ projectId: `cf:${opts.modId}`, versionId: opts.fileId ? `cf:${opts.fileId}` : undefined }], log);
   const isServerContent = type === 'mod' || type === 'plugin' || type === 'datapack';
   const result: InstallResult = { installed: [], skipped: [], warnings: [], restartRequired: isServerContent };
   const known = knownProjects(serverUuid);

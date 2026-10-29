@@ -32,11 +32,15 @@ Installs, updates and jars uploaded into `mods/` collect into a candidate
 for that server. A few seconds after the last change, the candidate is
 tested:
 
-1. **Dependency check.** Each jar's declared dependencies are read. Missing
-   ones are installed from Modrinth and join the candidate.
+1. **Whole-pack dependency check** (Fabric). The solver reads native jar
+   metadata, including aliases, nested libraries and client-only constraints.
+   It checks compatible version histories against your Minecraft, loader and
+   Java versions, keeping existing versions where possible. Requested mods
+   stay in the pack, and an exact version request stays pinned. Downloads
+   must match their declared hashes and size before they join the candidate.
 2. **Server boot test.** A sandbox boots the server's own Fabric loader with
-   the candidate's mods. If the loader names a
-   missing mod, it is installed and the test runs again.
+   the candidate's mods. Metadata compatibility is not a substitute for
+   this test: runtime and mixin failures still stop the change.
 3. **Client test** (servers with AutoModpack). A real Minecraft client boots
    with the files your friends would receive, then joins a throwaway server
    with the same mods and a fresh world. This uses
@@ -68,6 +72,14 @@ inputs. Configs generated during testing become proposals and are retested.
 Replacements, removals and config edits always need your explicit approval.
 Spawnpoint never treats dropping a requested mod as success and never
 changes Minecraft or the loader automatically on an existing world.
+
+The revision report separates a feasible pack from a proved minimum-change
+plan. Mod-id discovery on Modrinth is incomplete. When a complete feasible
+plan exists but fewer replacements might be possible, the report says so.
+A catalog or download limit without a complete plan installs nothing.
+CurseForge requests retain their exact project and file IDs. If an author
+disables API downloads, Spawnpoint asks for a manual download rather than
+substituting a Modrinth release.
 
 A passed, approved candidate waits for a verified restart. Server mods only
 change while the server is stopped:

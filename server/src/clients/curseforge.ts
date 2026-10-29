@@ -39,6 +39,7 @@ async function cf<T>(path: string, body?: unknown): Promise<T> {
   if (!key) throw new CurseforgeError('No CurseForge API key configured (data/settings.json)');
   const res = await request(`${BASE}${path}`, {
     method: body ? 'POST' : 'GET',
+    signal: AbortSignal.timeout(15_000),
     headers: {
       'x-api-key': key,
       accept: 'application/json',
@@ -74,6 +75,7 @@ export interface CfFile {
   fileName: string;
   downloadUrl: string | null; // null = author opted out of API downloads
   fileDate: string;
+  fileLength: number;
   gameVersions: string[];
   hashes: { value: string; algo: number }[]; // algo 1 = sha1
   fileFingerprint: number; // murmur2 of whitespace-stripped bytes
@@ -188,12 +190,21 @@ export async function getMod(id: number | string): Promise<CfMod> {
 /** Version+loader matched files, newest first (CF returns them sorted). */
 export async function getFiles(
   id: number | string,
-  opts: { mc?: string; loader?: string } = {},
+  opts: { mc?: string; loader?: string; all?: boolean } = {},
 ): Promise<CfFile[]> {
   const p = new URLSearchParams({ pageSize: '50' });
   if (opts.mc) p.set('gameVersion', opts.mc);
   if (opts.loader && LOADERS[opts.loader]) p.set('modLoaderType', String(LOADERS[opts.loader]));
-  return (await cf<{ data: CfFile[] }>(`/mods/${id}/files?${p}`)).data;
+  const files: CfFile[] = [];
+  for (let page = 0; ; page++) {
+    if (page >= 20) throw new CurseforgeError('CurseForge version catalog limit reached; domain is incomplete');
+    p.set('index', String(files.length));
+    const result = await cf<{ data: CfFile[]; pagination: { index: number; totalCount: number } }>(`/mods/${id}/files?${p}`);
+    if (opts.all && (!result.pagination || result.pagination.index !== files.length)) throw new CurseforgeError('CurseForge returned an incomplete version catalog');
+    files.push(...result.data);
+    if (!opts.all || files.length >= result.pagination.totalCount) return files;
+    if (!result.data.length) throw new CurseforgeError('CurseForge version catalog ended before its reported total');
+  }
 }
 
 /** Bulk file lookup (modpack manifests reference hundreds of fileIDs). */

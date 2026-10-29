@@ -38,6 +38,10 @@ jobs:
       # The same shipped gate must hash exact UTF-8 bytes and fence starts
       # against a running JVM or stopped revision mutation on all three OSes.
       - run: node .github/revision-guard.mjs
+      # Solver metadata and the public installer contract run offline with
+      # real jars/files. Catalog and CDN responses are controlled fixtures.
+      - run: node .github/solver-test.mjs
+      - run: node .github/solver-install.mjs
 
   # the repo is public — every push gets a full-history secret scan
   gitleaks:

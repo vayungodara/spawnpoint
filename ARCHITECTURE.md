@@ -47,15 +47,25 @@ write to the server. They download into one candidate per server
 (`data/candidates/<id>/`). Twelve seconds after the last addition, the
 candidate is tested:
 
-1. **Dependency scan** (`jardeps.ts`): reads each jar's declared mandatory
-   dependencies (`fabric.mod.json`, `mods.toml`, nested jars). Missing ids
-   are installed from Modrinth into the candidate.
+1. **Whole-pack solver** (`solver/`, Fabric): reads native dependency ranges,
+   breaks, provides aliases, nested jars and environment scopes. The catalog
+   loads complete compatible Modrinth or paginated CurseForge domains and
+   verifies artifact hashes and size. The bounded search minimizes changes
+   to the original live inventory while retaining requested projects and
+   exact owner pins. Unidentified local jars are immutable requested roots.
+   New owner requests reconcile the complete staged jar overlay, preserving
+   config proposals and explicit removals or disables. Before tests, the
+   sealed inventory must match the complete solver witness. Approval and
+   promotion both require this check to pass for that exact revision.
+   Owner consent cannot override an inventory mismatch.
 2. **Server boot test** (`preflight.ts`): a sandbox gets the locked Fabric
    loader, libraries, configs, copies of the candidate's jars, and
    `eula=false`. The loader resolves dependencies, applies mixins and runs
-   mod initialisers, then stops at the EULA check. Missing ids named by the
-   loader are installed and the test repeats; a client-only mod that crashes
-   the server is moved to the client shelf.
+   mod initialisers, then stops at the EULA check. A client-only mod that
+   crashes the server can be moved to the client shelf and retested. Fabric
+   no longer guesses missing dependencies from crash text. Other loaders
+   retain the legacy dependency scan and repair path, but are not supported
+   by locked revisions yet.
 3. **Client test** (`launchgate.ts`, Fabric AutoModpack revisions):
    HeadlessMC boots the matching Minecraft version and loader version with
    the files a player would receive, then quick-plays into a throwaway copy
@@ -64,6 +74,15 @@ candidate is tested:
    against the throwaway server (trusting only its certificate) and compares
    the files the client ends up with against the tested set by path, size
    and SHA-1. No handshake evidence means `unverified`, never `passed`.
+
+The catalog's mod-id provider index is partial: observed jar metadata, slug
+lookups and search hits discover candidates but cannot prove absence. The
+solver returns `ok` only when minimum changes are proved. An `inconclusive`
+result can carry a complete feasible `tentative` plan with an optimality
+warning. The installer may stage that plan, but retests retain its original
+live basis and the report keeps feasibility and optimality separate. Limits
+without a complete witness stage nothing. CurseForge file IDs are exact,
+and disabled API downloads require manual work without cross-source swaps.
 
 Each test returns `passed`, `failed` or `unverified`:
 
