@@ -148,7 +148,8 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   })
 
   return (
-    <div className="flex flex-col h-full min-h-0" style={{ background: BEDROCK }}>
+    <div className="relative flex flex-col h-full min-h-0" style={{ background: BEDROCK }}>
+      {onNavigate && <button onClick={onNavigate} className="absolute top-3 right-2 text-sm" aria-label="Close servers and settings">✕</button>}
       <NavLink to="/" onClick={onNavigate} className="px-5 pt-5 pb-4 block" aria-label="Spawnpoint home">
         <div className="flex items-center gap-2.5">
           <Pi i="flag" className="pi pi-l" />
@@ -265,11 +266,11 @@ export default function Shell() {
       </aside>
 
       {/* phone: a slim bar, servers live in a drawer */}
-      <header className="md:hidden sticky top-0 z-30 flex items-center gap-3 px-4 h-14 border-b-[3px] border-ink" style={{ background: BEDROCK }}>
+      <header className="phone-bar md:hidden sticky top-0 z-30 flex items-center gap-3 px-4 border-b-[3px] border-ink" style={{ background: BEDROCK }}>
         <Pi i="flag" className="pi" />
         <span className="font-px text-[13px] tracking-[0.04em] font-bold">SPAWNPOINT</span>
         <button onClick={() => setMenu(true)} className="btn btn-block ml-auto px-3 py-1.5 text-xs flex items-center gap-2" aria-label="Open servers and settings">
-          <span aria-hidden className="grid gap-[3px]"><i className="block w-3.5 h-[2px] bg-current" /><i className="block w-3.5 h-[2px] bg-current" /><i className="block w-3.5 h-[2px] bg-current" /></span>
+          <svg aria-hidden width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><path d="M0 1h14v2H0zM0 6h14v2H0zM0 11h14v2H0z" /></svg>
           Servers
         </button>
       </header>

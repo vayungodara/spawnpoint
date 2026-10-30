@@ -51,7 +51,7 @@ export default function Console() {
         <div
           ref={box}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40 }}
-          className="console h-[min(62vh,640px)] overflow-y-auto px-4 py-3 text-[#cfd6db]"
+          className="console h-[min(62dvh,640px)] overflow-y-auto px-4 py-3 text-[#cfd6db]"
           role="log"
           aria-label="Server console"
         >
@@ -63,6 +63,7 @@ export default function Console() {
           <label htmlFor="cmd" className="pl-4 pr-2 py-2.5 font-px text-sm" style={{ color: 'var(--color-emerald)' }}>&gt;</label>
           <input
             id="cmd"
+            aria-label="Console command"
             value={cmd}
             onChange={(e) => setCmd(e.target.value)}
             onKeyDown={(e) => {
@@ -76,6 +77,7 @@ export default function Console() {
             spellCheck={false}
             className="flex-1 min-w-0 bg-transparent py-2.5 pr-4 font-mono text-sm outline-none placeholder:text-[#cfd6db]/50"
           />
+          <button type="submit" disabled={!running || !cmd.trim() || send.isPending} className="pb pb-go shrink-0 m-1">Send</button>
         </form>
       </section>
       {err && <p role="alert" className="text-sm font-semibold text-redstone">✗ {err}</p>}

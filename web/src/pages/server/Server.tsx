@@ -42,7 +42,7 @@ function Lever({ on, onChange, disabled }: { on: boolean; onChange: (v: boolean)
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-6 py-3.5 border-b-2 border-line/40 last:border-0">
+    <div className="setting-row flex items-center justify-between gap-6 py-3.5 border-b-2 border-line/40 last:border-0">
       <div>
         <div className="text-sm font-bold">{label}</div>
         {hint && <div className="text-xs text-text-dim mt-0.5">{hint}</div>}
@@ -592,7 +592,7 @@ export default function ServerSettings() {
         </div>
       )}
 
-      <div className="flex gap-3">
+      <div className="flex flex-wrap gap-3">
         <button
           onClick={() => { if (confirm('Hardcore: 1 life, hard difficulty, no cheats, de-ops EVERYONE. Apply?')) preset.mutate('hardcore') }}
           className="btn btn-redstone px-4 py-2 text-sm"
@@ -740,7 +740,7 @@ export default function ServerSettings() {
       <DangerZoneRow serverId={active.id} name={active.name} running={running} />
 
       {(dirty || applyRestart.isPending || ((restartRequired || applied) && !restartDismissed)) && (
-        <div className="fixed bottom-6 left-4 right-4 md:left-72 md:right-8 max-w-3xl block px-5 py-3.5 flex items-center gap-4 z-10">
+        <div className="save-bar fixed bottom-6 left-4 right-4 md:left-72 md:right-8 max-w-3xl block px-5 py-3.5 flex items-center gap-4 z-10">
           <span className="text-sm font-bold flex-1">
             {applyRestart.isPending
               ? 'Restarting the server…'

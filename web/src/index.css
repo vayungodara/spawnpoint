@@ -73,6 +73,7 @@ body {
   font-family: var(--font-sans);
   font-size: 15.5px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
   /* the landing's pixel arrow cursor */
   cursor: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2012%2016%22%20shape-rendering%3D%22crispEdges%22%3E%3Cpath%20fill%3D%22%231b2130%22%20d%3D%22M0%200h1v1h-1zM0%201h2v1h-2zM0%202h1v1h-1zM2%202h1v1h-1zM0%203h1v1h-1zM3%203h1v1h-1zM0%204h1v1h-1zM4%204h1v1h-1zM0%205h1v1h-1zM5%205h1v1h-1zM0%206h1v1h-1zM6%206h1v1h-1zM0%207h1v1h-1zM7%207h1v1h-1zM0%208h1v1h-1zM8%208h1v1h-1zM0%209h1v1h-1zM9%209h1v1h-1zM0%2010h1v1h-1zM6%2010h5v1h-5zM0%2011h1v1h-1zM3%2011h1v1h-1zM6%2011h1v1h-1zM0%2012h1v1h-1zM2%2012h1v1h-1zM4%2012h1v1h-1zM7%2012h1v1h-1zM0%2013h2v1h-2zM4%2013h1v1h-1zM7%2013h1v1h-1zM0%2014h1v1h-1zM5%2014h1v1h-1zM8%2014h1v1h-1zM5%2015h3v1h-3z%22%2F%3E%3Cpath%20fill%3D%22%23f7f3e8%22%20d%3D%22M1%202h1v1h-1zM1%203h2v1h-2zM1%204h3v1h-3zM1%205h4v1h-4zM1%206h5v1h-5zM1%207h6v1h-6zM1%208h7v1h-7zM1%209h8v1h-8zM1%2010h5v1h-5zM1%2011h2v1h-2zM4%2011h2v1h-2zM1%2012h1v1h-1zM5%2012h2v1h-2zM5%2013h2v1h-2zM6%2014h2v1h-2z%22%2F%3E%3C%2Fsvg%3E") 0 0, auto;
 }
@@ -430,7 +431,7 @@ input[type='range'].xp::-webkit-slider-thumb {
   background: var(--color-bedrock); background-image: var(--noise-dense);
   border-bottom: 3px solid var(--color-ink); overflow-x: auto; scrollbar-width: none;
 }
-@media (max-width: 767px) { .wtabs { top: 56px; } }
+@media (max-width: 767px) { .wtabs { top: calc(56px + env(safe-area-inset-top)); } }
 .wtabs::-webkit-scrollbar { display: none; }
 .wtab {
   position: relative; display: flex; align-items: center; gap: 7px; padding: 11px 14px 10px;
@@ -514,6 +515,8 @@ dialog.sheet.closing { animation: sheet-out 0.18s var(--ease-quint) forwards; }
 dialog.sheet.closing::backdrop { animation: fade-out 0.18s linear forwards; }
 dialog.sheet.left { inset: 0 auto 0 0; border-left: none; border-right: 3px solid var(--color-ink); box-shadow: 8px 0 0 oklch(0% 0 0 / 0.35); animation-name: sheet-in-left; width: min(300px, 86vw); }
 dialog.sheet.left.closing { animation-name: sheet-out-left; }
+.sheet-content { height: 100%; overflow-y: auto; overscroll-behavior: contain; }
+.sheet-footer { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
 @keyframes sheet-in { from { transform: translateX(100%); } }
 @keyframes sheet-out { to { transform: translateX(100%); } }
 @keyframes sheet-in-left { from { transform: translateX(-100%); } }
@@ -522,7 +525,7 @@ dialog.sheet.left.closing { animation-name: sheet-out-left; }
 @keyframes fade-out { to { opacity: 0; } }
 @media (max-width: 639px) {
   dialog.sheet:not(.left) {
-    inset: auto 0 0 0; width: 100vw; height: auto; max-height: 88dvh; border-left: none; border-top: 3px solid var(--color-ink);
+    inset: auto 0 0 0; width: 100vw; height: 88dvh; max-height: 88dvh; border-left: none; border-top: 3px solid var(--color-ink);
     box-shadow: 0 -8px 0 oklch(0% 0 0 / 0.35); animation-name: sheet-up;
   }
   dialog.sheet:not(.left).closing { animation-name: sheet-down; }
@@ -565,3 +568,53 @@ dialog.sheet.left.closing { animation-name: sheet-out-left; }
 .md-body th, .md-body td { border: 1px solid var(--color-line); padding: 3px 8px; }
 .md-body hr { border: none; border-top: 2px solid var(--color-line); margin: 0.8em 0; }
 .md-body summary { cursor: pointer; font-weight: 700; }
+
+/* Phone controls keep the same materials, with room for thumbs and keyboards.
+   Do not hide overflow on the page: console/code and tab strips scroll locally. */
+.phone-bar {
+  height: calc(56px + env(safe-area-inset-top));
+  padding-top: env(safe-area-inset-top);
+}
+.sheet.left .sheet-content {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+main { padding-bottom: env(safe-area-inset-bottom); }
+@media (max-width: 767px), (pointer: coarse) {
+  button, a.btn, label.btn, .side-link, .srv-new, .wtab, summary {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  a.btn, label.btn { display: inline-flex; align-items: center; justify-content: center; }
+  button:not(.lever), a.btn, label.btn { padding-inline: max(8px, 0.5em); }
+  input:not([type='checkbox']):not([type='radio']), select, textarea {
+    font-size: 16px;
+    max-width: 100%;
+    min-width: 0;
+  }
+  input:not([type='checkbox']):not([type='radio']):not([type='range']), select { min-height: 44px; }
+  input[type='checkbox'], input[type='radio'] { width: 22px; height: 22px; flex-shrink: 0; accent-color: var(--color-emerald); }
+  label:has(> input[type='checkbox']), label:has(> input[type='radio']) { min-height: 44px; }
+  .lever::after { top: 11px; }
+  input[type='range'].xp { height: 44px; border-top: 15px solid var(--color-bg); border-bottom: 15px solid var(--color-bg); }
+  input[type='range'].xp::-webkit-slider-thumb { width: 26px; height: 30px; }
+  .chip { white-space: normal; }
+  .ptable { table-layout: fixed; }
+}
+@media (max-width: 767px) {
+  .setting-row { flex-wrap: wrap; gap: 12px; }
+  .setting-row > :first-child { flex: 1 1 100%; min-width: 0; }
+  .setting-row:has(> .lever) { flex-wrap: nowrap; }
+  .setting-row:has(> .lever) > :first-child { flex: 1; }
+  .setting-row > input:not([type='number']), .setting-row > select { width: 100%; }
+  .save-bar { flex-wrap: wrap; bottom: max(16px, env(safe-area-inset-bottom)); }
+  .save-bar > span:first-child { flex-basis: 100%; }
+  .file-table, .file-table tbody, .file-table tr, .file-table td { display: block; width: 100%; }
+  .file-table tr { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 8px 0; }
+  .file-table td:first-child { flex: 1 1 calc(100% - 88px); min-width: 0; }
+  .file-table td:nth-child(2) { width: auto; white-space: nowrap; }
+  .file-table td:nth-child(3) { display: none; }
+  .file-table td:last-child { width: 100%; text-align: left; }
+  .file-table td:only-child { width: 100%; }
+  .file-table .file-name { white-space: normal; text-align: left; overflow-wrap: anywhere; }
+}

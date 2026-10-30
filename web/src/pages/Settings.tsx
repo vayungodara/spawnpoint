@@ -33,7 +33,7 @@ function KeyBlock({ icon, title, isSet, help, placeholder, onSave, onRemove, bus
   const [v, setV] = useState('')
   return (
     <div className="block px-5 py-4">
-      <div className="flex items-center gap-2.5 mb-1">
+      <div className="flex flex-wrap items-center gap-2.5 mb-1">
         <Pi i={icon} className="pi pi-s" />
         <span className="font-extrabold">{title}</span>
         <span className={`hud !opacity-100 ${isSet ? 'text-emerald' : ''}`}>{isSet ? 'CONFIGURED' : 'NOT SET'}</span>
@@ -179,7 +179,7 @@ export default function Settings() {
 
       {/* Crafty connection */}
       <div className="block px-5 py-4">
-        <div className="flex items-center gap-2.5 mb-1">
+        <div className="flex flex-wrap items-center gap-2.5 mb-1">
           <Pi i="anvil" className="pi pi-s" />
           <span className="font-extrabold">Crafty Controller</span>
           <span className={`hud !opacity-100 ${data.craftyOk ? 'text-emerald' : 'text-redstone'}`}>

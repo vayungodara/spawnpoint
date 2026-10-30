@@ -106,8 +106,8 @@ function Crew({ id }: { id: string }) {
         <button className="btn btn-emerald px-4 py-1.5 text-sm">Add</button>
       </form>
       {data?.players.map((pl) => (
-        <div key={pl.name} className="flex items-center gap-3 py-3 border-b-2 border-line/40 last:border-0">
-          <span className="text-sm font-bold font-mono flex-1 min-w-0 truncate">{pl.name}</span>
+        <div key={pl.name} className="flex flex-wrap items-center gap-3 py-3 border-b-2 border-line/40 last:border-0">
+          <span className="text-sm font-bold font-mono basis-full sm:basis-0 sm:flex-1 min-w-0 break-words">{pl.name}</span>
           {pl.op && <span className="chip text-gold">OP</span>}
           <button onClick={() => upsert.mutate({ name: pl.name, whitelist: pl.whitelisted, op: !pl.op })} className="text-xs font-bold text-text-dim hover:text-text">
             {pl.op ? 'remove op' : 'make op'}

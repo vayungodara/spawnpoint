@@ -462,7 +462,7 @@ export default function Content() {
       {view === 'browse' && (
         <>
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex border-2 border-ink">
+            <div className="flex flex-wrap border-2 border-ink max-w-full">
               {TABS.map((t, i) => (
                 <button
                   key={t.key}
@@ -548,11 +548,11 @@ export default function Content() {
           <div className="space-y-3">
             {hits.map((h) => (
               <div key={h.project_id} className="block p-4">
-                <div className="flex items-center gap-4">
+                <div className="grid grid-cols-[48px_minmax(0,1fr)] sm:flex items-center gap-x-3 gap-y-2 sm:gap-4">
                   {h.icon_url ? (
-                    <img src={h.icon_url} className="h-12 w-12 border-2 border-ink bg-bedrock object-cover" alt="" />
+                    <img src={h.icon_url} className="h-12 w-12 shrink-0 border-2 border-ink bg-bedrock object-cover" alt="" />
                   ) : (
-                    <div className="h-12 w-12 border-2 border-ink bg-bedrock flex items-center justify-center font-px text-emerald">?</div>
+                    <div className="h-12 w-12 shrink-0 border-2 border-ink bg-bedrock flex items-center justify-center font-px text-emerald">?</div>
                   )}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-baseline gap-2.5 flex-wrap">
@@ -560,12 +560,12 @@ export default function Content() {
                         href={h.url ?? `https://modrinth.com/${tab === 'mod' ? 'mod' : tab}/${h.slug}`}
                         target="_blank"
                         rel="noreferrer"
-                        className="font-extrabold truncate hover:text-emerald hover:underline decoration-2 underline-offset-2"
+                        className="font-extrabold break-words sm:truncate hover:text-emerald hover:underline decoration-2 underline-offset-2"
                         title={h.source === 'curseforge' ? 'Open on CurseForge' : 'Open on Modrinth'}
                       >
                         {h.title}
                       </a>
-                      <span className="text-xs text-text-dim shrink-0">by {h.author}</span>
+                      <span className="text-xs text-text-dim max-w-full break-words">by {h.author}</span>
                       <span className="font-px text-[10px] text-text-dim shrink-0">{fmtDownloads(h.downloads)} DL</span>
                       {(() => {
                         const side = sideOf(h)
@@ -579,7 +579,7 @@ export default function Content() {
                         ) : null
                       })()}
                     </div>
-                    <div className="text-sm text-text-dim truncate">{h.description}</div>
+                    <div className="text-sm text-text-dim line-clamp-2 sm:truncate">{h.description}</div>
                   </div>
                   <button
                     onClick={() => setExpanded(expanded === h.project_id ? null : h.project_id)}
@@ -748,9 +748,9 @@ export default function Content() {
                     const upd = updates?.find((u) => u.file === m.file)
                     return (
                       <div key={m.file} className={`block px-4 py-3 ${m.enabled ? '' : 'opacity-60'}`}>
-                      <div className="flex items-center gap-4">
-                        <div className="flex-1 min-w-0">
-                          <div className="font-bold truncate">
+                      <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+                        <div className="basis-full sm:basis-0 sm:flex-1 min-w-0">
+                          <div className="font-bold break-words">
                             {m.projectId ? (
                               <a
                                 href={m.source === 'curseforge'

@@ -51,6 +51,28 @@ also works, but it clears every Serve setting on that machine.
 panel's same-origin check for browser writes relies on. If you put another
 reverse proxy in front, make it preserve `Host` too.
 
+## Install on your phone
+
+Open the HTTPS address from `tailscale serve` before installing. Plain
+`http://100.x.y.z:25570` is not a secure context, even though Tailscale
+encrypts the connection. `localhost` is also a secure context, but on your
+phone it points to the phone, not your server.
+
+- **iPhone or iPad:** Open the panel in Safari, tap **Share**, then
+  **Add to Home Screen**. Leave **Open as Web App** enabled if shown, then
+  tap **Add**.
+- **Android:** Open the panel in Chrome, open the three-dot menu, then tap
+  **Install app** or **Add to Home screen**. Confirm the installation.
+
+Launch Spawnpoint from its flag icon to open it without the browser toolbar.
+Keep Tailscale connected when you are away from home. You may need to enter
+your PIN again in the installed app.
+
+The app still needs a connection to your panel. It does not cache API
+responses or panel state for offline use. If the install option is missing,
+check that you opened the HTTPS address in Safari or Chrome, not a link
+preview inside another app.
+
 ## Don't use Funnel
 
 `tailscale funnel` publishes a port to the whole internet. Use `serve`,

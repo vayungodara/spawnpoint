@@ -221,7 +221,7 @@ export default function PregenSection({ serverId }: { serverId: string }) {
               </span>
             </div>
           )}
-          <div className="flex items-center justify-between gap-6">
+          <div className="setting-row flex items-center justify-between gap-6">
             <div>
               <div className="text-sm font-bold">Radius</div>
               <div className="text-xs text-text-dim mt-0.5">
@@ -235,7 +235,7 @@ export default function PregenSection({ serverId }: { serverId: string }) {
             />
           </div>
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="setting-row flex items-center justify-between gap-6">
             <div className="text-sm font-bold">Center</div>
             <div className="flex items-center gap-2 flex-wrap justify-end">
               <div className="flex border-2 border-ink">
@@ -257,7 +257,7 @@ export default function PregenSection({ serverId }: { serverId: string }) {
             </div>
           </div>
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="setting-row flex items-center justify-between gap-6">
             <div className="text-sm font-bold">Shape</div>
             <select
               value={cfg.shape ?? 'square'}
@@ -268,7 +268,7 @@ export default function PregenSection({ serverId }: { serverId: string }) {
             </select>
           </div>
 
-          <div className="flex items-center justify-between gap-6">
+          <div className="setting-row flex items-center justify-between gap-6">
             <div className="text-sm font-bold">Dimensions</div>
             <div className="flex items-center gap-2 flex-wrap justify-end">
               {(opts?.dimensions ?? [{ id: 'minecraft:overworld', label: 'Overworld' }]).map((d) => {
@@ -284,7 +284,7 @@ export default function PregenSection({ serverId }: { serverId: string }) {
             </div>
           </div>
 
-          <div className="flex items-center gap-3 pt-1">
+          <div className="flex flex-wrap items-center gap-3 pt-1">
             <button
               onClick={() => start.mutate()}
               disabled={start.isPending || !data.running || noDims}
@@ -306,7 +306,7 @@ export default function PregenSection({ serverId }: { serverId: string }) {
            world would ship friends a mostly-empty fallback ---- */}
       {bobby?.bobbyInstalled && data.lastDone && (
         <div className="mt-4 pt-3 border-t-2 border-line/40">
-          <div className="flex items-center justify-between gap-6">
+          <div className="setting-row flex items-center justify-between gap-6">
             <div>
               <div className="text-sm font-bold">Bobby fallback world</div>
               <div className="text-xs text-text-dim mt-0.5 max-w-[58ch]">
@@ -344,7 +344,7 @@ export default function PregenSection({ serverId }: { serverId: string }) {
 
       {/* ---- automation (always visible) ---- */}
       <div className="mt-4 pt-3 border-t-2 border-line/40 space-y-3.5">
-        <div className="flex items-center justify-between gap-6">
+        <div className="setting-row flex items-center justify-between gap-6">
           <div>
             <div className="text-sm font-bold">Pause while players are online</div>
             <div className="text-xs text-text-dim mt-0.5">auto-pause when someone joins, resume when the server empties</div>
@@ -355,7 +355,7 @@ export default function PregenSection({ serverId }: { serverId: string }) {
             className="lever"
           />
         </div>
-        <div className="flex items-center justify-between gap-6">
+        <div className="setting-row flex items-center justify-between gap-6">
           <div>
             <div className="text-sm font-bold">Auto-start daily</div>
             <div className="text-xs text-text-dim mt-0.5">kick off a pregen every day at this time (only when the server is empty)</div>

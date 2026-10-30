@@ -280,23 +280,23 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
   const excerpt = c.client?.excerpt?.length ? c.client.excerpt : c.server?.excerpt ?? []
   const solver = c.solver
   return (
-    <div className="flex flex-col min-h-full">
-      <div className="p-5 sm:p-6 space-y-5 flex-1">
-        <div className="flex items-start gap-3">
-          <div className="min-w-0">
-            <span className={`hud !opacity-100 ${tagCls}`}>{tag}</span>
-            <h2 className="text-2xl mt-1.5">Review change</h2>
-          </div>
-          <button onClick={onClose} className="btn btn-block ml-auto px-3 py-1.5 text-sm" aria-label="Close review">✕</button>
+    <div className="flex flex-col h-full min-h-0">
+      <div className="flex items-start gap-3 p-5 sm:p-6 shrink-0 border-b-2 border-ink">
+        <div className="min-w-0">
+          <span className={`hud !opacity-100 ${tagCls}`}>{tag}</span>
+          <h2 className="text-2xl mt-1.5">Review change</h2>
         </div>
+        <button onClick={onClose} className="btn btn-block ml-auto px-3 py-1.5 text-sm shrink-0" aria-label="Close review">✕</button>
+      </div>
+      <div tabIndex={0} role="region" aria-label="Change plan and test report" className="p-5 sm:p-6 space-y-5 flex-1 min-h-0 overflow-y-auto overscroll-contain">
 
         <section>
           <h3 className="hud mb-2">YOU ASKED FOR</h3>
           <ul className="space-y-1.5">
             {(asked.length ? asked : c.files).map((f) => (
-              <li key={f.file} className="field px-3 py-2 text-sm font-bold flex gap-2 items-baseline">
-                <span className="min-w-0 truncate">{titleOf(f)}</span>
-                {f.entry?.versionNumber && <span className="font-mono text-xs text-text-dim ml-auto shrink-0">{f.entry.versionNumber.replace(/\+.*$/, '')}</span>}
+              <li key={f.file} className="field px-3 py-2 text-sm font-bold flex flex-wrap gap-2 items-baseline">
+                <span className="min-w-0 break-words">{titleOf(f)}</span>
+                {f.entry?.versionNumber && <span className="font-mono text-xs text-text-dim ml-auto break-all">{f.entry.versionNumber.replace(/\+.*$/, '')}</span>}
               </li>
             ))}
           </ul>
@@ -352,7 +352,7 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
         {decide.error && <p role="alert" className="text-sm text-redstone font-semibold">{decide.error.message.replace(/^\d+: /, '')}</p>}
       </div>
 
-      <div className="sticky bottom-0 p-5 sm:px-6 border-t-2 border-ink space-y-3" style={{ background: 'var(--color-block)' }}>
+      <div className="sheet-footer max-h-[50%] overflow-y-auto shrink-0 p-5 sm:px-6 border-t-2 border-ink space-y-3" style={{ background: 'var(--color-block)' }}>
         {c.status === 'needs-approval' && (
           <>
             <label className="flex items-start gap-2.5 text-sm">

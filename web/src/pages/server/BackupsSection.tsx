@@ -128,8 +128,8 @@ export default function BackupsSection({ active }: { active: { id: string; name:
 
       <div className="space-y-2.5">
         {(data?.backups ?? []).map((b) => (
-          <div key={b.file} className="block flex items-center gap-4 px-4 py-3">
-            <div className="flex-1 min-w-0">
+          <div key={b.file} className="block flex flex-wrap items-center gap-4 px-4 py-3">
+            <div className="basis-full sm:basis-0 sm:flex-1 min-w-0">
               <div className="font-bold font-mono text-sm truncate">
                 {b.file}
                 {b.slot !== undefined && <span className="hud ml-2">WORLD {b.slot} — ARCHIVE</span>}

@@ -60,7 +60,7 @@ function History({ id, live }: { id: string; live: boolean }) {
               <details className={`block group ${published ? 'border-emerald!' : ''}`}>
                 <summary className="px-4 py-3 flex items-center gap-x-4 gap-y-2 flex-wrap list-none">
                   <span className={`hud !opacity-100 ${state[1]} w-48 shrink-0`}>{state[0]}</span>
-                  <span className="min-w-0 flex-1">
+                  <span className="min-w-0 basis-full sm:basis-0 sm:flex-1">
                     <span className="font-bold">{fmtWhen(txnDate(r.id))}</span>
                     <span className="text-sm text-text-dim"> · {r.requested} picked · {r.dependencies} dependencies · {r.files} locked files{r.id.endsWith('-baseline') ? ' · pack before the first change' : ''}</span>
                   </span>

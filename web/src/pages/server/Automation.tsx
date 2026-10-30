@@ -165,7 +165,7 @@ function SchedulerCard({ serverId }: { serverId: string }) {
           <select value={kind} onChange={(e) => setKind(e.target.value)} className="field px-2 py-1.5">
             {Object.entries(KIND_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
           </select>
-          {needsArg && <input value={arg} onChange={(e) => setArg(e.target.value)} placeholder={kind === 'announce' ? 'message…' : 'command…'} className="field px-2 py-1.5 flex-1 min-w-32" />}
+          {needsArg && <input value={arg} onChange={(e) => setArg(e.target.value)} placeholder={kind === 'announce' ? 'message…' : 'command…'} className="field px-2 py-1.5 basis-full sm:basis-32 flex-1 min-w-0" />}
           <select value={schedType} onChange={(e) => setSchedType(e.target.value as 'daily' | 'interval')} className="field px-2 py-1.5">
             <option value="daily">daily at</option>
             <option value="interval">every</option>

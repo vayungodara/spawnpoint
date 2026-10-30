@@ -48,7 +48,7 @@ export default function Sheet({ open, onClose, side = 'right', label, children }
       // a click on the dialog element itself is a click on the backdrop
       onClick={(e) => { if (e.target === ref.current) onClose() }}
     >
-      {shown && <div className="h-full max-h-[inherit] overflow-y-auto overscroll-contain">{children}</div>}
+      {shown && <div className="sheet-content">{children}</div>}
     </dialog>
   )
 }

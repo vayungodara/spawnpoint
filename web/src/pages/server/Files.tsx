@@ -285,14 +285,15 @@ export default function Files() {
                 </button>
               </span>
             ))}
-            <div className="ml-auto flex gap-2">
+            <div className="ml-auto grid grid-cols-2 sm:flex gap-2 w-full sm:w-auto">
               <input
-                className="input text-xs w-44"
+                className="field px-2 col-span-2 text-xs w-full sm:w-44"
                 placeholder="search files…"
+                aria-label="Search files"
                 value={search}
                 onChange={(e) => void runSearch(e.target.value)}
               />
-              <label className="btn text-xs cursor-pointer">
+              <label className="btn btn-block text-xs cursor-pointer">
                 Upload
                 <input
                   type="file"
@@ -319,12 +320,12 @@ export default function Files() {
           {isLoading && <p className="text-xs text-text-dim italic">reading…</p>}
           {data?.error && <p className="text-xs text-redstone">✗ {data.error}</p>}
 
-          <table className="w-full text-xs">
+          <table className="file-table w-full text-xs">
             <tbody>
               {path !== '' && (
-                <tr className="cursor-pointer hover:bg-panel" onClick={() => setPath(crumbs.slice(0, -1).join('/'))}>
+                <tr className="hover:bg-panel">
                   <td className="py-1.5 pl-1 font-bold" colSpan={4}>
-                    ← up
+                    <button onClick={() => setPath(crumbs.slice(0, -1).join('/'))}>← up</button>
                   </td>
                 </tr>
               )}
@@ -332,35 +333,35 @@ export default function Files() {
                 const rel = path ? `${path}/${e.name}` : e.name
                 return (
                   <tr key={e.name} className="border-t border-line/40 hover:bg-panel rise-in" style={{ '--i': i } as CSSProperties}>
-                    <td
-                      className="py-1.5 pl-1 cursor-pointer font-mono"
-                      onClick={() => (e.dir ? setPath(rel) : void openFile(e.name))}
-                    >
-                      <span className="inline-flex items-center gap-2">
+                    <td className="py-1.5 pl-1 font-mono">
+                      <button className="file-name inline-flex items-center gap-2" onClick={() => (e.dir ? setPath(rel) : void openFile(e.name))}>
                         <Pi i={e.dir ? 'chest' : 'crate'} className="pi pi-s" />
-                        {e.name}
-                        {e.dir ? '/' : ''}
-                      </span>
+                        <span className="min-w-0">{e.name}{e.dir ? '/' : ''}</span>
+                      </button>
                     </td>
                     <td className="text-right text-text-dim w-20">{e.dir ? '' : fmtSize(e.size)}</td>
                     <td className="text-right text-text-dim w-32 hidden sm:table-cell">{fmtTime(e.mtime)}</td>
                     <td className="text-right w-44">
                       {renaming?.from === rel ? (
-                        <span className="inline-flex gap-1">
+                        <form className="inline-flex flex-wrap gap-1" onSubmit={(ev) => {
+                          ev.preventDefault()
+                          if (!renaming.to.trim()) return
+                          act.mutate({ url: 'rename', body: { from: rel, to: path ? `${path}/${renaming.to.trim()}` : renaming.to.trim() } })
+                          setRenaming(null)
+                        }}>
                           <input
                             className="bg-panel border-2 border-ink px-1 w-28 font-mono"
+                            aria-label={`Rename ${e.name}`}
                             value={renaming.to}
                             autoFocus
                             onChange={(ev) => setRenaming({ ...renaming, to: ev.target.value })}
                             onKeyDown={(ev) => {
-                              if (ev.key === 'Enter' && renaming.to.trim()) {
-                                act.mutate({ url: 'rename', body: { from: rel, to: path ? `${path}/${renaming.to.trim()}` : renaming.to.trim() } })
-                                setRenaming(null)
-                              }
                               if (ev.key === 'Escape') setRenaming(null)
                             }}
                           />
-                        </span>
+                          <button className="btn btn-block text-xs" disabled={!renaming.to.trim()}>Save</button>
+                          <button type="button" className="btn btn-block text-xs" onClick={() => setRenaming(null)}>Cancel</button>
+                        </form>
                       ) : confirmDelete === rel ? (
                         <span className="shake-once inline-flex gap-1 items-center">
                           <span className="text-redstone">delete?</span>
@@ -384,14 +385,14 @@ export default function Files() {
                               className="btn text-xs !py-0"
                               href={`/api/servers/${id}/files/download?path=${encodeURIComponent(rel)}`}
                             >
-                              dl
+                              <span className="sm:hidden">Download</span><span className="hidden sm:inline">dl</span>
                             </a>
                           )}
                           <button className="btn text-xs !py-0" onClick={() => setRenaming({ from: rel, to: e.name })}>
-                            mv
+                            <span className="sm:hidden">Rename</span><span className="hidden sm:inline">mv</span>
                           </button>
                           <button className="btn text-xs !py-0" onClick={() => setConfirmDelete(rel)}>
-                            rm
+                            <span className="sm:hidden">Delete</span><span className="hidden sm:inline">rm</span>
                           </button>
                         </span>
                       )}
