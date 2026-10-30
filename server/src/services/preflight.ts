@@ -120,7 +120,10 @@ export function dryBoot(serverId: string, jars: string[], onStatus: (d: string) 
   return run;
 }
 
-async function dryBootInner(serverId: string, jars: string[], dir: string, lock?: RevisionLock, autoModpackDefaults = false): Promise<Verdict> {
+/** One sandbox boot, without dryBoot's serialization or memory admission.
+    Callers use dryBoot; the revision guard calls this directly so its
+    stand-in loader never waits on a runner's free-memory figure. */
+export async function dryBootInner(serverId: string, jars: string[], dir: string, lock?: RevisionLock, autoModpackDefaults = false): Promise<Verdict> {
   const det = detect(dir, serverId);
   const launchArgs = lock ? lockedLaunchArgs(lock, '-Xmx1G') : loaderLaunchArgs(dir, det, '-Xmx2G');
   if (!launchArgs) return { result: 'unverified', detail: `Spawnpoint cannot boot-test ${det.loader} servers yet` };

@@ -261,7 +261,7 @@ _winapi.CloseHandle(process)
   // A never-started server's baseline probe must return exactly what that boot
   // leaves, so the sealed baseline matches every later live boot. The stand-in
   // loader does what AutoModpack does and keeps a copy of its output.
-  const { dryBoot } = await import('../server/dist/services/preflight.js');
+  const { dryBootInner } = await import('../server/dist/services/preflight.js');
   const loader = `import json, pathlib, sys
 p = pathlib.Path('automodpack/automodpack-server.json')
 cfg = json.loads(p.read_text('utf-8'))
@@ -284,7 +284,7 @@ for line in sys.stdin:
     const lock = { files: ['fabric.jar', 'loader.py', 'automodpack/automodpack-server.json'].map((path) => ({ path, location: 'server' })),
       arguments: ['loader.py', kind === 'forge' ? 'Done (1.0s)! For help, type "help"' : 'You need to agree to the EULA in order to run the server.', output],
       java: { executable: python } };
-    const verdict = await dryBoot(randomUUID(), [], () => {}, source, lock, opts);
+    const verdict = await dryBootInner(randomUUID(), [], source, lock, opts.autoModpackDefaults);
     return { verdict, booted: existsSync(output) ? readFileSync(output, 'utf8') : undefined };
   };
   const fabric = await probe('fabric', provisioned, { autoModpackDefaults: true });
