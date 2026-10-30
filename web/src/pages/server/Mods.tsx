@@ -581,6 +581,7 @@ export default function Content() {
                     </div>
                     <div className="text-sm text-text-dim line-clamp-2 sm:truncate">{h.description}</div>
                   </div>
+                  <div className="col-span-2 flex flex-wrap items-center gap-3 sm:contents">
                   <button
                     onClick={() => setExpanded(expanded === h.project_id ? null : h.project_id)}
                     className="text-xs font-bold text-text-dim hover:text-text shrink-0"
@@ -621,6 +622,7 @@ export default function Content() {
                       {install.isPending && install.variables?.projectId === h.project_id ? 'placing…' : 'Install'}
                     </button>
                   ))}
+                  </div>
                 </div>
                 {expanded === h.project_id && (
                   <HitExpand
