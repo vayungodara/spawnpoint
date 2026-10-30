@@ -31,6 +31,8 @@ export const craftyApi = {
     const hit = nativeStats.get(id);
     if (hit && Date.now() - hit.at < 2_000) return hit.value;
     const value = supervisor<CraftyStats>('stats', { id }).then(async (stats) => {
+      // the supervisor reports RSS in MiB; Crafty's contract (panel, HUD) is bytes
+      if (typeof stats.mem === 'number') stats.mem = Math.round(stats.mem * 1024 ** 2);
       if (!stats.running) return stats;
       // Unknown is not empty: quiet tests and automatic restarts must wait.
       stats.online = -1;

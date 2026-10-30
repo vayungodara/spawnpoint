@@ -235,6 +235,21 @@ export default async function contentRoutes(app: FastifyInstance) {
     }
   });
 
+  // AutoModpack asks each friend, once, to paste the server's certificate
+  // fingerprint. The server prints it at every boot; the panel reads the log
+  // line so the owner never has to dig for it.
+  app.get<{ Params: { id: string } }>('/api/servers/:id/automodpack/fingerprint', async (req) => {
+    const log = join(serverDir(req.params.id), 'logs', 'latest.log');
+    const text = existsSync(log) ? readFileSync(log, 'utf8') : '';
+    // the whole record must be the mod's own: "[time] [thread/LEVEL]: Certificate
+    // fingerprint: <hex>" (Forge adds "[logger]" after the level). A chat message
+    // has "<name> " before it. Records split on real newlines only: a multiline
+    // regex would also break on U+2028/U+2029, which chat may carry.
+    const record = /^\[[^[\]\r\n]+\] \[[^[\]\r\n]+\/(?:INFO|WARN)\](?: \[[^[\]\r\n]*\])?: Certificate fingerprint: ([a-f0-9]{64})$/;
+    const all = text.split(/\r?\n/).flatMap((line) => record.exec(line)?.[1] ?? []);
+    return { fingerprint: all.at(-1) ?? null };
+  });
+
   // one-click new server from a modpack (background job; poll /api/create-jobs/:id)
   app.post<{
     Body: { name?: string; projectId: string; versionId?: string; source?: string; memGb?: number };

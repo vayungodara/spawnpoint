@@ -14,6 +14,7 @@ import { clientGate, type ClientSet } from './launchgate.js';
 import { isRunningSafe, busyReason } from './maintenance.js';
 import { promotion, requestPromotion, restarting } from './promote.js';
 import { detect } from './detect.js';
+import { nativeRecord } from './native.js';
 import { sealRevision, verifyRevision, revisionInputs, revisionMoves, withStoppedRevision, lockedPath, revisionDir, reportRevision, revisionReport, revisionState, setRevisionState, installLaunchGuard, writeLaunchGate, packPath, hashes, readLock, type RevisionInput } from './revisions.js';
 import type { SolveInput, SolveResult } from './solver/index.js';
 
@@ -169,18 +170,18 @@ export function stage(id: string, files: StagedFile[], log: (m: string) => void,
     c.files = c.files.filter((f) => planning.keep!.includes(f.file));
   }
   generation.set(id, (generation.get(id) ?? 0) + 1);
-  // an approval or a tested pack was for the files before this batch
+  // an approval, a tested pack and test verdicts were for the files before this batch
   c.approved = undefined;
   c.pack = undefined;
   c.revision = undefined;
   c.consent = undefined;
+  c.server = undefined;
+  c.client = undefined;
   c.solver = planning?.solver ?? (planning?.java || files.some((f) => f.file.endsWith('.jar') || f.remove || f.replaces) ? undefined : c.solver);
   c.requests = planning?.requests ?? c.requests;
   c.java = planning?.java ?? c.java;
   if (planning?.repair) {
     c.repairs = [...c.repairs ?? [], planning.repair];
-    c.server = undefined;
-    c.client = undefined;
   }
   if (c.status !== 'testing') {
     c.status = 'collecting';
@@ -232,7 +233,7 @@ export function retest(id: string, log: (m: string) => void): void {
   const c = candidate(id);
   if (c?.status !== 'needs-approval' && c?.status !== 'ready') return;
   if (restarting(id)) return; // it is going in right now; mods are locked until then
-  save(id, { ...c, status: 'collecting', detail: 'testing again in a few seconds', pack: undefined, approved: undefined, revision: undefined, consent: undefined });
+  save(id, { ...c, status: 'collecting', detail: 'testing again in a few seconds', pack: undefined, approved: undefined, revision: undefined, consent: undefined, server: undefined, client: undefined });
   arm(id, log);
 }
 
@@ -474,7 +475,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
   const status = (detail: string): void => { c = save(id, { ...candidate(id)!, status: 'testing', detail }); };
   try {
     if (!revisionState(id).managedHosting) {
-      c = save(id, { ...c, consent: [`Install the required Crafty launch guard and hold AutoModpack hosting off until each boot and exact pack are verified. Permit pack rollback to restore locked configs and pack inputs, retaining altered copies for inspection. If AutoModpack would add default settings on its next boot, let it write them on a copy first and keep them. This changes the launch command, the hosting flag and AutoModpack's own defaults, never Minecraft, the loader, or the world.`] });
+      c = save(id, { ...c, consent: [`Install the required ${nativeRecord(id) ? 'Spawnpoint' : 'Crafty'} launch guard and hold AutoModpack hosting off until each boot and exact pack are verified. Permit pack rollback to restore locked configs and pack inputs, retaining altered copies for inspection. If AutoModpack would add default settings on its next boot, let it write them on a copy first and keep them. This changes the launch command, the hosting flag and AutoModpack's own defaults, never Minecraft, the loader, or the world.`] });
       return wait(id, {}, 'owner consent is required to manage revision-checked starts and publication', log);
     }
     const { repairCandidate, repairInventory, repairKey } = await import('./repairs.js');

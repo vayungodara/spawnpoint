@@ -29,6 +29,9 @@ baseline has five server lint warnings and two web lint warnings. Do not
 suppress them to make a change look green.
 In a seeded orb, prepend the installed `Tools/jdk-21…/bin` directory to
 `PATH` for the installer checks. The setup script installs Java there.
+Stop the `crafty` container (`sudo docker stop crafty`) before
+`native-runtime.mjs` and start it again afterwards: the import contract
+treats Crafty listening on 8443 as a running Crafty service and fails.
 
 CI also runs `node .github/native-runtime.mjs --service` on each OS. This
 installs and removes a disposable systemd unit, LaunchAgent or SCM service,

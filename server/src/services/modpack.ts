@@ -358,7 +358,7 @@ export async function installCurseforgeZipFile(
       } catch (error) { return { error: String(error) }; }
     }
     warnings.push(
-      "CF packs don't tag client-only mods — if the server crashes on boot, disable the client-only ones in Content → Installed",
+      "CF packs don't tag client-only mods — if the server crashes on boot, disable the client-only ones in Mods → Installed",
     );
     await chownToDirOwner(dir); // panel is root, the server is not — see platform.ts
     return { name: manifest.name, installed, skippedClientOnly: 0, overridesApplied, warnings };

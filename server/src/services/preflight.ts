@@ -88,7 +88,11 @@ export const classVersionFailure = (out: string): string | undefined => out.matc
     then "Caused by" lines deepest first, then error lines, then the raw tail. */
 export function excerptOf(out: string): string[] {
   const lines = out.split('\n');
-  const verdict = lines.filter((l) => /Missing or unsupported|requires .* of|Replace mod|which is missing!|Mod ID: |is incompatible with/i.test(l) && !/recommends/i.test(l));
+  // a JVM crash in native code names the library on the line after this
+  // header; console output may be appended to the same line
+  const native = lines.flatMap((l, i) => l.startsWith('# Problematic frame:') && lines[i + 1]?.startsWith('#')
+    ? [`the JVM crashed in native code: ${lines[i + 1].replace(/^#\s*(?:[CJVjv]\s+)?/, '').replace(/\[\d\d:\d\d:\d\d\].*$/, '').trim()}`] : []);
+  const verdict = [...native, ...lines.filter((l) => /Missing or unsupported|requires .* of|Replace mod|which is missing!|Mod ID: |is incompatible with/i.test(l) && !/recommends/i.test(l))];
   const cause = [...verdict, ...lines.filter((l) => /Caused by/.test(l)).reverse()];
   if (cause.length) return cause.slice(0, 8).map((l) => l.trim().slice(0, 220));
   const bad = lines.filter((l) => /incompatible|error|exception|missing|install /i.test(l) && !/\tat |recommends/i.test(l));
