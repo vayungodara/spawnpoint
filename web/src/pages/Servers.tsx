@@ -1,18 +1,8 @@
-import { useEffect, useState, type CSSProperties } from 'react'
-import { useNavigate } from 'react-router'
-import { useQueries, useQuery, useMutation } from '@tanstack/react-query'
-import { useServers, useSetActive, type Stats, type ServerInfo } from '../api'
+import { useEffect, useState } from 'react'
+import { Link, useNavigate } from 'react-router'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Pi, loaderIcon } from '../components/PixelIcons'
 import bandSurface from '../assets/band-surface.webp'
-
-const loaderColors: Record<string, string> = {
-  forge: 'bg-dirt text-paper',
-  fabric: 'bg-diamond text-ink',
-  neoforge: 'bg-gold text-ink',
-  paper: 'bg-sky text-ink',
-  vanilla: 'bg-stone text-ink',
-  unknown: 'bg-stone-dark text-ink',
-}
 
 // Create a server without ever opening Crafty. The panel closes every trap a
 // fresh server falls into: a free port, an EULA Crafty will actually accept,
@@ -28,7 +18,9 @@ const LOADERS: { key: string; label: string; blurb: string }[] = [
   { key: 'vanilla', label: 'Vanilla', blurb: 'pure Minecraft' },
 ]
 
-function NewServerPanel({ onDone }: { onDone: () => void }) {
+function NewServerPanel() {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
   const [loader, setLoader] = useState('fabric')
   const [mc, setMc] = useState('')
   const [name, setName] = useState('')
@@ -70,7 +62,7 @@ function NewServerPanel({ onDone }: { onDone: () => void }) {
   const { data: job } = useQuery({
     queryKey: ['create-job', jobId],
     queryFn: async () => (await (await fetch(`/api/create-jobs/${jobId}`)).json()) as {
-      status: string; done: boolean; error: string | null; warnings: string[]
+      status: string; done: boolean; error: string | null; warnings: string[]; serverId: string | null
     },
     enabled: !!jobId,
     refetchInterval: (q) => (q.state.data?.done ? false : 2000),
@@ -79,14 +71,8 @@ function NewServerPanel({ onDone }: { onDone: () => void }) {
   const busy = create.isPending || (!!jobId && !job?.done)
 
   return (
-    <div className="block px-5 py-4 mt-5">
-      <div className="text-sm font-bold flex items-center gap-2 mb-1">
-        <Pi i="pick" className="pi pi-s" /> New server
-      </div>
-      <p className="text-text-dim text-xs mb-4 max-w-[68ch]">
-        Built, configured and made bootable here — port, EULA, Java version and memory are all set for
-        you. Forge and NeoForge take a few minutes to install.
-      </p>
+    <div className="block px-5 py-5">
+      <h2 className="hud mb-3">LOADER</h2>
 
       {/* loader — the one choice that changes everything downstream */}
       <div className="flex flex-wrap gap-2 mb-4">
@@ -168,7 +154,12 @@ function NewServerPanel({ onDone }: { onDone: () => void }) {
                 {job.done ? '✓ ' : ''}{job.status}
               </span>
               {job.done && (
-                <button onClick={onDone} className="btn btn-block px-3 py-1 ml-auto">Show it</button>
+                <button
+                  onClick={async () => { await qc.invalidateQueries({ queryKey: ['servers'] }); navigate(job.serverId ? `/s/${job.serverId}` : '/') }}
+                  className="btn btn-emerald px-4 py-1.5 ml-auto"
+                >
+                  Open it
+                </button>
               )}
             </div>
           )}
@@ -181,187 +172,21 @@ function NewServerPanel({ onDone }: { onDone: () => void }) {
   )
 }
 
-function statusOf(st: Stats | undefined): { lamp: string; label: string; cls: string } {
-  if (!st) return { lamp: 'lamp-off', label: 'CHECKING…', cls: 'text-text-dim' }
-  if (st.phase === 'ready') return { lamp: 'lamp-on', label: 'ONLINE', cls: 'text-emerald' }
-  if (st.phase === 'starting') return { lamp: 'lamp-starting', label: 'STARTING…', cls: 'text-gold' }
-  if (st.crashed) return { lamp: 'lamp-crash', label: 'CRASHED', cls: 'text-redstone' }
-  return { lamp: 'lamp-off', label: 'OFFLINE', cls: 'text-text-dim' }
-}
-
-function ServerCard({ s, st, onPick }: { s: ServerInfo; st: Stats | undefined; onPick: () => void }) {
-  const status = statusOf(st)
-  const online = st?.phase === 'ready'
+export default function NewServer() {
   return (
-    <button
-      onClick={onPick}
-      className={`btn text-left p-0 overflow-hidden flex flex-col h-full w-full ${
-        s.active ? 'bg-block border-emerald! shadow-[0_4px_0_var(--color-emerald-dark)]!' : 'bg-block'
-      }`}
-    >
-      {/* material strip: the server's loader as a stratum */}
-      <div
-        className={`px-5 py-2 border-b-2 border-ink flex items-center gap-2.5 w-full ${loaderColors[s.detection.loader] ?? loaderColors.unknown}`}
-        style={{ backgroundImage: 'var(--noise)' }}
-      >
-        <Pi i={loaderIcon(s.detection.loader)} className="pi pi-s" />
-        <span className="font-px text-[10px] tracking-[0.08em]">
-          {s.detection.loader.toUpperCase()}{s.detection.mc ? ` · MC ${s.detection.mc}` : ''}
-        </span>
-        {s.active && <span className="font-px text-[10px] tracking-[0.08em] ml-auto">★ ACTIVE</span>}
-      </div>
-
-      <div className="p-5 w-full">
-        <div className="text-lg font-extrabold mb-2.5 truncate">{s.name}</div>
-        <div className="flex items-center gap-2.5 mb-3">
-          <span className={`lamp ${status.lamp}`} />
-          <span className={`font-px text-[10px] tracking-[0.08em] ${status.cls}`}>{status.label}</span>
-          {online && (
-            <span className="font-px text-[10px] text-text-dim">
-              {st!.online}/{st!.max} PLAYER{st!.online === 1 ? '' : 'S'}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {online && typeof st!.mem === 'number' && (st!.mem as number) > 0 && (
-            <span className="text-[11px] font-px border-2 border-line px-2 py-0.5 text-text-dim">
-              RAM {((st!.mem as number) / 1e9).toFixed(1)}G
-            </span>
-          )}
-          {st?.world_size && (
-            <span className="text-[11px] font-px border-2 border-line px-2 py-0.5 text-text-dim">
-              WORLD {st.world_size}
-            </span>
-          )}
-          <span className="text-[11px] font-px text-text-dim ml-auto">:{s.port}</span>
-        </div>
-      </div>
-    </button>
-  )
-}
-
-interface CreateJobInfo { id: string; status: string; done: boolean; error: string | null; packName: string | null }
-
-export default function Servers() {
-  const { data, isLoading, error, refetch, isFetching } = useServers()
-  const setActive = useSetActive()
-  const navigate = useNavigate()
-  const [creating, setCreating] = useState(false)
-  const [dismissedJobs, setDismissedJobs] = useState<string[]>([])
-
-  // creations started ANYWHERE (Content's modpack button, a dropped pack file)
-  // surface here too — a server materializing with no visible progress read
-  // as a bug. Poll fast only while something is actually building.
-  const { data: jobsData } = useQuery({
-    queryKey: ['create-jobs'],
-    queryFn: async () => (await (await fetch('/api/create-jobs')).json()) as { jobs: CreateJobInfo[] },
-    refetchInterval: (q) => ((q.state.data?.jobs ?? []).some((j) => !j.done) ? 3000 : 30_000),
-  })
-  const buildJobs = (jobsData?.jobs ?? []).filter((j) => !dismissedJobs.includes(j.id))
-  useEffect(() => {
-    if (jobsData?.jobs.some((j) => j.done)) refetch()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobsData?.jobs.filter((j) => j.done).length])
-
-  // one lightweight stats poll per card — lamps stay live
-  const statQueries = useQueries({
-    queries: (data?.servers ?? []).map((s) => ({
-      queryKey: ['stats', s.id],
-      queryFn: async () => (await (await fetch(`/api/servers/${s.id}/stats`)).json()) as Stats,
-      refetchInterval: 8_000,
-    })),
-  })
-  const statsById = new Map((data?.servers ?? []).map((s, i) => [s.id, statQueries[i]?.data]))
-
-  return (
-    <div>
-      <div className="vista mb-6">
+    <div className="space-y-5 pb-10">
+      <div className="vista">
         <img src={bandSurface} alt="" />
         <span className="vista-tag">Y 63 · SURFACE</span>
       </div>
-      <h1 className="text-3xl mb-1">Servers</h1>
-      <p className="text-text-dim text-sm mb-7 max-w-[68ch]">
-        Pick a server to manage — every page targets the active one.
-      </p>
-
-      {isLoading && <div className="text-text-dim text-sm">scanning worlds…</div>}
-
-      {error && (
-        <div className="block px-5 py-4 mb-6 border-redstone!">
-          <div className="flex items-center gap-3 flex-wrap">
-            <span className="lamp lamp-crash" />
-            <div className="min-w-0">
-              <div className="font-bold text-sm">Can't reach the server runtime</div>
-              <div className="text-text-dim text-xs mt-0.5">
-                Check the selected runtime in Settings. The panel reconnects by itself once the service is back.
-              </div>
-            </div>
-            <button onClick={() => refetch()} disabled={isFetching} className="btn btn-block px-4 py-2 text-xs ml-auto">
-              {isFetching ? 'Checking…' : 'Check again'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {buildJobs.length > 0 && (
-        <div className="space-y-2 mb-5">
-          {buildJobs.map((j) => (
-            <div key={j.id} className={`block px-4 py-3 text-xs font-semibold ${j.error ? 'border-redstone!' : ''}`}>
-              <div className="flex items-center gap-2.5 flex-wrap">
-                {!j.done && <span className="lamp lamp-starting animate-pulse" />}
-                {j.done && !j.error && <span className="lamp lamp-on" />}
-                {j.error && <span className="lamp lamp-crash" />}
-                <span className={j.error ? 'text-redstone' : j.done ? 'text-emerald' : 'text-gold'}>
-                  {j.packName ? `${j.packName}: ` : ''}
-                  {j.error ? `✗ ${j.error}` : `${j.done ? '✓ ' : ''}${j.status}`}
-                </span>
-                {j.done && (
-                  <button className="btn text-xs !py-0 ml-auto" onClick={() => setDismissedJobs((d) => [...d, j.id])}>
-                    ok
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-        {data?.servers.map((s, i) => (
-          <div key={s.id} className="rise-in" style={{ '--i': i } as CSSProperties}>
-            <ServerCard
-              s={s}
-              st={statsById.get(s.id)}
-              onPick={() => {
-                setActive.mutate(s.id)
-                navigate('/dashboard')
-              }}
-            />
-          </div>
-        ))}
-
-        <div className="flex flex-col gap-2">
-          <button
-            onClick={() => setCreating((v) => !v)}
-            className={`place-tile flex flex-1 flex-col items-center justify-center border-2 border-dashed p-5 transition-colors min-h-28 ${
-              creating ? 'border-emerald text-emerald' : 'border-line text-text hover:border-emerald'
-            }`}
-          >
-            <span className="font-px text-xl mb-1">+</span>
-            <span className="text-sm font-bold">Place new server</span>
-            <span className="hud mt-1">{creating ? 'CLOSE' : 'ANY LOADER · ANY VERSION'}</span>
-          </button>
-          <button
-            onClick={() => navigate('/content?tab=modpack')}
-            className="text-xs text-text-dim hover:text-emerald text-center transition-colors"
-            title="Search Modrinth / CurseForge packs — every result has a New Server button"
-          >
-            …or start from a modpack →
-          </button>
-        </div>
+      <div>
+        <h1 className="text-3xl mb-1">New server</h1>
+        <p className="text-text-dim text-sm max-w-[68ch]">
+          Port, EULA, Java version and memory are set for you. Forge and NeoForge take a few minutes to install.{' '}
+          <Link to="/new/modpack" className="text-emerald font-semibold underline underline-offset-2">Start from a modpack instead</Link>
+        </p>
       </div>
-
-      {creating && <NewServerPanel onDone={() => { setCreating(false); refetch() }} />}
+      <NewServerPanel />
     </div>
   )
 }

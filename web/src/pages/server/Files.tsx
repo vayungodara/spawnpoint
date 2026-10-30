@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useServers } from '../api'
-import { Pi } from '../components/PixelIcons'
+import { useCurrentServer } from '../../api'
+import { Pi } from '../../components/PixelIcons'
 
 // FILE MANAGER — browse/edit/upload/download anything under the active
 // server's directory. Paths are server-confined by the backend; this page is
@@ -16,8 +16,7 @@ const fmtTime = (ms: number) => new Date(ms).toLocaleString([], { dateStyle: 'sh
 
 export default function Files() {
   const qc = useQueryClient()
-  const { data: serversData } = useServers()
-  const active = serversData?.servers.find((s) => s.active)
+  const active = useCurrentServer()
   const id = active?.id
 
   const [path, setPath] = useState('') // current directory, '' = server root
@@ -143,7 +142,7 @@ export default function Files() {
     })
     const j = (await r.json()) as { ok?: boolean; error?: string; pack?: PackInfo }
     if (j.ok) {
-      flash(`✓ uploaded ${file.name}${file.name.endsWith('.jar') ? ' — boot-check runs in the background, it appears under Content → Installed' : ''}`)
+      flash(`✓ uploaded ${file.name}${file.name.endsWith('.jar') ? ' — boot-check runs in the background, it appears under Mods → Installed' : ''}`)
       if (j.pack) setPackFile({ path: path ? `${path}/${file.name}` : file.name, ...j.pack })
       refresh()
     } else flash(`✗ ${j.error}`)
@@ -158,21 +157,13 @@ export default function Files() {
 
   const dragHasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer.types).includes('Files')
 
-  if (!active)
-    return (
-      <div className="p-6">
-        <p className="text-text-dim">No active server — pick one on the Servers page.</p>
-      </div>
-    )
+  if (!active) return null
 
   const crumbs = path ? path.split('/') : []
 
   return (
-    <div className="p-6 space-y-4">
-      <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-3xl">Files — {active.name}</h1>
-        {msg && <span key={msg} className="hud !opacity-100 text-gold pop-in">{msg}</span>}
-      </div>
+    <div className="space-y-4">
+      {msg && <div role="status" key={msg} className="hud !opacity-100 text-gold pop-in">{msg}</div>}
 
       {editing ? (
         <div className="block p-4 space-y-3">

@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
-import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useServers, useSetActive } from '../api'
-import { PixelDefs, Pi, loaderIcon } from './PixelIcons'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { Navigate, NavLink, Outlet, useLocation } from 'react-router'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useRuntime, useServers, type Stats } from '../api'
+import { PixelDefs, Pi } from './PixelIcons'
+import Sheet from './Sheet'
+import { statusOf } from './status'
 
 // PIN gate: everything waits behind this screen. The session lasts 30 days.
 function PinGate({ onUnlocked }: { onUnlocked: () => void }) {
@@ -50,7 +52,7 @@ function PinGate({ onUnlocked }: { onUnlocked: () => void }) {
 
 // block-targeting reticle from the landing: a dashed outline that glides
 // to whatever interactive block you aim at. Mouse-only, honors reduced motion.
-const TGT_SEL = '.btn, .lever, .strata, .pb, .apanel-tabs .tab, .xp, .place-tile'
+const TGT_SEL = '.btn, .lever, .srv, .srv-new, .wtab, .pb, .xp, .place-tile'
 
 function Targeter() {
   const ref = useRef<HTMLDivElement>(null)
@@ -67,7 +69,7 @@ function Targeter() {
       if (!el || el === cur) return
       cur = el
       const r = el.getBoundingClientRect()
-      const pad = el.classList.contains('strata') ? 8 : 6
+      const pad = el.classList.contains('srv') ? 8 : el.classList.contains('wtab') ? 3 : 6
       // clamp to the viewport so edge-hugging targets (sidebar strata) don't clip
       const left = Math.max(r.left - pad, 3)
       const top = Math.max(r.top - pad, 3)
@@ -100,17 +102,126 @@ function Targeter() {
   return <div id="tgt" ref={ref} aria-hidden />
 }
 
-// the sidebar is a world cross-section: each destination is a stratum.
-// bg/fg are the material; the teeth edge feeds into the band below.
-const nav = [
-  { to: '/', label: 'Servers', tag: 'Y 63 · SURFACE', icon: 'globe', bg: '#7cc24f', fg: 'var(--color-ink)', dim: 'oklch(24% 0.02 255 / .62)' },
-  { to: '/dashboard', label: 'Dashboard', tag: 'Y 11 · CONTROL', icon: 'anvil', bg: '#5c3f28', fg: 'var(--color-paper)', dim: 'oklch(96% 0.012 95 / .6)' },
-  { to: '/config', label: 'Config', tag: 'Y 5 · REDSTONE', icon: 'bolt', bg: '#453b33', fg: 'var(--color-paper)', dim: 'oklch(96% 0.012 95 / .6)' },
-  { to: '/content', label: 'Content', tag: 'Y -32 · MINES', icon: 'crate', bg: '#262b33', fg: 'var(--color-paper)', dim: 'oklch(96% 0.012 95 / .6)' },
-  { to: '/files', label: 'Files', tag: 'Y -44 · ARCHIVE', icon: 'gem', bg: '#20252d', fg: 'var(--color-paper)', dim: 'oklch(96% 0.012 95 / .6)' },
-  { to: '/backups', label: 'Backups', tag: 'Y -50 · VAULT', icon: 'chest', bg: '#1d222b', fg: 'var(--color-paper)', dim: 'oklch(96% 0.012 95 / .6)' },
-  { to: '/settings', label: 'Settings', tag: 'Y -59 · BEDROCK', icon: 'shield', bg: '#16191f', fg: 'var(--color-paper)', dim: 'oklch(96% 0.012 95 / .6)' },
+// the sidebar is a world cross-section, and every server is one stratum of it:
+// grass on top, then dirt, tuff and deeper stone. Teeth feed into the next band.
+const MATERIALS = [
+  { bg: '#7cc24f', fg: 'var(--color-ink)' },
+  { bg: '#5c3f28', fg: 'var(--color-paper)' },
+  { bg: '#453b33', fg: 'var(--color-paper)' },
+  { bg: '#363c47', fg: 'var(--color-paper)' },
+  { bg: '#2a2f38', fg: 'var(--color-paper)' },
+  { bg: '#23272f', fg: 'var(--color-paper)' },
 ]
+const BEDROCK = '#16191f'
+
+interface CreateJobInfo { id: string; status: string; done: boolean; error: string | null; packName: string | null }
+
+function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
+  const { data } = useServers()
+  const { data: runtime } = useRuntime()
+  const servers = data?.servers ?? []
+  const native = new Set(runtime?.native.map((n) => n.id))
+  // one light stats poll per server keeps every lamp honest; the workspace
+  // shares the same query for the open server
+  const stats = useQueries({
+    queries: servers.map((s) => ({
+      queryKey: ['stats', s.id],
+      queryFn: async () => (await (await fetch(`/api/servers/${s.id}/stats`)).json()) as Stats,
+      refetchInterval: 10_000,
+    })),
+  })
+  // a server being built shows up as a stratum in progress
+  const { data: jobs } = useQuery({
+    queryKey: ['create-jobs'],
+    queryFn: async () => (await (await fetch('/api/create-jobs')).json()) as { jobs: CreateJobInfo[] },
+    refetchInterval: (q) => ((q.state.data?.jobs ?? []).some((j) => !j.done) ? 3000 : 60_000),
+  })
+  const building = (jobs?.jobs ?? []).filter((j) => !j.done)
+  const { data: layoutRoot } = useQuery({
+    queryKey: ['layout-root'],
+    queryFn: async () => {
+      const r = await fetch('/api/settings/summary')
+      if (!r.ok) return ''
+      return ((await r.json()).root ?? '') as string
+    },
+    staleTime: Infinity,
+  })
+
+  return (
+    <div className="flex flex-col h-full min-h-0" style={{ background: BEDROCK }}>
+      <NavLink to="/" onClick={onNavigate} className="px-5 pt-5 pb-4 block" aria-label="Spawnpoint home">
+        <div className="flex items-center gap-2.5">
+          <Pi i="flag" className="pi pi-l" />
+          <span className="font-px text-[15px] tracking-[0.04em] font-bold">SPAWNPOINT</span>
+        </div>
+        <div className="hud mt-2">SERVER PANEL v{__APP_VERSION__}</div>
+      </NavLink>
+
+      <div className="hud px-5 pb-2 pt-1 border-t-2 border-ink pt-3">SERVERS · {servers.length}</div>
+      <nav aria-label="Servers" className="flex flex-col min-h-0 overflow-y-auto scroll-px">
+        {servers.map((s, i) => {
+          const m = MATERIALS[i % MATERIALS.length]
+          const next = i + 1 < servers.length ? MATERIALS[(i + 1) % MATERIALS.length].bg : BEDROCK
+          const st = stats[i]?.data
+          const status = statusOf(st)
+          const sub = [
+            // only worth saying when Crafty and Spawnpoint servers sit side by side
+            runtime && !native.has(s.id) && (native.size > 0 || runtime.mode === 'standalone') ? 'CRAFTY' : null,
+            `${s.detection.loader.toUpperCase()} ${s.detection.mc ?? ''}`.trim(),
+            st?.phase === 'ready' ? `${st.online}/${st.max}` : status.label === 'RUNNING' ? null : status.label,
+          ].filter(Boolean).join(' · ')
+          return (
+            <NavLink
+              key={s.id}
+              to={`/s/${s.id}`}
+              onClick={onNavigate}
+              className={({ isActive }) => `strata srv ${isActive ? 'active' : ''}`}
+              style={{
+                background: m.bg, backgroundImage: 'var(--noise)', color: m.fg,
+                '--next': next, '--tile': i % 2 === 0 ? 'var(--mask-a)' : 'var(--mask-b)', '--eh': '10px',
+              } as CSSProperties}
+            >
+              <div className="srv-in">
+                <span className={`lamp ${status.lamp}`} aria-label={status.label} />
+                <span className="srv-name">{s.name}</span>
+                <span className="srv-sub">{sub}</span>
+              </div>
+            </NavLink>
+          )
+        })}
+        {building.map((j) => (
+          <div key={j.id} className="srv-new !border-gold !text-gold" role="status">
+            <span className="lamp lamp-starting" />
+            <span className="min-w-0 truncate">{j.packName ?? 'New server'}: {j.status}</span>
+          </div>
+        ))}
+        <NavLink to="/new" onClick={onNavigate} className={({ isActive }) => `srv-new ${isActive ? 'active' : ''}`}>
+          <Pi i="plus" className="pi pi-s" /> New server
+        </NavLink>
+      </nav>
+
+      <div className="flex-1 min-h-6" style={{ backgroundImage: 'var(--noise-dense)' }} />
+      <nav aria-label="Panel" className="py-2 border-t-2 border-ink">
+        <NavLink to="/settings" onClick={onNavigate} className={({ isActive }) => `side-link ${isActive ? 'active' : ''}`}>
+          <Pi i="shield" className="pi pi-s" /> Panel settings
+        </NavLink>
+      </nav>
+      <div className="px-5 py-3 border-t-2 border-ink">
+        {/* the real layout root, not a hardcoded path — every install shows its own */}
+        <div className="hud truncate" title={layoutRoot}>{(layoutRoot || 'SPAWNPOINT').toUpperCase()}</div>
+      </div>
+    </div>
+  )
+}
+
+/** Panel-level pages (settings, new server) sit in a padded column. */
+export function Pad() {
+  return (
+    <div className="p-4 sm:p-6 md:p-8 max-w-6xl">
+      <Outlet />
+    </div>
+  )
+}
 
 export default function Shell() {
   const qc = useQueryClient()
@@ -126,19 +237,10 @@ export default function Shell() {
     staleTime: 60_000,
   })
   const { data } = useServers()
-  const { data: layoutRoot } = useQuery({
-    queryKey: ['layout-root'],
-    queryFn: async () => {
-      const r = await fetch('/api/settings/summary')
-      if (!r.ok) return ''
-      return ((await r.json()).root ?? '') as string
-    },
-    staleTime: Infinity,
-  })
-  const setActive = useSetActive()
-  const navigate = useNavigate()
-  const active = data?.servers.find((s) => s.active)
   const { pathname } = useLocation()
+  const [menu, setMenu] = useState(false)
+  // switching servers or panel pages crossfades; workspace tabs animate inside
+  const topKey = pathname.split('/').slice(0, 3).join('/')
 
   // hold the first paint until we know: otherwise a fresh install flashes the
   // panel (with failing queries) for one round-trip before redirecting
@@ -155,113 +257,29 @@ export default function Shell() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row">
+    <div className="min-h-screen md:flex">
       <PixelDefs />
       <Targeter />
-      <aside className="w-full md:w-64 shrink-0 bg-panel border-b-2 md:border-b-0 md:border-r-[3px] border-ink flex flex-col md:sticky md:top-0 md:h-screen">
-        <div className="px-5 py-5" style={{ background: 'var(--color-bedrock)' }}>
-          <div className="flex items-center gap-2.5">
-            <Pi i="flag" className="pi pi-l" />
-            <span className="font-px text-[15px] tracking-[0.04em] font-bold">SPAWNPOINT</span>
-          </div>
-          <div className="hud mt-2">SERVER PANEL v{__APP_VERSION__}</div>
-        </div>
-
-        <div className="px-4 py-4 border-y-2 border-ink" style={{ background: 'var(--color-bedrock)' }}>
-          <div className="hud mb-2">ACTIVE SERVER</div>
-          <div className="flex items-center gap-2">
-            {active && <Pi i={loaderIcon(active.detection.loader)} className="pi shrink-0" />}
-            <select
-              className="field w-full min-w-0 px-3 py-2 text-sm font-semibold"
-              value={active?.id ?? ''}
-              onChange={(e) => {
-                setActive.mutate(e.target.value)
-                navigate('/dashboard')
-              }}
-            >
-              {!active && <option value="">— pick —</option>}
-              {data?.servers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} · {s.detection.loader} {s.detection.mc ?? ''}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* strata nav: desktop = vertical cross-section with teeth edges */}
-        <nav className="flex-1 hidden md:flex md:flex-col">
-          {nav.map((n, i) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.to === '/'}
-              className="strata block h-[64px] shrink-0"
-              style={{
-                background: n.bg,
-                backgroundImage: 'var(--noise)',
-                color: n.fg,
-                ['--next' as string]: nav[i + 1]?.bg ?? n.bg,
-                ['--tile' as string]: i % 2 === 0 ? 'var(--mask-a)' : 'var(--mask-b)',
-                ['--eh' as string]: '12px',
-              }}
-            >
-              {({ isActive }) => (
-                <div
-                  className="h-full px-4 py-3 flex flex-col justify-center transition-[filter] duration-150"
-                  // the grass stratum is bright even when dimmed, so the active one also gets an edge marker
-                  style={{ filter: isActive ? 'none' : 'brightness(0.62) saturate(0.85)', boxShadow: isActive ? 'inset 4px 0 0 var(--color-paper)' : undefined }}
-                  onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.filter = 'brightness(0.82) saturate(0.95)' }}
-                  onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.filter = 'brightness(0.62) saturate(0.85)' }}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Pi i={n.icon} className="pi" />
-                    <span className="text-sm font-bold">{n.label}</span>
-                  </div>
-                  {isActive && (
-                    <div className="font-px text-[10px] tracking-[0.08em] mt-1 ml-[30px]" style={{ color: n.dim }}>
-                      {n.tag}
-                    </div>
-                  )}
-                </div>
-              )}
-            </NavLink>
-          ))}
-          {/* the world continues down: bedrock filler below the last stratum */}
-          <div className="flex-1" style={{ background: '#16191f', backgroundImage: 'var(--noise-dense)' }} />
-        </nav>
-
-        {/* mobile: horizontal material chips */}
-        <nav className="flex md:hidden gap-2 px-3 py-3 overflow-x-auto" style={{ background: 'var(--color-bedrock)' }}>
-          {nav.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.to === '/'}
-              className="shrink-0 border-2 border-ink px-3 py-2 flex items-center gap-2"
-              style={({ isActive }) => ({
-                background: n.bg,
-                color: n.fg,
-                filter: isActive ? 'none' : 'brightness(0.62) saturate(0.85)',
-                boxShadow: '0 3px 0 var(--color-ink)',
-              })}
-            >
-              <Pi i={n.icon} className="pi pi-s" />
-              <span className="text-xs font-bold">{n.label}</span>
-            </NavLink>
-          ))}
-        </nav>
-
-        <div className="px-5 py-4 border-t-2 border-ink hidden md:block" style={{ background: '#16191f' }}>
-          {/* the real layout root, not a hardcoded path — every install shows its own */}
-          <div className="hud truncate" title={layoutRoot}>{(layoutRoot || 'SPAWNPOINT').toUpperCase()}</div>
-        </div>
+      <aside className="hidden md:block w-64 shrink-0 sticky top-0 h-screen border-r-[3px] border-ink">
+        <Sidebar />
       </aside>
 
-      <main className="flex-1 min-w-0 p-4 sm:p-6 md:p-8 max-w-6xl">
-        {data?.warning && <p role="status" className="block px-4 py-3 text-sm mb-5">{data.warning} Import recovery remains available in Config → Server runtime.</p>}
-        {/* key on pathname: strata switches crossfade instead of hard-cutting */}
-        <div key={pathname} className="route-in">
+      {/* phone: a slim bar, servers live in a drawer */}
+      <header className="md:hidden sticky top-0 z-30 flex items-center gap-3 px-4 h-14 border-b-[3px] border-ink" style={{ background: BEDROCK }}>
+        <Pi i="flag" className="pi" />
+        <span className="font-px text-[13px] tracking-[0.04em] font-bold">SPAWNPOINT</span>
+        <button onClick={() => setMenu(true)} className="btn btn-block ml-auto px-3 py-1.5 text-xs flex items-center gap-2" aria-label="Open servers and settings">
+          <span aria-hidden className="grid gap-[3px]"><i className="block w-3.5 h-[2px] bg-current" /><i className="block w-3.5 h-[2px] bg-current" /><i className="block w-3.5 h-[2px] bg-current" /></span>
+          Servers
+        </button>
+      </header>
+      <Sheet open={menu} onClose={() => setMenu(false)} side="left" label="Servers and settings">
+        <Sidebar onNavigate={() => setMenu(false)} />
+      </Sheet>
+
+      <main className="flex-1 min-w-0">
+        {data?.warning && <p role="status" className="block mx-4 md:mx-8 mt-4 px-4 py-3 text-sm">{data.warning} Import recovery remains available in Server → Runtime.</p>}
+        <div key={topKey} className="route-in">
           <Outlet />
         </div>
       </main>

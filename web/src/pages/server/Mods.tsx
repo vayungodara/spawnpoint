@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { useServers } from '../api'
-import bandMines from '../assets/band-mines.webp'
+import { useChange, useCurrentServer, type Candidate } from '../../api'
+import { PLUGIN_LOADERS, changeName, changeVisible, useReviewParam } from '../../components/status'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   // only claim a JSON body when there actually is one (Fastify 400s otherwise)
@@ -46,30 +46,6 @@ interface ExpandInfo {
   description: string
   versions: { id: string; name: string; date: string; mc: string[]; downloadable: boolean }[]
 }
-interface Verdict { result: 'passed' | 'failed' | 'unverified'; detail: string; excerpt?: string[]; seconds?: number }
-interface Candidate {
-  status: 'collecting' | 'testing' | 'needs-approval' | 'ready' | 'activating' | 'applied' | 'rejected'
-  detail: string
-  files: { file: string; path?: string; to: 'mods' | 'shelf'; entry?: { title: string } }[]
-  server?: Verdict
-  client?: Verdict
-  approved?: boolean
-  consent?: string[]
-  revision?: string
-  updatedAt: string
-}
-/** A change waiting for the server to restart before it goes live. */
-interface Promotion {
-  action: 'apply' | 'undo'
-  txn: string
-  choice: 'now' | 'when-empty' | null
-  restarting: boolean
-  /** the server is stopped: the change goes in when it is started from the panel */
-  stopped: boolean
-  /** RCON does not answer, so nobody can say who is online */
-  unknown: boolean
-  players: number | null
-}
 interface InstallResult {
   installed?: { file: string; title: string; version: string; clientOnly?: boolean }[] | number
   skipped?: { projectId: string; reason: string }[]
@@ -82,7 +58,6 @@ interface InstallResult {
   error?: string
 }
 
-const PLUGIN_LOADERS = ['paper', 'spigot', 'bukkit', 'purpur', 'folia']
 
 /* A server runs plugins OR mods, never both: Paper has no mods/ folder and
    Fabric has no plugins/ folder, so showing both tabs would just be offering
@@ -131,8 +106,7 @@ function fmtDownloads(n: number): string {
 }
 
 export default function Content() {
-  const { data: serversData } = useServers()
-  const active = serversData?.servers.find((s) => s.active)
+  const active = useCurrentServer()
   const qc = useQueryClient()
 
   // ?tab=modpack deep-links here from the Servers page's "start from a
@@ -208,27 +182,15 @@ export default function Content() {
     enabled: view === 'browse',
   })
 
+  const { data: change } = useChange(active?.id)
   const installedQuery = useQuery({
     queryKey: ['installed', active?.id],
-    queryFn: () => api<{ items: InstalledItem[]; rejections?: { at: string; jars: string[]; reason: string[] }[]; candidate: Candidate | null; promotion: Promotion | null }>(`/api/servers/${active?.id}/installed`),
+    queryFn: () => api<{ items: InstalledItem[] }>(`/api/servers/${active?.id}/installed`),
     enabled: !!active,
     // poll while a change is being tested or waits for a restart
-    refetchInterval: (q) => (['collecting', 'testing'].includes(q.state.data?.candidate?.status ?? '') ? 3000 : q.state.data?.promotion ? 5000 : false),
-  })
-  const candidate = installedQuery.data?.candidate ?? null
-  const promotion = installedQuery.data?.promotion ?? null
-  const decide = useMutation({
-    mutationFn: (action: CandidateAction) => {
-      const base = `/api/servers/${active?.id}`
-      if (action === 'now' || action === 'when-empty') return api(`${base}/promotion`, { method: 'POST', body: JSON.stringify({ choice: action }) })
-      if (action === 'cancel-undo') return api(`${base}/promotion`, { method: 'DELETE' })
-      return api(`${base}/candidate${action === 'discard' ? '' : `/${action}`}`, { method: action === 'discard' ? 'DELETE' : 'POST', ...(action === 'apply' ? { body: JSON.stringify({ consent: true, revision: candidate?.revision }) } : {}) })
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['installed', active?.id] }),
-    onError: (e) => failMsg(e),
+    refetchInterval: change?.promotion || ['collecting', 'testing', 'activating'].includes(change?.candidate?.status ?? '') ? 5000 : false,
   })
   const pendingCount = (installedQuery.data?.items ?? []).filter((i) => i.pending).length
-  const rejections = installedQuery.data?.rejections ?? []
 
   const [expanded, setExpanded] = useState<string | null>(null)
   const [createJob, setCreateJob] = useState<string | null>(null)
@@ -291,12 +253,13 @@ export default function Content() {
       const extra = res.skipped?.length ? ` · skipped: ${res.skipped.map((s) => s.reason).join('; ')}` : ''
       const allShelf = !!res.installed?.length && res.installed.every((i) => i.clientOnly)
       const after = !res.installed?.length ? ''
-        : res.candidate ? ' — boot-testing now; it goes live only if the test passes'
+        : res.candidate ? '. Testing it on a copy now; it goes live only if the tests pass'
         : res.untested ? ` — installed without a boot test (${res.untested}); restart to load`
         : allShelf ? ' — in the friend pack, never loaded by the server' : ' — restart to load'
       setInstallMsg(`${res.candidate ? '⏳ Staged' : '✓ Installed'}: ${names}${extra}${after}`)
       if (vars.projectId) setJustInstalled((prev) => new Set(prev).add(String(vars.projectId)))
       qc.invalidateQueries({ queryKey: ['installed', active?.id] })
+      qc.invalidateQueries({ queryKey: ['candidate', active?.id] })
       setTimeout(() => setInstallMsg(null), 8000)
     },
     onError: (e) => {
@@ -324,7 +287,7 @@ export default function Content() {
       qc.invalidateQueries({ queryKey: ['installed', active?.id] })
       if (r.candidate) {
         qc.invalidateQueries({ queryKey: ['candidate', active?.id] })
-        setInstallMsg('The change is staged for testing. Live files stay unchanged until promotion; review its results above.')
+        setInstallMsg('The change is staged for testing. Live files stay unchanged until it passes; follow it in Changes.')
       } else if (r.pending) queuedMsg(r.pending === 'disable' ? 'disabling it' : 'enabling it')
     },
     // this had NO error handler at all: the failure was invisible and the button looked dead
@@ -342,7 +305,7 @@ export default function Content() {
       qc.invalidateQueries({ queryKey: ['installed', active?.id] })
       if (r.candidate) {
         qc.invalidateQueries({ queryKey: ['candidate', active?.id] })
-        setInstallMsg('The removal is staged for testing. It needs your approval before promotion; live files are unchanged.')
+        setInstallMsg('The removal is staged for testing and needs your approval before it goes live. Live files are unchanged.')
       } else if (r.pending) queuedMsg('deleting it')
     },
     onError: (e) => {
@@ -362,24 +325,6 @@ export default function Content() {
   const checkUpdates = useMutation({
     mutationFn: () => api<{ updates: UpdateInfo[] }>(`/api/servers/${active?.id}/installed/updates`),
     onSuccess: (r) => setUpdates(r.updates),
-    onError: failMsg,
-  })
-  // the newest applied mod change, which can be undone
-  const lastChange = useQuery({
-    queryKey: ['last-change', active?.id, candidate?.status],
-    queryFn: () => api<{ change: { txn: string; added: { file: string }[] } | null }>(`/api/servers/${active?.id}/last-change`),
-    enabled: !!active && view === 'installed',
-  })
-  const undo = useMutation({
-    mutationFn: () => api<{ waiting: boolean }>(`/api/servers/${active?.id}/last-change/undo`, { method: 'POST', body: '{}' }),
-    onSuccess: (r) => {
-      setInstallMsg(r.waiting
-        ? '✓ The undo waits for the server to restart; see above.'
-        : '✓ Undone: the mods from before that change are back. They load when the server starts.')
-      qc.invalidateQueries({ queryKey: ['installed', active?.id] })
-      qc.invalidateQueries({ queryKey: ['last-change', active?.id] })
-      setTimeout(() => setInstallMsg(null), 10000)
-    },
     onError: failMsg,
   })
   const updateAll = useMutation({
@@ -423,83 +368,41 @@ export default function Content() {
   // modpack browsing stays available with NO active server — the Servers
   // page's "start from a modpack" link lands here exactly when there is
   // nothing to be active yet
-  if (!active && tab !== 'modpack')
-    return (
-      <div>
-        <div className="hud mb-3">Y -32 · MINES</div>
-        <p className="text-text-dim">No active server — pick one on the Servers page.</p>
-      </div>
-    )
+  if (!active && tab !== 'modpack') return null
 
   const hits = searchQuery.data?.pages.flatMap((p) => p.hits) ?? []
+  const views = [['browse', 'Browse'], ['installed', 'Installed'], ['configs', 'Configs']] as const
 
   return (
     <div className="space-y-5 pb-10">
-      <div className="vista">
-        <img src={bandMines} alt="" />
-        <span className="vista-tag">Y -32 · MINES</span>
-      </div>
-      <div className="flex items-end justify-between flex-wrap gap-4">
-        <div>
-          <h1 className="text-3xl">Content — {active?.name ?? 'new server from a pack'}</h1>
-          <p className="text-text-dim text-sm mt-1">
-            Powered by the Modrinth &amp; CurseForge libraries · required dependencies install automatically
-          </p>
+      {active ? (
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div role="tablist" aria-label="Content view" className="flex border-2 border-ink shadow-[0_4px_0_var(--color-ink)]">
+            {views.map(([key, label], i) => (
+              <button
+                key={key}
+                role="tab"
+                aria-selected={view === key}
+                onClick={() => setView(key)}
+                className={`px-4 py-2 text-sm font-bold transition-colors ${i ? 'border-l-2 border-ink' : ''} ${view === key ? 'bg-emerald text-ink' : 'bg-block text-text-dim hover:text-text'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-text-dim text-sm">From Modrinth and CurseForge. Required dependencies come along automatically.</p>
         </div>
-        {active && <div className="flex border-2 border-ink shadow-[0_4px_0_var(--color-ink)]">
-          <button
-            onClick={() => setView('browse')}
-            className={`px-4 py-2 text-sm font-bold ${view === 'browse' ? 'bg-emerald text-ink' : 'bg-block text-text-dim'}`}
-          >
-            Browse
-          </button>
-          <button
-            onClick={() => setView('installed')}
-            className={`px-4 py-2 text-sm font-bold border-l-2 border-ink ${view === 'installed' ? 'bg-emerald text-ink' : 'bg-block text-text-dim'}`}
-          >
-            Installed
-          </button>
-          <button
-            onClick={() => setView('configs')}
-            className={`px-4 py-2 text-sm font-bold border-l-2 border-ink ${view === 'configs' ? 'bg-emerald text-ink' : 'bg-block text-text-dim'}`}
-          >
-            Configs
-          </button>
-        </div>}
-      </div>
-
-      {installMsg && (
-        <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{installMsg}</div>
+      ) : (
+        <div>
+          <h1 className="text-3xl">Start from a modpack</h1>
+          <p className="text-text-dim text-sm mt-1 max-w-[68ch]">Pick a pack and press New server. Spawnpoint builds a fresh server for it: loader, Java, memory, mods and friend sync.</p>
+        </div>
       )}
 
-      {active && promotion?.action === 'undo' && <UndoWaitingBanner p={promotion} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
-      {active && candidate && <CandidateBanner id={active.id} c={candidate} p={promotion?.action === 'apply' ? promotion : null} busy={decide.isPending} onDecide={(action) => decide.mutate(action)} />}
-      {active && <RevisionHistory id={active.id} updating={!!promotion || ['collecting', 'testing'].includes(candidate?.status ?? '')} />}
+      {active && <ChangeStrip id={active.id} />}
 
-      {active && rejections.length > 0 && (
-        <div className="block border-gold! px-4 py-2.5 text-sm">
-          <div className="flex items-start gap-3">
-            <div className="min-w-0 flex-1">
-              <b>The boot test turned away {rejections.reduce((n, r) => n + r.jars.length, 0)} mod(s) in the last 48h.</b> Nothing on the server changed:
-              {rejections.map((r, i) => (
-                <div key={i} className="mt-1 font-mono text-xs">
-                  {new Date(r.at).toLocaleTimeString()} — {r.jars.join(', ')}: {r.reason[0] ?? 'see panel log'}
-                </div>
-              ))}
-            </div>
-            <button
-              className="text-xs font-bold text-text-dim hover:text-text shrink-0"
-              title="Handled — hide this until the next incident"
-              onClick={() => {
-                void fetch(`/api/servers/${active.id}/rejections`, { method: 'DELETE' }).then(() =>
-                  qc.invalidateQueries({ queryKey: ['installed', active.id] }),
-                )
-              }}
-            >
-              dismiss
-            </button>
-          </div>
-        </div>
+      {installMsg && (
+        <div role="status" className="block border-emerald! px-4 py-2.5 text-sm font-semibold pop-in">{installMsg}</div>
       )}
 
       {/* CurseForge author opt-out — confirmed by CF returning no download URL.
@@ -623,11 +526,9 @@ export default function Content() {
             )}
           </div>
 
-          {tab === 'modpack' && (
+          {tab === 'modpack' && active && (
             <div className="border-2 border-diamond/50 bg-diamond/10 px-4 py-2.5 text-xs font-semibold text-diamond">
-              {active
-                ? 'A modpack becomes its own server: hit New server and the panel builds it (loader, Java, memory, mods, friend sync). Pouring a pack over an existing world could not be tested or undone as one change, so it is not offered.'
-                : 'No active server yet — pick any pack below and hit New Server: the panel builds the whole thing (loader, Java, memory, mods, friend-sync) in one click.'}
+              A modpack becomes its own server: press New server and the panel builds it (loader, Java, memory, mods, friend sync). Pouring a pack over an existing world could not be tested or undone as one change, so it is not offered.
             </div>
           )}
           {active && tab === 'plugin' && (
@@ -811,16 +712,7 @@ export default function Content() {
             {updates && updates.length === 0 && (
               <span className="font-px text-[10px] text-emerald self-center">ALL UP TO DATE</span>
             )}
-            {lastChange.data?.change && (
-              <button
-                onClick={() => undo.mutate()}
-                disabled={undo.isPending}
-                className="btn px-4 py-2 text-sm"
-                title={`Takes out ${lastChange.data.change.added.map((f) => f.file).join(', ')} and puts back what it replaced`}
-              >
-                {undo.isPending ? 'undoing…' : 'Undo last change'}
-              </button>
-            )}
+            <Link to={`/s/${active.id}/changes`} className="btn btn-block px-4 py-2 text-sm">History and undo</Link>
             <input
               value={installedFilter}
               onChange={(e) => setInstalledFilter(e.target.value)}
@@ -1156,164 +1048,19 @@ function ConfigsView({ serverId }: { serverId: string }) {
   )
 }
 
-type CandidateAction = 'apply' | 'retest' | 'discard' | 'now' | 'when-empty' | 'cancel-undo'
-
-const RESULT = { passed: '✓ passed', failed: '✗ failed', unverified: '? not tested' } as const
-
-/** One line per test, so it is clear what was tested, skipped or uncertain. */
-function Verdicts({ c }: { c: Candidate }) {
-  const rows: [string, Verdict | undefined][] = [['Server boot', c.server], ['Client join', c.client]]
+/** A thin pointer to the open change, so a fresh install never looks like nothing happened. */
+function ChangeStrip({ id }: { id: string }) {
+  const { data } = useChange(id)
+  const [, setReview] = useReviewParam()
+  const c = data?.candidate
+  if (!changeVisible(c)) return null
+  const tone = c.status === 'needs-approval' ? 'border-gold! text-gold' : c.status === 'applied' ? 'border-emerald! text-emerald' : 'border-sky! text-sky'
+  const what = c.status === 'needs-approval' ? 'needs your approval' : c.status === 'applied' ? 'is live' : c.status === 'ready' ? 'passed and waits for a restart' : 'is being tested on a copy'
   return (
-    <ul className="text-xs text-text-dim">
-      {rows.map(([label, v]) => (
-        <li key={label}>
-          <b>{label}:</b>{' '}
-          {v ? `${RESULT[v.result]}${v.seconds ? ` in ${v.seconds} s` : ''}: ${v.detail}` : 'not run'}
-        </li>
-      ))}
-    </ul>
-  )
-}
-
-interface Revision {
-  id: string; minecraft: string; loader: string; loaderVersion: string
-  files: number; requested: number; dependencies: number; backup?: string
-  tests: Record<string, { result: 'passed' | 'failed' | 'skipped' | 'inconclusive'; detail: string; renderer?: string }>
-  approved?: { at: string; reasons: string[] }
-}
-function RevisionHistory({ id, updating }: { id: string; updating: boolean }) {
-  const q = useQuery({
-    queryKey: ['revisions', id],
-    queryFn: () => api<{ active?: string; published?: string; revisions: Revision[] }>(`/api/servers/${id}/revisions`),
-    refetchInterval: updating ? 5000 : false,
-  })
-  if (q.isError) return <p role="alert" className="text-sm text-gold">Revision history could not be loaded: {q.error.message}</p>
-  if (!q.data?.revisions.length) return null
-  return (
-    <details className="block p-4 text-sm">
-      <summary className="cursor-pointer font-bold">Revision history · {q.data.revisions.length}</summary>
-      <p className="text-text-dim mt-2">Friends get the promoted revision. A pack rollback does not restore the world; world restore needs your approval.</p>
-      <div className="divide-y divide-ink mt-3">
-        {q.data.revisions.map((r) => (
-          <details key={r.id} className="py-3 min-w-0">
-            <summary className="cursor-pointer break-words">
-              <span className="font-mono text-xs">{r.id}</span>
-              {r.id === q.data.published ? ' · published to friends' : r.id === q.data.active ? ' · active, publication pending' : ' · retained'}
-            </summary>
-            <p className="mt-2 text-text-dim">Minecraft {r.minecraft} · {r.loader} {r.loaderVersion} · {r.files} locked files · {r.requested} requested mods · {r.dependencies} dependencies</p>
-            <ul className="space-y-1 mt-2">
-              {Object.entries(r.tests).map(([test, v]) => <li key={test} className={v.result === 'failed' ? 'text-red' : v.result === 'passed' ? 'text-emerald' : 'text-text-dim'}><b>{test}: {v.result}</b>{v.renderer ? ` · renderer: ${v.renderer}` : ''} — {v.detail}</li>)}
-            </ul>
-            {r.approved && <p className="mt-2 text-gold">Owner approved: {r.approved.reasons.join('; ')}</p>}
-            {r.backup && <p className="mt-2 text-text-dim break-all">Stopped-world backup: {r.backup}</p>}
-            <a className="text-sky underline inline-block mt-2" href={`/api/servers/${id}/revisions/${r.id}`} target="_blank" rel="noreferrer">Inspect lock and test report</a>
-          </details>
-        ))}
-      </div>
-    </details>
-  )
-}
-
-/** When a change that waits for a restart will go live, and the owner's choices. */
-function RestartChoice({ p, busy, onDecide }: { p: Promotion; busy: boolean; onDecide: (action: CandidateAction) => void }) {
-  if (p.restarting) return <div><span className="hud !opacity-100 mr-2">RESTARTING</span>The server is restarting to load it.</div>
-  const drop = p.action === 'apply'
-    ? <button onClick={() => onDecide('discard')} disabled={busy} className="btn px-4 py-2 text-sm">Discard</button>
-    : <button onClick={() => onDecide('cancel-undo')} disabled={busy} className="btn px-4 py-2 text-sm">Cancel undo</button>
-  if (p.stopped) {
-    return (
-      <>
-        <div>The server is stopped. Start it from this panel and the change goes in first.</div>
-        <div className="flex gap-3 flex-wrap">{drop}</div>
-      </>
-    )
-  }
-  if (p.unknown) {
-    return (
-      <>
-        <div>The panel cannot tell who is online (RCON does not answer), so it will not restart on its own. Restart the server from the dashboard to load it.</div>
-        <div className="flex gap-3 flex-wrap">{drop}</div>
-      </>
-    )
-  }
-  const n = p.players ?? 0
-  const status = p.players === null ? 'Checking who is online…'
-    : n === 0 ? 'Nobody is online, so the server restarts in a moment.'
-    : p.choice === 'when-empty' ? `${n} player${n === 1 ? ' is' : 's are'} online. The server restarts once everyone has left.`
-    : p.choice === 'now' ? 'Restarting after a 30-second warning in chat.'
-    : `${n} player${n === 1 ? ' is' : 's are'} online and ${n === 1 ? 'was' : 'were'} told in chat. Restart now, or wait until everyone has left?`
-  return (
-    <>
-      <div>{status}</div>
-      {n > 0 && p.choice !== 'now' && (
-        <div className="flex gap-3 flex-wrap">
-          <button onClick={() => onDecide('now')} disabled={busy} className="btn btn-emerald px-4 py-2 text-sm">Restart now (30 s warning)</button>
-          {p.choice !== 'when-empty' && <button onClick={() => onDecide('when-empty')} disabled={busy} className="btn px-4 py-2 text-sm">When everyone has left</button>}
-          {drop}
-        </div>
-      )}
-    </>
-  )
-}
-
-/** An undo of the last change, waiting for the server to restart. */
-function UndoWaitingBanner({ p, busy, onDecide }: { p: Promotion; busy: boolean; onDecide: (action: CandidateAction) => void }) {
-  return (
-    <div className="block border-sky! px-4 py-3 text-sm space-y-2" role="status">
-      <div><b>Undo of the last mod change</b> goes in when the server restarts, so friends never get a pack the server is not running.</div>
-      <RestartChoice p={p} busy={busy} onDecide={onDecide} />
-    </div>
-  )
-}
-
-/** The mod change waiting for its tests, or the result of the last one. */
-function CandidateBanner({ id, c, p, busy, onDecide }: { id: string; c: Candidate; p: Promotion | null; busy: boolean; onDecide: (action: CandidateAction) => void }) {
-  const [consent, setConsent] = useState(false)
-  useEffect(() => setConsent(false), [c.revision, c.status])
-  const names = c.files.map((f) => f.path ?? f.entry?.title ?? f.file).join(', ')
-  const recent = Date.now() - new Date(c.updatedAt).getTime() < 10 * 60_000
-  if (c.status === 'rejected' || ((c.status === 'applied') && !recent)) return null
-  if (c.status === 'ready') {
-    return (
-      <div className="block border-emerald! px-4 py-3 text-sm space-y-2">
-        <div><b>✓ {names}</b> {c.approved ? 'is approved' : 'passed its tests'}. It goes live the next time the server starts, so friends get it together with the server.</div>
-        <Verdicts c={c} />
-        {p && <RestartChoice p={p} busy={busy} onDecide={onDecide} />}
-      </div>
-    )
-  }
-  if (c.status === 'applied') {
-    return (
-      <div className="block border-emerald! px-4 py-2.5 text-sm space-y-1">
-        <div><b>✓ {names}</b>: {c.detail}.</div>
-        <Verdicts c={c} />
-      </div>
-    )
-  }
-  if (c.status === 'needs-approval') {
-    const excerpt = c.client?.excerpt?.length ? c.client.excerpt : c.server?.excerpt ?? []
-    return (
-      <div className="block border-gold! px-4 py-3 text-sm space-y-2">
-        <div><b>{names}</b> needs your approval: {c.detail.replace(/^not tested: /, '')}.</div>
-        <Verdicts c={c} />
-        {c.consent && <ul className="list-disc pl-5 space-y-1">{c.consent.map((reason) => <li key={reason}>{reason}</li>)}</ul>}
-        {c.revision && c.files.filter((f) => f.path).map((f) => <a key={f.path} className="text-sky underline block break-all" href={`/api/servers/${id}/candidate/config?revision=${encodeURIComponent(c.revision!)}&path=${encodeURIComponent(f.path!)}`} target="_blank" rel="noreferrer">Inspect before / after: {f.path}</a>)}
-        {excerpt.length > 0 && (
-          <pre className="console p-2 text-xs whitespace-pre-wrap max-h-40 overflow-auto">{excerpt.join('\n')}</pre>
-        )}
-        <label className="flex items-start gap-2"><input className="mt-1" type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />I approve the listed changes and accept the test gaps shown above. Hash checks and world-restore consent cannot be waived.</label>
-        <div className="flex gap-3 flex-wrap">
-          <button onClick={() => onDecide('apply')} disabled={busy || !consent} className="btn btn-emerald px-4 py-2 text-sm">Approve and continue</button>
-          <button onClick={() => onDecide('retest')} disabled={busy} className="btn px-4 py-2 text-sm">Test again</button>
-          <button onClick={() => onDecide('discard')} disabled={busy} className="btn px-4 py-2 text-sm">Discard</button>
-        </div>
-      </div>
-    )
-  }
-  return (
-    <div className="block border-sky! px-4 py-2.5 text-sm" role="status">
-      <span className="hud !opacity-100 mr-2">TESTING</span>
-      <b>{names}</b>: {c.detail}. Nothing on the server changes until the test passes.
+    <div className={`block px-4 py-2.5 flex items-center gap-3 flex-wrap ${tone}`} role="status">
+      <span className={`lamp ${c.status === 'needs-approval' ? 'lamp-starting' : c.status === 'applied' ? 'lamp-on' : 'lamp-starting'}`} aria-hidden />
+      <span className="text-sm text-text min-w-0"><b>{changeName(c)}</b> {what}.</span>
+      <button onClick={() => setReview(true)} className="btn btn-block px-3 py-1.5 text-xs ml-auto">{c.status === 'needs-approval' ? 'Review and approve' : 'Details'}</button>
     </div>
   )
 }

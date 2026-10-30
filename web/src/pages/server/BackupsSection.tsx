@@ -1,7 +1,5 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useServers } from '../api'
-import bandVault from '../assets/band-vault.webp'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = init?.body ? { 'content-type': 'application/json' } : undefined
@@ -69,9 +67,8 @@ function AutoBackupRow() {
   )
 }
 
-export default function Backups() {
-  const { data: serversData } = useServers()
-  const active = serversData?.servers.find((s) => s.active)
+/** World backups for one server: the nightly job and the archive. */
+export default function BackupsSection({ active }: { active: { id: string; name: string } }) {
   const qc = useQueryClient()
   const [msg, setMsg] = useState<string | null>(null)
   const note = (m: string, ms = 8000) => { setMsg(m); setTimeout(() => setMsg(null), ms) }
@@ -107,39 +104,27 @@ export default function Backups() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['backups', active?.id] }),
   })
 
-  if (!active)
-    return (
-      <div>
-        <div className="hud mb-3">Y -50 · VAULT</div>
-        <p className="text-text-dim">No active server — pick one on the Servers page.</p>
-      </div>
-    )
-
   return (
-    <div className="max-w-3xl space-y-6">
-      <div>
-        <div className="vista mb-6">
-          <img src={bandVault} alt="" />
-          <span className="vista-tag">Y -50 · VAULT</span>
+    <section className="space-y-4">
+      <div className="flex items-end gap-4 flex-wrap">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-xl">Backups</h2>
+          <p className="text-text-dim text-sm mt-0.5 max-w-[68ch]">
+            Zips of the whole world folder: terrain, players, everything. Safe while the server runs; chunks are saved first.
+          </p>
         </div>
-        <h1 className="text-3xl">Backups — {active.name}</h1>
-        <p className="text-text-dim text-sm mt-1 max-w-[68ch]">
-          Snapshots of the world folder (terrain + players + everything). Newest 10 are kept.
-          Safe while the server runs — chunks are flushed first.
-        </p>
+        <button
+          onClick={() => create.mutate()}
+          disabled={create.isPending}
+          className="btn btn-emerald px-5 py-2.5 text-sm"
+        >
+          {create.isPending ? 'Backing up…' : 'Back up now'}
+        </button>
       </div>
 
       {msg && <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{msg}</div>}
 
       <AutoBackupRow />
-
-      <button
-        onClick={() => create.mutate()}
-        disabled={create.isPending}
-        className="btn btn-emerald px-5 py-2.5 text-sm"
-      >
-        {create.isPending ? 'Backing up… (can take a minute)' : 'Create backup now'}
-      </button>
 
       <div className="space-y-2.5">
         {(data?.backups ?? []).map((b) => (
@@ -175,9 +160,9 @@ export default function Backups() {
           </div>
         ))}
         {data?.backups.length === 0 && (
-          <div className="text-text-dim text-sm">No backups yet — make your first one above.</div>
+          <div className="text-text-dim text-sm">No backups yet. Back up now, or let the nightly backup make the first one.</div>
         )}
       </div>
-    </div>
+    </section>
   )
 }

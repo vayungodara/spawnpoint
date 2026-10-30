@@ -101,7 +101,7 @@ export default function Settings() {
       </div>
       <div>
         <h1 className="text-3xl mb-1">Settings</h1>
-        <p className="text-text-dim text-sm">Panel security and integrations. Server-specific options live on Config.</p>
+        <p className="text-text-dim text-sm">Panel security and integrations. Options for one server live in that server’s Server tab.</p>
       </div>
 
       {msg && <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{msg}</div>}
@@ -115,7 +115,7 @@ export default function Settings() {
         <p className="text-text-dim text-sm mb-3 max-w-[70ch]">
           The independent Spawnpoint service owns Java and its console even while this panel restarts.
           Install the OS service first; choosing it here does not import or stop any Crafty server.
-          Existing ownership can only change through Config → Server runtime.
+          Moving an existing server happens in its Server tab → Runtime.
         </p>
         <div className="flex flex-wrap gap-3" role="group" aria-label="Creation and server-list backend">
           <button className={`btn px-4 py-2 text-sm ${runtime?.mode === 'standalone' ? 'btn-emerald' : 'btn-block'}`}
@@ -159,7 +159,7 @@ export default function Settings() {
         icon="crate"
         title="CurseForge API key"
         isSet={data.curseforgeKeySet}
-        help="Adds the CurseForge catalog to Content (mods, modpacks, resource packs, shaders). Free from console.curseforge.com."
+        help="Adds the CurseForge catalog to Mods (mods, modpacks, resource packs, shaders). Free from console.curseforge.com."
         placeholder="paste key"
         onSave={(v) => save.mutate({ curseforgeApiKey: v })}
         onRemove={() => save.mutate({ curseforgeApiKey: null })}
