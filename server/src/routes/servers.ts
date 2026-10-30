@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { craftyApi, CraftyError } from '../clients/crafty.js';
 import { rconCommand } from '../clients/rcon.js';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { listServers, setActiveUuid, getActiveUuid, serverDir, pinJavaFor } from '../services/servers.js';
@@ -41,6 +41,47 @@ async function applyWhenDown(id: string, timeoutMs = 90_000): Promise<number> {
   return applied;
 }
 
+/** The last 2 MB of logs/latest.log as lines, with its modification time.
+    Links are not followed: Minecraft writes a plain file there. */
+function latestLog(id: string): { lines: string[]; mtime: Date } {
+  const dir = join(serverDir(id), 'logs'), p = join(dir, 'latest.log');
+  const st = lstatSync(p, { throwIfNoEntry: false });
+  if (!st?.isFile() || lstatSync(dir).isSymbolicLink()) return { lines: [], mtime: new Date() };
+  const max = 2 * 1024 * 1024;
+  const fd = openSync(p, 'r');
+  try {
+    const want = Math.min(st.size, max);
+    const buf = Buffer.alloc(want);
+    const got = readSync(fd, buf, 0, want, st.size - want);
+    const lines = buf.subarray(0, got).toString('utf8').split(/\r?\n/);
+    if (st.size > max) lines.shift(); // a partial first line
+    return { lines: lines.at(-1) === '' ? lines.slice(0, -1) : lines, mtime: st.mtime };
+  } finally { closeSync(fd); }
+}
+
+/** Lines from the last `seconds`, by their [HH:MM:SS] stamps in local time.
+    `newest` is when the last line was written (the file's mtime for a log
+    file). Threads may log a second out of order; only a jump of an hour or
+    more counts as crossing midnight. Untimed lines (stack frames) follow the
+    line before them; a log with no stamps at all is returned whole. */
+function linesSince(lines: string[], seconds: number, newest = new Date()): string[] {
+  const cutoff = Date.now() - seconds * 1000;
+  let later = newest.getTime() + 60_000, first = lines.length, stamped = false;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^\[(\d{2}):(\d{2}):(\d{2})/.exec(lines[i]);
+    if (!m) continue;
+    stamped = true;
+    const d = new Date(newest);
+    d.setHours(+m[1], +m[2], +m[3], 0);
+    let t = d.getTime();
+    while (t > later + 3_600_000) t -= 86_400_000;
+    if (t < cutoff) break;
+    later = Math.min(later, t);
+    first = i;
+  }
+  return stamped ? lines.slice(first) : lines;
+}
+
 export default async function serverRoutes(app: FastifyInstance) {
   app.get('/api/servers', async (_req, reply) => {
     try {
@@ -72,15 +113,18 @@ export default async function serverRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  app.get<{ Params: { id: string }; Querystring: { tail?: string } }>(
+  // the live console tail, or logs/latest.log with `file=latest`; `since`
+  // (seconds) is judged on the server's own clock, which log times use
+  app.get<{ Params: { id: string }; Querystring: { tail?: string; since?: string; file?: string } }>(
     '/api/servers/:id/logs',
     async (req) => {
-      const lines = await craftyApi.getLogs(req.params.id);
-      const tail = Math.min(parseInt(req.query.tail ?? '200', 10), 1000);
+      const { lines, mtime } = req.query.file === 'latest' ? latestLog(req.params.id) : { lines: await craftyApi.getLogs(req.params.id), mtime: new Date() };
+      const tail = Math.min(parseInt(req.query.tail ?? '200', 10) || 200, req.query.file === 'latest' ? 5000 : 1000);
       // hide the panel's own RCON plumbing (HUD/auto-stop polling) — vanilla
       // logs two thread lines per connection and echoes command feedback
       const clean = lines.filter((l) => !/RCON (Listener|Client)|\[Rcon:/.test(l));
-      return { lines: clean.slice(-tail) };
+      const since = parseInt(req.query.since ?? '', 10);
+      return { lines: (since > 0 ? linesSince(clean, since, mtime) : clean).slice(-tail) };
     },
   );
 

@@ -11,7 +11,7 @@ import maintenanceRoutes from './routes/maintenanceRoutes.js';
 import chunkyRoutes from './routes/chunkyRoutes.js';
 import fileRoutes from './routes/fileRoutes.js';
 import settingsRoutes from './routes/settingsRoutes.js';
-import { adminToken, authed, pinConfigured } from './auth.js';
+import { adminToken, allows, authed, pinConfigured, requiredScope, type Access } from './auth.js';
 import wizardRoutes, { wizardActive, setupCode } from './routes/wizardRoutes.js';
 import { startAutostopWatcher } from './services/autostop.js';
 import { startIngameHud } from './services/ingamehud.js';
@@ -30,6 +30,10 @@ import { isServerId } from './services/servers.js';
 import { craftyApi } from './clients/crafty.js';
 import { startNativeWatcher } from './services/native.js';
 
+declare module 'fastify' {
+  interface FastifyRequest { access?: Access }
+}
+
 const VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 const settings = loadSettings();
 const app = Fastify({ logger: true });
@@ -42,12 +46,19 @@ app.addHook('onRequest', async (req, reply) => {
   // percent-escapes, so "/%61pi/..." reaches an /api route too
   const route = req.routeOptions.url ?? '';
   if (!route.startsWith('/api/') || OPEN.has(route) || route.startsWith('/api/wizard/')) return;
-  const by = authed(req.headers);
-  if (!by) {
+  const access = authed(req.headers);
+  if (!access) {
     return reply.code(401).send({ error: pinConfigured() ? 'PIN required' : 'finish setup first' });
   }
+  const need = requiredScope(req.method, route, req.query);
+  if (!allows(access, need)) {
+    return reply.code(403).send(need === 'admin'
+      ? { error: `this API token has ${access.scope} scope; only the owner can do this`, hint: 'use the panel, or the admin token on the panel machine' }
+      : { error: `this API token has ${access.scope} scope; ${need} is needed`, hint: `create a token with ${need} scope in Panel settings` });
+  }
+  req.access = access;
   // a cookie rides along on cross-site requests; refuse writes from other origins
-  if (by === 'session' && req.method !== 'GET' && req.method !== 'HEAD' && req.headers.origin) {
+  if (access.by === 'session' && req.method !== 'GET' && req.method !== 'HEAD' && req.headers.origin) {
     let host = '';
     try { host = new URL(req.headers.origin).host; } catch { /* "null" origin */ }
     if (host !== req.headers.host) return reply.code(403).send({ error: 'cross-origin request refused' });

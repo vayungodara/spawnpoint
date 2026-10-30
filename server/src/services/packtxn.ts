@@ -211,7 +211,7 @@ function arm(id: string, log: (m: string) => void): void {
 }
 
 /** Apply a candidate whose tests could not run, on the owner's say-so. */
-export async function approve(id: string, log: (m: string) => void, consent = false, expectedRevision?: string): Promise<Candidate | null> {
+export async function approve(id: string, log: (m: string) => void, consent = false, expectedRevision?: string, by?: string): Promise<Candidate | null> {
   const c = candidate(id);
   if (!c || c.status !== 'needs-approval') return c;
   if (!consent) throw new Error('explicit owner consent is required; review the test results and requested changes');
@@ -222,7 +222,7 @@ export async function approve(id: string, log: (m: string) => void, consent = fa
   }
   if (!c.revision) throw new Error('no locked test attempt exists; test this change again');
   if (expectedRevision !== c.revision) throw new Error('the candidate changed since you reviewed it; reload and review the new revision');
-  reportRevision(id, c.revision, { approved: { at: new Date().toISOString(), reasons: [...c.consent ?? [], c.detail] } });
+  reportRevision(id, c.revision, { approved: { at: new Date().toISOString(), reasons: [...c.consent ?? [], c.detail], ...(by ? { by } : {}) } });
   return activate(id, c, log, true);
 }
 

@@ -79,12 +79,99 @@ function cookieValid(cookieHeader: string | undefined): boolean {
   return tsEq(m[2], createHmac('sha256', sessionSecret()).update(`${m[1]}:${hash}`).digest('hex'));
 }
 
-/** How the request is authenticated: the admin token, a PIN session, or not at all. */
-export function authed(headers: { cookie?: string; authorization?: string }): 'token' | 'session' | null {
-  const bearer = /^Bearer (\S+)$/.exec(headers.authorization ?? '')?.[1];
-  if (bearer) return tsEq(bearer, adminToken()) ? 'token' : null;
-  return cookieValid(headers.cookie) ? 'session' : null;
+// Scoped API tokens for agents and remote scripts, created in Panel settings.
+// Only a SHA-256 of each token is stored; the token itself is shown once.
+// Scopes nest: read < control < approve. An approve token counts as the
+// owner's consent, so it is only created with an explicit confirmation.
+export const SCOPES = ['read', 'control', 'approve'] as const;
+export type Scope = (typeof SCOPES)[number];
+export interface ApiToken { id: string; name: string; scope: Scope; hash: string; created: string; lastUsed?: string }
+const RANK: Record<Scope | 'admin', number> = { read: 0, control: 1, approve: 2, admin: 3 };
+const TOKENS_FILE = (): string => join(PATHS.data, 'api-tokens.json');
+const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
+
+export function listTokens(): ApiToken[] {
+  try { return JSON.parse(readFileSync(TOKENS_FILE(), 'utf8')) as ApiToken[]; } catch { return []; }
 }
+function saveTokens(tokens: ApiToken[]): void {
+  mkdirSync(PATHS.data, { recursive: true });
+  writeFileSync(TOKENS_FILE(), JSON.stringify(tokens, null, 2), { mode: 0o600 });
+}
+/** Returns the new token once; only its hash is kept. */
+export function createToken(name: string, scope: Scope): { token: string; info: Omit<ApiToken, 'hash'> } {
+  const id = randomBytes(4).toString('hex');
+  const token = `spt_${id}_${randomBytes(24).toString('base64url')}`;
+  const t: ApiToken = { id, name, scope, hash: sha256(token), created: new Date().toISOString() };
+  saveTokens([...listTokens(), t]);
+  return { token, info: { id, name, scope, created: t.created } };
+}
+export function revokeToken(id: string): boolean {
+  const all = listTokens();
+  const rest = all.filter((t) => t.id !== id);
+  if (rest.length !== all.length) saveTokens(rest);
+  return rest.length !== all.length;
+}
+function scopedToken(bearer: string): ApiToken | null {
+  const id = /^spt_([0-9a-f]{8})_[\w-]{32}$/.exec(bearer)?.[1];
+  const t = id ? listTokens().find((x) => x.id === id) : undefined;
+  if (!t || !tsEq(sha256(bearer), t.hash)) return null;
+  // last use is shown in settings; written at most once a minute
+  if (!t.lastUsed || Date.now() - Date.parse(t.lastUsed) > 60_000) {
+    saveTokens(listTokens().map((x) => (x.id === t.id ? { ...x, lastUsed: new Date().toISOString() } : x)));
+  }
+  return t;
+}
+
+/** Who is asking: the owner (PIN session or admin token) or a scoped token. */
+export interface Access { by: 'token' | 'session' | 'api'; scope: Scope | 'admin'; name?: string }
+
+/** How the request is authenticated, or null when it is not. */
+export function authed(headers: { cookie?: string; authorization?: string }): Access | null {
+  const bearer = /^Bearer (\S+)$/.exec(headers.authorization ?? '')?.[1];
+  if (bearer) {
+    if (tsEq(bearer, adminToken())) return { by: 'token', scope: 'admin' };
+    const t = scopedToken(bearer);
+    return t ? { by: 'api', scope: t.scope, name: t.name } : null;
+  }
+  return cookieValid(headers.cookie) ? { by: 'session', scope: 'admin' } : null;
+}
+
+// Routes above their method's default scope. Reads default to `read` and
+// writes to `control`. Reads that return file bytes can expose RCON
+// passwords or keys, so they need `control`, except server and crash logs.
+const NEEDS: Record<string, Scope | 'admin'> = {
+  'GET /api/servers/:id/files/content': 'control',
+  'GET /api/servers/:id/files/download': 'control',
+  'GET /api/servers/:id/configs/file': 'control',
+  'GET /api/servers/:id/candidate/config': 'control',
+  'GET /api/servers/:id/bobby/download': 'control',
+  'POST /api/servers/:id/candidate/apply': 'approve',
+  'POST /api/servers/:id/last-change/undo': 'approve',
+  'POST /api/servers/:id/backups/restore': 'approve',
+  'POST /api/servers/:id/worlds/reset': 'approve',
+  'POST /api/servers/:id/version/apply': 'approve',
+  'POST /api/servers/:id/version/rollback': 'approve',
+  'POST /api/servers/:id/reset-players': 'approve',
+  'DELETE /api/servers/:id/backups': 'approve',
+  'GET /api/tokens': 'admin',
+  'POST /api/tokens': 'admin',
+  'DELETE /api/tokens/:tokenId': 'admin',
+  'PUT /api/settings': 'admin',
+  'POST /api/runtime': 'admin',
+  'POST /api/admin/exit': 'admin',
+  'DELETE /api/servers/:id': 'admin',
+  'POST /api/servers/:id/runtime/import': 'admin',
+};
+const LOG_PATH = /^(logs|crash-reports)\/[\w-][\w.-]*$/;
+
+/** The scope a request needs, by its matched route. */
+export function requiredScope(method: string, route: string, query: unknown): Scope | 'admin' {
+  const m = method === 'HEAD' ? 'GET' : method; // HEAD runs the GET handler
+  const need = NEEDS[`${m} ${route}`];
+  if (need === 'control' && route.endsWith('/files/content') && LOG_PATH.test(String((query as { path?: string })?.path ?? ''))) return 'read';
+  return need ?? (m === 'GET' ? 'read' : 'control');
+}
+export const allows = (a: Access, need: Scope | 'admin'): boolean => RANK[a.scope] >= RANK[need];
 
 // Wrong guesses: 5 free per address, then a doubling lockout (30 s to 15
 // min). A global cap stops an attacker who rotates addresses. Both reset

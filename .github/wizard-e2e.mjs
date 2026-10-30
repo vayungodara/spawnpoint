@@ -196,6 +196,59 @@ if (linked) {
   check('the world folder cannot be deleted under another spelling', r.status === 400 && existsSync(join(srv, 'world', 'level.dat')));
 }
 
+// ---- scoped API tokens: read < control < approve, owner-only management ----
+const srvDir = join(root, 'Crafty', 'servers', SERVER_ID);
+writeFileSync(join(srvDir, 'server.properties'), 'enable-rcon=true\nrcon.password=hunter2\nmotd=hi\n');
+const hhmmss = (d) => d.toTimeString().slice(0, 8);
+mkdirSync(join(srvDir, 'logs'), { recursive: true });
+writeFileSync(join(srvDir, 'logs', 'latest.log'), [
+  `[${hhmmss(new Date(Date.now() - 2 * 3600_000))}] [Server thread/INFO]: old line`,
+  `[${hhmmss(new Date(Date.now() - 5_000))}] [Server thread/ERROR]: new line`,
+  '\tat some.Stack.frame(Frame.java:1)',
+].join('\n'));
+const mint = (scope, extra = {}) => post('/api/tokens', { name: `agent-${scope}`, scope, ...extra }, bearer);
+check('an approve token needs explicit confirmation', (await mint('approve')).status === 400);
+const tok = {};
+for (const s of ['read', 'control', 'approve']) tok[s] = (await (await mint(s, s === 'approve' ? { confirmApprove: true } : {})).json()).token;
+check('scoped tokens are issued once', ['read', 'control', 'approve'].every((s) => /^spt_[0-9a-f]{8}_[\w-]{32}$/.test(tok[s] ?? '')));
+check('only token hashes are stored', !readFileSync(join(data, 'api-tokens.json'), 'utf8').includes(tok.read.slice(14)));
+const as = async (scope, method, path, body) => (await fetch(`${base}${path}`, {
+  method,
+  headers: { authorization: `Bearer ${tok[scope]}`, ...(body ? { 'content-type': 'application/json' } : {}) },
+  body: body && JSON.stringify(body),
+})).status;
+const sp = `/api/servers/${SERVER_ID}`;
+check('read can read settings', await as('read', 'GET', '/api/chatgenie') === 200);
+check('read cannot change settings', await as('read', 'PUT', '/api/chatgenie', {}) === 403);
+check('control can change settings', await as('control', 'PUT', '/api/chatgenie', {}) === 200);
+check('read can read server logs', await as('read', 'GET', `${sp}/files/content?path=logs/latest.log`) === 200);
+check('read cannot read other files', await as('read', 'GET', `${sp}/files/content?path=server.properties`) === 403);
+check('read cannot climb out of logs/', await as('read', 'GET', `${sp}/files/content?path=logs/../server.properties`) === 403);
+check('control can read files', await as('control', 'GET', `${sp}/files/content?path=server.properties`) === 200);
+const props = async (h) => (await (await fetch(`${base}${sp}/properties`, { headers: h })).json()).properties;
+check('scoped tokens never see the RCON password', (await props({ authorization: `Bearer ${tok.approve}` }))['rcon.password'] === '(hidden)');
+check('the owner still sees it', (await props(bearer))['rcon.password'] === 'hunter2');
+check('control cannot approve a mod change', await as('control', 'POST', `${sp}/candidate/apply`, { consent: true }) === 403);
+check('control cannot restore a world', await as('control', 'POST', `${sp}/backups/restore`, { file: 'x.zip' }) === 403);
+check('approve reaches the approval route', ![401, 403].includes(await as('approve', 'POST', `${sp}/candidate/apply`, { consent: true })));
+check('no scoped token manages tokens', await as('approve', 'GET', '/api/tokens') === 403 && await as('approve', 'POST', '/api/tokens', { name: 'x', scope: 'read' }) === 403);
+check('no scoped token changes the PIN', await as('approve', 'PUT', '/api/settings', { pin: '123456' }) === 403);
+check('no scoped token deletes a server', await as('approve', 'DELETE', sp, { confirmName: 'x' }) === 403);
+check('HEAD follows the GET scope', (await fetch(`${base}/api/tokens`, { method: 'HEAD', headers: { authorization: `Bearer ${tok.approve}` } })).status === 403);
+check('control cannot wipe player data', await as('control', 'POST', `${sp}/reset-players`) === 403);
+let logLink = true;
+try { symlinkSync(join(srvDir, 'server.properties'), join(srvDir, 'logs', 'props.log')); } catch { logLink = false; }
+if (logLink) check('read cannot follow a link in logs/', await as('read', 'GET', `${sp}/files/content?path=logs/props.log`) === 403);
+const since = await (await fetch(`${base}${sp}/logs?file=latest&since=60`, { headers: { authorization: `Bearer ${tok.read}` } })).json();
+check('logs --since keeps recent lines and their stack frames', since.lines?.length === 2 && /new line/.test(since.lines[0]));
+const listed = (await (await fetch(`${base}/api/tokens`, { headers: bearer })).json()).tokens;
+check('the owner sees tokens and their last use, never hashes', listed.length === 3 && listed.every((t) => !('hash' in t)) && !!listed.find((t) => t.scope === 'read')?.lastUsed);
+const readId = tok.read.split('_')[1];
+check('a tampered token is refused', await as('read', 'GET', '/api/chatgenie') === 200
+  && (await fetch(`${base}/api/chatgenie`, { headers: { authorization: `Bearer spt_${readId}_${'A'.repeat(32)}` } })).status === 401);
+check('the owner can revoke a token', (await fetch(`${base}/api/tokens/${readId}`, { method: 'DELETE', headers: bearer })).ok);
+check('a revoked token stops working at once', await as('read', 'GET', '/api/chatgenie') === 401);
+
 done = true;
 child.kill();
 crafty.close();

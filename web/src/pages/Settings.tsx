@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Pi } from '../components/PixelIcons'
+import { copyText } from '../components/status'
 import bandBedrock from '../assets/band-bedrock.webp'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -56,6 +57,91 @@ function KeyBlock({ icon, title, isSet, help, placeholder, onSave, onRemove, bus
           </button>
         )}
       </div>
+    </div>
+  )
+}
+
+type Scope = 'read' | 'control' | 'approve'
+interface ApiToken { id: string; name: string; scope: Scope; created: string; lastUsed?: string }
+const SCOPE_HELP: Record<Scope, string> = {
+  read: 'status, players, mods, logs and test results',
+  control: 'also start, stop, console commands, files and staging mod changes',
+  approve: 'also approve mod changes, undo and world restore, as you',
+}
+const when = (iso?: string) => (iso ? new Date(iso).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'never')
+
+/** Scoped, revocable tokens for the spawnpoint CLI and coding agents. */
+function ApiTokens() {
+  const qc = useQueryClient()
+  const [name, setName] = useState('')
+  const [scope, setScope] = useState<Scope>('read')
+  const [sure, setSure] = useState(false)
+  const [fresh, setFresh] = useState<{ token: string; name: string } | null>(null)
+  const [copied, setCopied] = useState(false)
+  const { data } = useQuery({ queryKey: ['api-tokens'], queryFn: () => api<{ tokens: ApiToken[] }>('/api/tokens') })
+  const create = useMutation({
+    mutationFn: () => api<{ token: string; info: ApiToken }>('/api/tokens', { method: 'POST', body: JSON.stringify({ name: name.trim(), scope, confirmApprove: scope === 'approve' && sure }) }),
+    onSuccess: (r) => { setFresh({ token: r.token, name: r.info.name }); setCopied(false); setName(''); setSure(false); qc.invalidateQueries({ queryKey: ['api-tokens'] }) },
+  })
+  const revoke = useMutation({
+    mutationFn: (id: string) => api(`/api/tokens/${id}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['api-tokens'] }),
+  })
+  const tokens = data?.tokens ?? []
+  return (
+    <div className="block px-5 py-4">
+      <div className="flex items-center gap-2.5 mb-1">
+        <Pi i="shield" className="pi pi-s" />
+        <h2 className="font-extrabold">API tokens</h2>
+        <span className="hud !opacity-100">{tokens.length ? `${tokens.length} ACTIVE` : 'NONE'}</span>
+      </div>
+      <p className="text-text-dim text-xs mb-3 max-w-[70ch]">
+        For the <span className="font-mono">spawnpoint</span> CLI on another machine or a coding agent. Give each one the lowest scope it needs.
+        On this machine the CLI uses the admin token by itself.
+      </p>
+      {fresh && (
+        <div className="field px-3 py-3 mb-3 space-y-2" role="status">
+          <p className="text-sm font-bold">Token for {fresh.name}. Copy it now: it is not shown again.</p>
+          <div className="flex gap-2 flex-wrap items-center">
+            <code className="font-mono text-xs break-all flex-1 min-w-60">{fresh.token}</code>
+            <button className="btn btn-emerald px-3 py-1.5 text-sm" onClick={() => copyText(fresh.token).then(() => setCopied(true))}>{copied ? 'Copied' : 'Copy'}</button>
+            <button className="btn btn-block px-3 py-1.5 text-sm" onClick={() => setFresh(null)}>Done</button>
+          </div>
+          <p className="text-xs text-text-dim">On the other machine: <span className="font-mono">spawnpoint login --url {location.origin}</span>, then paste it.</p>
+        </div>
+      )}
+      {tokens.length > 0 && (
+        <ul className="mb-3 divide-y divide-ink/30">
+          {tokens.map((t) => (
+            <li key={t.id} className="py-2 flex items-center gap-3 flex-wrap text-sm">
+              <span className="font-bold min-w-0 truncate">{t.name}</span>
+              <span className={`hud !opacity-100 ${t.scope === 'approve' ? 'text-gold' : t.scope === 'control' ? 'text-sky' : ''}`}>{t.scope.toUpperCase()}</span>
+              <span className="text-xs text-text-dim">created {when(t.created)} · last used {when(t.lastUsed)}</span>
+              <button className="ml-auto text-xs font-bold text-redstone/90 hover:text-redstone" disabled={revoke.isPending} aria-label={`Revoke ${t.name}`}
+                onClick={() => { if (confirm(`Revoke ${t.name}? Anything using it stops working at once.`)) revoke.mutate(t.id) }}>revoke</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex items-center gap-3 flex-wrap">
+        <input value={name} onChange={(e) => setName(e.target.value.slice(0, 40))} placeholder="name, e.g. laptop agent" aria-label="Token name" className="field flex-1 min-w-48 px-3 py-2 text-sm" />
+        <div className="flex gap-2" role="group" aria-label="Token scope">
+          {(['read', 'control', 'approve'] as const).map((s) => (
+            <button key={s} aria-pressed={scope === s} onClick={() => { setScope(s); setSure(false) }}
+              className={`btn px-3 py-2 text-sm ${scope === s ? 'btn-emerald' : 'btn-block'}`}>{s[0].toUpperCase() + s.slice(1)}</button>
+          ))}
+        </div>
+        <button onClick={() => create.mutate()} disabled={create.isPending || !name.trim() || (scope === 'approve' && !sure)} className="btn btn-emerald px-4 py-2 text-sm">Create token</button>
+      </div>
+      <p className="text-text-dim text-xs mt-2 max-w-[70ch]">{scope[0].toUpperCase() + scope.slice(1)}: {SCOPE_HELP[scope]}.
+        {scope !== 'read' && ' Mods are code, so this token can run code on this machine: give it only to agents you would trust with a shell.'}</p>
+      {scope === 'approve' && (
+        <label className="flex items-start gap-2.5 text-sm mt-2 max-w-[70ch]">
+          <input className="mt-1" type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} />
+          <span>Approvals made with this token count as mine, including test gaps I would otherwise review. Hash checks still cannot be waived.</span>
+        </label>
+      )}
+      {create.error && <p role="alert" className="text-sm text-redstone font-semibold mt-2">{create.error.message}</p>}
     </div>
   )
 }
@@ -154,6 +240,8 @@ export default function Settings() {
           </button>
         </div>
       </div>
+
+      <ApiTokens />
 
       <KeyBlock
         icon="crate"

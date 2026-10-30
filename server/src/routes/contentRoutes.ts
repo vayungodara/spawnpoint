@@ -146,7 +146,7 @@ export default async function contentRoutes(app: FastifyInstance) {
   // the mod change waiting for (or done with) its boot test
   app.get<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req) => ({ candidate: candidate(req.params.id), promotion: promotionView(req.params.id) }));
   app.post<{ Params: { id: string }; Body: { consent?: boolean; revision?: string } }>('/api/servers/:id/candidate/apply', async (req, reply) => {
-    try { return { candidate: await approve(req.params.id, log, req.body?.consent === true, req.body?.revision) }; }
+    try { return { candidate: await approve(req.params.id, log, req.body?.consent === true, req.body?.revision, req.access?.by === 'api' ? `API token "${req.access.name}"` : undefined) }; }
     catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
   });
   app.get<{ Params: { id: string }; Querystring: { path: string; revision: string } }>('/api/servers/:id/candidate/config', async (req, reply) => {

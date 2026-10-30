@@ -7,10 +7,12 @@ import { rconCommand } from '../clients/rcon.js';
 import { portAudit, reportServer, suggestGamePort } from '../services/ports.js';
 
 export default async function configRoutes(app: FastifyInstance) {
-  app.get<{ Params: { id: string } }>('/api/servers/:id/properties', async (req) => ({
-    properties: readProperties(req.params.id),
-    restartRequired: restartFlags.has(req.params.id),
-  }));
+  app.get<{ Params: { id: string } }>('/api/servers/:id/properties', async (req) => {
+    const properties = readProperties(req.params.id);
+    // the RCON password is a console credential; scoped tokens never read it
+    if (req.access?.by === 'api' && properties['rcon.password']) properties['rcon.password'] = '(hidden)';
+    return { properties, restartRequired: restartFlags.has(req.params.id) };
+  });
 
   app.patch<{ Params: { id: string }; Body: Record<string, string> }>(
     '/api/servers/:id/properties',

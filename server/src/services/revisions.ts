@@ -47,7 +47,7 @@ export interface RevisionLock {
 }
 export interface RevisionReport {
   tests: Record<string, TestResult>;
-  approved?: { at: string; reasons: string[] };
+  approved?: { at: string; reasons: string[]; by?: string };
   backup?: string;
 }
 export interface RevisionInput {

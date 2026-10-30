@@ -51,6 +51,15 @@ function confine(id: string, rel: string): string {
   return real;
 }
 
+/** A regular file directly in logs/ or crash-reports/, with no link on the way. */
+function plainLog(id: string, p: string): boolean {
+  const root = realpathSync(serverDir(id));
+  const dir = dirname(p);
+  if (![join(root, 'logs'), join(root, 'crash-reports')].includes(dir)) return false;
+  const d = lstatSync(dir, { throwIfNoEntry: false }), f = lstatSync(p, { throwIfNoEntry: false });
+  return !!d?.isDirectory() && !d.isSymbolicLink() && !!f?.isFile() && !f.isSymbolicLink();
+}
+
 function looksBinary(buf: Buffer): boolean {
   const n = Math.min(buf.length, 8000);
   for (let i = 0; i < n; i++) if (buf[i] === 0) return true;
@@ -107,6 +116,8 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (req, reply) => {
       try {
         const p = confine(req.params.id, req.query.path);
+        // a read token may only see real log files, never a link to a config
+        if (req.access?.scope === 'read' && !plainLog(req.params.id, p)) return reply.code(403).send({ error: 'read tokens can only read files in logs/ and crash-reports/' });
         const st = statSync(p);
         if (st.isDirectory()) return reply.code(400).send({ error: 'is a directory' });
         if (st.size > EDIT_MAX) return { tooLarge: true, size: st.size };
