@@ -1,6 +1,6 @@
 // Disposable orb fixture, never a production installer. No credential files
 // are read: reset the disposable admin to a generated password, log in once,
-// and keep credentials out of output. Requires .agents/setup + orb services.
+// and keep credentials out of output. Requires the orb setup and services.
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';

@@ -1,3 +1,0 @@
-# Hooks and the setup script run under sh/bash, also on Windows checkouts.
-.githooks/* text eol=lf
-.agents/setup text eol=lf

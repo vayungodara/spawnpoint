@@ -45,8 +45,9 @@ must start with no runtime directory so fresh service-account permissions are ex
 
 ## Disposable orb integration environment
 
-`.agents/setup` installs prerequisites, JDKs 25 and 21, HeadlessMC and locked
-npm dependencies, then builds the panel. It is safe to rerun. Start supervised
+The Amp project's pre-setup script installs prerequisites, JDKs 25 and 21,
+HeadlessMC and locked npm dependencies, builds the panel, and writes the
+untracked `.amp/services.yaml`. It is safe to rerun. Start supervised
 services with `amp orb services ensure`. The `sp` service exposes the panel
 through an Amp portal. Use its returned URL for user review.
 The disposable `owner` service runs the same packaged supervisor without OS
@@ -73,7 +74,8 @@ The fixture ID is in `/srv/sp/test-server-id`. It has Fabric 1.21.1, loader
 jars. The seed pins exact Modrinth version IDs. ImmediatelyFast is absent so
 the xvfb run can check the real AutoModpack handshake without omitting a mod.
 The script boots the fixture once and leaves it stopped. The container name
-is `crafty`; mounts and the pinned image digest are in `.amp/services.yaml`.
+is `crafty`; mounts and the pinned image digest are in the generated
+`.amp/services.yaml`.
 
 For Forge acceptance, import a separate disposable Minecraft 1.20.1 server
 from the official Forge 47.4.28 installer. Crafty imports ZIPs from
@@ -148,22 +150,6 @@ exact pushed SHA and check all OS jobs plus gitleaks. Dependabot PRs #1
 through #6 were closed on 2026-10-30, when main's history was rewritten to
 remove an old video. Ask the owner before merging or closing new Dependabot
 PRs.
-
-Commits in this repository must never credit Claude or Anthropic: no
-`Co-authored-by` trailer naming Claude or `noreply@anthropic.com`, no
-`Claude-Session` trailer, no "Generated with Claude Code" line, and no Claude
-author or committer. GitHub lists co-authors as repository contributors and
-keeps a removed one in the sidebar for days. Commits also carry no
-`Amp-Thread-ID` trailer. The Amp project sets
-`AMP_DISABLE_AMP_THREAD_TRAILER=1` for orbs, and `.agents/setup` points
-`core.hooksPath` at `.githooks`, whose `commit-msg` drops that trailer and
-refuses Claude or Anthropic credit. Where setup hasn't run, such as on a
-runner, run `git config core.hooksPath .githooks` once. Before pushing, this
-must print nothing:
-
-```sh
-git log --format=%B origin/main..HEAD | rg -i '^(co-authored-by:.*(claude|anthropic)|claude-session:|amp-thread-id:)|generated with \[?claude code'
-```
 
 There is no production panel in this repository to inspect after a code
 push. Rebuild and restart the disposable `sp` service, check `/api/health`,
