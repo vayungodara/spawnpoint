@@ -20,6 +20,12 @@ for (const name of users) {
 for (const name of users) execFileSync('/usr/sbin/useradd', ['--system', '--no-create-home', '--shell', '/usr/sbin/nologin', name]);
 const ids = (name) => ({ uid: Number(execFileSync('id', ['-u', name], { encoding: 'utf8' })), gid: Number(execFileSync('id', ['-g', name], { encoding: 'utf8' })) });
 const crafty = ids(users[0]), owner = ids(users[1]);
+// The supervisor account runs the checkout's supervisor, as it runs an install's.
+try { execFileSync('python3', ['-c', `open(${JSON.stringify(resolve('server/dist/services/supervisor.py'))}).close()`], { uid: owner.uid, gid: owner.gid, stdio: 'ignore' }); }
+catch {
+  for (const name of users) execFileSync('/usr/sbin/userdel', [name]);
+  throw new Error('the checkout must be readable by other accounts (for example chmod o+x on each parent directory)');
+}
 const root = mkdtempSync(join(tmpdir(), 'spawnpoint-handover-'));
 chmodSync(root, 0o755);
 const data = join(root, 'Spawnpoint/data');

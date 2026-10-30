@@ -46,7 +46,11 @@ jobs:
       # A root panel hands a Crafty-owned server to an unprivileged
       # supervisor account; every path a start writes must then be its own.
       - if: runner.os == 'Linux'
-        run: sudo -E env "PATH=$PATH" node .github/ownership-handover.mjs
+        # The supervisor account reads the checkout, as it reads an install;
+        # the runner's home is private by default.
+        run: |
+          chmod o+x "$HOME"
+          sudo env "PATH=$PATH" node .github/ownership-handover.mjs
       # Rendering passes only on a named GL/Vulkan device, never a stub.
       - run: node .github/client-evidence.mjs
       - run: node .github/revision-guard.mjs
