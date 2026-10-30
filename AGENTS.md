@@ -141,8 +141,10 @@ Fabric before pushing. Do not turn an inconclusive test into a pass.
 
 Use the configured noreply git identity. Phase pushes to main require live
 proof and a blocker-free `plugins.oracle` review. Subscribe to CI for the
-exact pushed SHA and check all OS jobs plus gitleaks. Do not modify the
-deliberately open Dependabot PRs #1 through #6.
+exact pushed SHA and check all OS jobs plus gitleaks. Dependabot PRs #1
+through #6 were closed on 2026-10-30, when main's history was rewritten to
+remove an old video. Ask the owner before merging or closing new Dependabot
+PRs.
 
 There is no production panel in this repository to inspect after a code
 push. Rebuild and restart the disposable `sp` service, check `/api/health`,
