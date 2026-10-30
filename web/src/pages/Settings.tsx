@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Pi } from '../components/PixelIcons'
 import { copyText } from '../components/status'
+import GenieConnect from '../components/GenieConnect'
 import bandBedrock from '../assets/band-bedrock.webp'
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -14,7 +15,6 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 interface Summary {
   curseforgeKeySet: boolean
-  anthropicKeySet: boolean
   craftyUrl: string
   craftyOk: boolean
   craftyServers: number
@@ -254,16 +254,7 @@ export default function Settings() {
         busy={save.isPending}
       />
 
-      <KeyBlock
-        icon="bolt"
-        title="Genie credential"
-        isSet={data.anthropicKeySet}
-        help={<>The in-game genie runs Claude Code with this: a Claude token (run <span className="font-mono">claude setup-token</span> anywhere Claude Code is installed) or an Anthropic API key.</>}
-        placeholder="Claude token or Anthropic API key"
-        onSave={(v) => save.mutate({ anthropicApiKey: v })}
-        onRemove={() => save.mutate({ anthropicApiKey: null })}
-        busy={save.isPending}
-      />
+      <GenieConnect />
 
       {/* Crafty connection */}
       <div className="block px-5 py-4">

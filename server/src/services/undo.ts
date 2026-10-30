@@ -23,7 +23,7 @@ const WORLD_MIN_Y = -64;
 const WORLD_MAX_Y = 319;
 
 export interface Box { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number }
-interface Snapshot { slot: number; box: Box; label: string; at: string }
+interface Snapshot { slot: number; box: Box; label: string; at: string; /** one id per wish, so undo restores the whole wish */ group?: string }
 
 const metaFile = (id: string) => join(UNDO_DIR, `${id}.json`);
 
@@ -112,8 +112,8 @@ const bufOrigin = (slot: number) => ({ x: BUF_X + slot * SLOT_PITCH, z: BUF_Z })
 
 /** Snapshot a region before the genie touches it. Returns a human line for
     the trail, or null when the region was not snapshottable. */
-export function takeSnapshot(id: string, rawBox: Box, label: string): Promise<string | null> {
-  return serial(id, () => doSnapshot(id, rawBox, label));
+export function takeSnapshot(id: string, rawBox: Box, label: string, group?: string): Promise<string | null> {
+  return serial(id, () => doSnapshot(id, rawBox, label, group));
 }
 
 // Snapshots and undos run one at a time per server: wishes run three at a
@@ -125,7 +125,7 @@ function serial<T>(id: string, fn: () => Promise<T>): Promise<T> {
   return mine;
 }
 
-async function doSnapshot(id: string, rawBox: Box, label: string): Promise<string | null> {
+async function doSnapshot(id: string, rawBox: Box, label: string, group?: string): Promise<string | null> {
   const box = norm(rawBox);
   if (volume(box) > MAX_VOLUME) return null;
   // the buffer gives each slot SLOT_PITCH blocks along X and Z; a wider box
@@ -154,7 +154,7 @@ async function doSnapshot(id: string, rawBox: Box, label: string): Promise<strin
   if (failed > 0) return null;
 
   meta.snaps = meta.snaps.filter((s) => s.slot !== slot); // this slot is being overwritten
-  meta.snaps.push({ slot, box, label: label.slice(0, 80), at: new Date().toISOString() });
+  meta.snaps.push({ slot, box, label: label.slice(0, 80), at: new Date().toISOString(), ...(group ? { group } : {}) });
   meta.counter += 1;
   saveMeta(id, meta);
   return `snapshot saved (${volume(box)} blocks) — "server undo" restores it`;
@@ -170,48 +170,59 @@ export function undoLast(id: string, match?: string): Promise<string> {
 
 async function doUndo(id: string, match?: string): Promise<string> {
   const meta = loadMeta(id);
-  let snap: (typeof meta.snaps)[number] | undefined;
+  // one wish can take several snapshots (a castle took seven: clear, walls,
+  // towers, gate…). A plain "server undo" restores every contiguous snapshot
+  // of the last wish (same group id), newest first, so overlapping regions
+  // end at their oldest state.
+  const base = (label: string) => label.replace(/ \((?:schematic|blueprint) [^)]*\)$/, '');
+  let picks: (typeof meta.snaps)[number][] = [];
   if (match?.trim()) {
     const words = match.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
     for (let i = meta.snaps.length - 1; i >= 0; i--) {
       const label = meta.snaps[i].label.toLowerCase();
       const squished = label.replace(/\s+/g, ''); // "whitehouse" must match "white house"
       if (words.some((w) => label.includes(w) || squished.includes(w))) {
-        snap = meta.snaps.splice(i, 1)[0];
+        picks = [meta.snaps[i]];
         break;
       }
     }
-    if (!snap) {
+    if (!picks.length) {
       const have = meta.snaps.map((sn) => `"${sn.label.slice(0, 40)}"`).join(', ');
       return `no snapshot matches "${match}" — I have: ${have || 'none'}. Say "server undo" for the most recent.`;
     }
   } else {
-    snap = meta.snaps.pop();
+    const last = meta.snaps[meta.snaps.length - 1];
+    if (last?.group) for (let i = meta.snaps.length - 1; i >= 0 && meta.snaps[i].group === last.group; i--) picks.push(meta.snaps[i]);
+    else if (last) picks.push(last);
   }
-  if (!snap) return 'nothing to undo — no snapshots saved';
-  const o = bufOrigin(snap.slot);
-  const box = snap.box;
+  if (!picks.length) return 'nothing to undo — no snapshots saved';
 
-  const cmds: string[] = [
-    `forceload add ${o.x} ${BUF_Z} ${o.x + (box.x2 - box.x1)} ${BUF_Z + (box.z2 - box.z1)}`,
-  ];
-  for (const s of slabs(box)) {
-    cmds.push(
-      `clone ${o.x} ${s.y1} ${o.z} ${o.x + (box.x2 - box.x1)} ${s.y2} ${o.z + (box.z2 - box.z1)} ${s.x1} ${s.y1} ${s.z1}`,
-    );
-  }
-  cmds.push(`forceload remove ${o.x} ${BUF_Z} ${o.x + (box.x2 - box.x1)} ${BUF_Z + (box.z2 - box.z1)}`);
-
-  const res = await rconBatch(id, cmds);
-  const failed = res.filter((r) => /Expected|Unknown|too big|not loaded/i.test(r)).length;
-  // only CONSUME the snapshot when the restore actually worked. The old code
-  // saved the popped meta either way, so a failed undo threw the snapshot away
-  // and a second "server undo" silently restored an UNRELATED older region.
-  if (failed === 0) {
+  let blocks = 0;
+  for (const snap of picks) {
+    const o = bufOrigin(snap.slot);
+    const box = snap.box;
+    const cmds: string[] = [
+      `forceload add ${o.x} ${BUF_Z} ${o.x + (box.x2 - box.x1)} ${BUF_Z + (box.z2 - box.z1)}`,
+    ];
+    for (const sl of slabs(box)) {
+      cmds.push(
+        `clone ${o.x} ${sl.y1} ${o.z} ${o.x + (box.x2 - box.x1)} ${sl.y2} ${o.z + (box.z2 - box.z1)} ${sl.x1} ${sl.y1} ${sl.z1}`,
+      );
+    }
+    cmds.push(`forceload remove ${o.x} ${BUF_Z} ${o.x + (box.x2 - box.x1)} ${BUF_Z + (box.z2 - box.z1)}`);
+    const res = await rconBatch(id, cmds);
+    const failed = res.filter((r) => /Expected|Unknown|too big|not loaded/i.test(r)).length;
+    // only CONSUME a snapshot when its restore actually worked: a failed undo
+    // that threw its snapshot away made the next "server undo" silently
+    // restore an UNRELATED older region
+    if (failed > 0) {
+      return `undo of "${base(snap.label)}" partially failed (${failed} clone errors) — kept the rest, say "server undo" again to retry`;
+    }
+    meta.snaps = meta.snaps.filter((x) => x !== snap);
     saveMeta(id, meta);
-    return `undone: "${snap.label}" — region restored (${volume(box)} blocks)`;
+    blocks += volume(box);
   }
-  return `undo of "${snap.label}" partially failed (${failed} clone errors) — kept the snapshot, say "server undo" again to retry`;
+  return `undone: "${base(picks[0].label)}" — region restored (${blocks} blocks${picks.length > 1 ? `, ${picks.length} snapshots` : ''})`;
 }
 
 export function undoCount(id: string): number {

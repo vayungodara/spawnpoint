@@ -51,13 +51,20 @@ publish it. See [the supervisor docs](supervisor.md).
 
 ## Chat genie
 
-The genie is optional and off until you add a credential (a Claude token or
-an Anthropic API key). Players on your list type `server <wish>` in chat,
-and Claude Code turns the wish into server commands, then checks the result
-before reporting success.
+The genie is optional and off until you connect an AI account in Settings →
+Genie AI account. **Connect Claude subscription** signs in with the Claude
+Pro or Max plan you already have (Linux and macOS); you can also paste a
+`claude setup-token` token or an Anthropic API key. The token goes straight
+into `data/settings.json` (mode 0600) and is never logged or sent back to the
+browser. Settings shows whether it works, an expired or rejected login, and
+how much of the subscription's 5-hour and weekly limits is used. Players on
+your list type `server <wish>` in chat, and Claude Code turns the wish into
+server commands, then checks the result before reporting success.
 
 It runs Claude Code with no tools, no MCP servers and a minimal environment,
 as the `nobody` user when the panel runs as root. Its server commands go
 over RCON. By default it cannot run `op`, `deop`, `ban`, `kick`,
 `whitelist`, `stop` or `save-off`. Set `"commandPolicy": "full"` in
-`data/chatgenie.json` to allow everything except `stop` and `save-off`.
+`data/chatgenie.json` to allow everything except `stop` and `save-off`. Refused commands, including ones inside saved
+blueprints, never run and count as failures, so the genie cannot report them
+as done.

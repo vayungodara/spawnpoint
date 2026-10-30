@@ -352,6 +352,14 @@ RCON, reads the world back, and challenges a `DONE` that the evidence does
 not support. Admin commands are blocked unless `commandPolicy` is `full`.
 The genie only runs (and keeps a warm process) while it is enabled, has a
 credential, and a player is online on an opted-in server.
+The rulebook goes in a cached system-prompt file and the CLI streams
+`stream-json`, so every wish logs time to first command, tokens and cost,
+and Claude Code's own failures (expired login, usage limit) become a status
+in Settings instead of model output. `services/geniecredential.ts` owns that
+status and the one-click connect, which runs `claude setup-token` in a pty
+and writes the token straight to `settings.json` (0600) without logging it.
+Blueprint replays and console lines both go through `commandPolicy`; a
+refused command counts as a rejection so `DONE` cannot claim it ran.
 
 ## Background watchers
 

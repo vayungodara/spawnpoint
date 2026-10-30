@@ -161,6 +161,12 @@ const NEEDS: Record<string, Scope | 'admin'> = {
   'POST /api/admin/exit': 'admin',
   'DELETE /api/servers/:id': 'admin',
   'POST /api/servers/:id/runtime/import': 'admin',
+  // the genie's AI account is the owner's subscription or API key
+  'PUT /api/genie/credential': 'admin',
+  'POST /api/genie/credential/test': 'admin',
+  'POST /api/genie/connect/start': 'admin',
+  'POST /api/genie/connect/finish': 'admin',
+  'POST /api/genie/connect/cancel': 'admin',
 };
 const LOG_PATH = /^(logs|crash-reports)\/[\w-][\w.-]*$/;
 

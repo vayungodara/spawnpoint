@@ -3,6 +3,7 @@ import { PATHS, loadSettings, saveSettings } from '../config.js';
 import { craftyApi } from '../clients/crafty-adapter.js';
 import { loadAutobackup, saveAutobackup, type AutobackupConfig } from '../services/autobackup.js';
 import { authed, createToken, hashPin, listTokens, login, pinConfigured, revokeToken, sessionCookie, throttled, PIN_RULE, PIN_RULE_TEXT, SCOPES, type Scope } from '../auth.js';
+import { cancelConnect, connectSupported, credentialStatus, finishConnect, setCredential, startConnect, testCredential } from '../services/geniecredential.js';
 
 export default async function settingsRoutes(app: FastifyInstance) {
   app.get('/api/auth/check', async (req) => {
@@ -79,6 +80,26 @@ export default async function settingsRoutes(app: FastifyInstance) {
   });
   app.delete<{ Params: { tokenId: string } }>('/api/tokens/:tokenId', async (req, reply) =>
     revokeToken(req.params.tokenId) ? { ok: true } : reply.code(404).send({ error: 'no such token' }));
+
+  // genie credential: status, test, paste, and the one-click Claude connect
+  app.get('/api/genie/credential', async () => ({ ...credentialStatus(), connectSupported: connectSupported() }));
+  app.post('/api/genie/credential/test', async () => ({ ...(await testCredential()), connectSupported: connectSupported() }));
+  app.put<{ Body: { value?: string | null } }>('/api/genie/credential', async (req, reply) => {
+    const v = req.body?.value;
+    if (v !== null && (typeof v !== 'string' || !/^sk-ant-[A-Za-z0-9_-]{20,300}$/.test(v.trim()))) {
+      return reply.code(400).send({ error: 'paste a Claude token (sk-ant-oat…) or an Anthropic API key (sk-ant-api…)' });
+    }
+    return { ...(await setCredential(v)), connectSupported: connectSupported() };
+  });
+  app.post('/api/genie/connect/start', async (_req, reply) => {
+    const r = await startConnect();
+    return 'error' in r ? reply.code(409).send(r) : r;
+  });
+  app.post<{ Body: { code?: string } }>('/api/genie/connect/finish', async (req, reply) => {
+    const r = await finishConnect(String(req.body?.code ?? ''));
+    return 'error' in r ? reply.code(400).send(r) : { ...r, connectSupported: connectSupported() };
+  });
+  app.post('/api/genie/connect/cancel', async () => { cancelConnect(); return { ok: true }; });
 
   app.get('/api/autobackup', async () => loadAutobackup());
   app.put<{ Body: Partial<AutobackupConfig> }>('/api/autobackup', async (req) =>
