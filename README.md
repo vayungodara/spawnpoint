@@ -2,9 +2,11 @@
 
 **Add mods to your Minecraft server, test them on a copy first, and give your friends exactly the version that passed.**
 
-![Dashboard: console, TPS and the join address](docs/screenshots/dashboard.webp)
+![A server's Overview: a mod change that passed every step from plan to friend sync](docs/screenshots/dashboard.webp)
 
-Website: [spawnpoint.vayun.net](https://spawnpoint.vayun.net)
+Website: [spawnpoint.vayun.net](https://spawnpoint.vayun.net) ·
+[Watch the 90-second tour](https://spawnpoint.vayun.net/media/tour.mp4)
+(recorded on a real server: create it, add a mod, approve, go live, a friend joins)
 
 Spawnpoint is a web panel you run on the machine that hosts your Minecraft
 servers. Its independent OS service owns Java and the console, so servers keep
@@ -27,6 +29,13 @@ NeoForge recipes, with three promises:
   *Undo last change* puts them back (the last five changes per server).
 
 **Status: alpha.** Expect rough edges, and keep backups.
+
+Each server opens in its own workspace. **Overview** shows its state, the
+open mod change and how friends join. **Changes** holds the change in progress,
+past revisions and *Undo last change*. **Mods** (or **Plugins**), **Players**,
+**Worlds**, **Automation**, **Files** and **Server** cover the rest.
+Panel-wide options, such as the PIN and the server runtime, live in
+**Panel settings**.
 
 ## How mod changes are tested
 
@@ -51,6 +60,8 @@ tested:
    and newer. The Fabric and certified Forge and NeoForge joins also run
    AutoModpack's own handshake and check that the client ends up with
    exactly the tested files.
+
+![Review sheet: the plan, both test results, and the config edit waiting for approval](docs/screenshots/review.webp)
 
 A candidate that fails is deleted and nothing live changes, but only after
 the same test passes on the current pack without it and the failure
@@ -117,7 +128,7 @@ your approval. *Undo last change* follows the same restart rules.
 If the panel itself restarts
 in the middle, it picks up where it stopped. If a change cannot be rolled
 back cleanly, the server stays stopped and locked until you check it and
-clear the lock on the dashboard.
+clear the lock on the server's **Overview** tab.
 
 Removing or disabling a Fabric mod is staged, tested and approved like an
 install. It is also refused while another installed mod depends on it.
@@ -238,9 +249,9 @@ Required downloads must match their source hashes and sizes, including files
 already present on a retry. Missing or disabled required downloads keep the
 job failed and stopped. Optional CurseForge files can be skipped with a warning.
 Interrupted installs retry at most three times; failed jobs remain stopped
-for inspection. To create other recipes, choose Crafty in **Settings → Server runtime**.
+for inspection. To create other recipes, choose Crafty in **Panel settings → Server runtime**.
 
-Set per-server autostart in **Config → Server runtime**. The owner restarts a
+Set per-server autostart in the server's **Server** tab, under **Server runtime**. The owner restarts a
 crashed runtime at most three times in ten minutes. Explicit Stop disables
 crash recovery; autostart still applies on the next service startup if enabled.
 Console output is drained without a browser, with a bounded live tail and
@@ -252,7 +263,7 @@ servers then recover through their restart budgets.
 
 1. Stop the server and finish all Crafty imports, updates and backups. Adopt
    and certify a revision with its required launch guard.
-2. In **Config → Server runtime**, approve **Prepare Crafty import**. This
+2. In the server's **Server** tab, under **Server runtime**, approve **Prepare Crafty import**. This
    freezes the source launch command and disables autostart, crash recovery
    and update watching. Before commit, **Cancel** restores those settings.
 3. Stop the entire local Crafty service or container and confirm its workers
@@ -271,7 +282,7 @@ servers then recover through their restart budgets.
 
 The world and UUID remain unchanged. No world restore occurs. The Crafty
 watchdog stays paused while any transfer journal exists. Imported servers
-never fall back to Crafty, even if the supervisor is offline. **Settings →
+never fall back to Crafty, even if the supervisor is offline. **Panel settings →
 Server runtime** controls new creation and whether unimported Crafty servers
 appear; changing that choice does not transfer ownership.
 

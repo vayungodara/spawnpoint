@@ -228,7 +228,7 @@ const LOGS = [
   () => `[${ts()}] ${pick(NAMES)} left the game`,
   () => `[${ts()}] [Spawnpoint] Autosave complete (0.8 s, async)`,
   () => `[${ts()}] <${pick(NAMES)}> anyone near the mesa?`,
-  () => `[${ts()}] [Spawnpoint] AppleSkin 3.0.10 installed from Modrinth`,
+  () => `[${ts()}] [Spawnpoint] AppleSkin 3.0.10 passed boot and join tests`,
 ];
 let simMin = 13, simSec = 41, players = 5;
 function ts() {

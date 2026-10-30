@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Spawnpoint · the Minecraft control panel you host yourself</title>
 <link rel="canonical" href="https://spawnpoint.vayun.net/">
-<meta name="description" content="A self-hosted Minecraft panel on top of Crafty Controller. Mod changes are tested on a copy of your server first: friends get exactly the tested version, you see what was tested, skipped or uncertain, and you can roll back.">
+<meta name="description" content="A self-hosted Minecraft server panel. Mod changes are tested on a copy of your server first: friends get exactly the tested version, you see what was tested, skipped or uncertain, and you can roll back.">
 <meta property="og:title" content="Spawnpoint · run your own Minecraft server, beautifully">
 <meta property="og:description" content="Mod changes are tested on a copy of your server first. Friends get exactly the tested version, you see what was tested, skipped or uncertain, and you can roll back.">
 <meta property="og:url" content="https://spawnpoint.vayun.net/">
@@ -89,17 +89,17 @@
   </div>
   <div class="wrap hero">
     <div class="hero-copy">
-      <p class="chip chip-live" data-rv><i class="dot" aria-hidden="true"></i>free · self-hosted · pairs with Crafty</p>
+      <p class="chip chip-live" data-rv><i class="dot" aria-hidden="true"></i>free · self-hosted · alpha</p>
       <h1 data-rv style="--d:.06s">Host it yourself. <em>Without the pain.</em></h1>
-      <p class="lede" data-rv style="--d:.12s">Spawnpoint is a control panel you run on your own machine, next to Crafty Controller. Mod installs and updates are tested on a copy of your server first. Your friends get exactly the tested version, you see what was tested, skipped or uncertain, and you can roll back.</p>
+      <p class="lede" data-rv style="--d:.12s">Spawnpoint is a Minecraft server panel you run on your own machine. Its own background service keeps your servers running, and Crafty Controller users can bring theirs along. Mod installs and updates are tested on a copy of your server first. Your friends get exactly the tested version, you see what was tested, skipped or uncertain, and you can roll back.</p>
       <div class="cta-row" data-rv style="--d:.18s">
         <a class="btn btn-emerald btn-lg" href="#start" data-burst>Install Spawnpoint</a>
         <a class="btn btn-ghost btn-lg" href="#features">See what it does&nbsp;<svg class="pi pi-s" aria-hidden="true"><use href="#i-arrowdn"/></svg></a>
       </div>
       <dl class="proof" data-rv style="--d:.24s">
         <div><dt>€0</dt><dd>free, on your own machine</dd></div>
-        <div><dt>7</dt><dd>loaders, Vanilla to NeoForge</dd></div>
-        <div><dt>1.20.1+</dt><dd>supported through 26.2</dd></div>
+        <div><dt>3</dt><dd>loaders with tested mod changes</dd></div>
+        <div><dt>5</dt><dd>recent changes you can undo</dd></div>
       </dl>
     </div>
     <div class="hero-art" data-rv style="--d:.15s">
@@ -113,8 +113,8 @@
 <section class="band band-grass" id="versions" data-biome="SURFACE" data-ylabel="63">
   <div class="wrap">
     <p class="depth-tag">Y 63 · SURFACE</p>
-    <h2 class="strip-h" data-rv>Runs everything you'd actually play.</h2>
-    <p class="strip-lede" data-rv style="--d:.08s"><strong>1.20.1 → 26.2</strong>, seven loaders, one panel, and it knows the difference between them. Item components, the 1.21 structure-folder rename, the Java version each loader demands: handled per version, not guessed.</p>
+    <h2 class="strip-h" data-rv>Runs the servers you actually play.</h2>
+    <p class="strip-lede" data-rv style="--d:.08s">Spawnpoint builds and runs <strong>Fabric, Forge and NeoForge</strong> servers itself. With Crafty Controller it also manages Vanilla, Paper, Purpur and Quilt, <strong>1.20.1 → 26.2</strong>, and knows the difference: item components, the 1.21 structure-folder rename, the Java version each loader demands.</p>
   </div>
   <div class="loaders" data-rv style="--d:.14s">
     <ul class="loader-track">
@@ -140,11 +140,11 @@
       <article class="tile tile-panel" data-rv>
         <div class="panel" aria-hidden="true">
           <div class="panel-head"><i class="ph-dot"></i><b>spawnpoint</b>&nbsp;· beating-the-game<span class="ph-tps">TPS <b id="ptps">20.0</b></span></div>
-          <div class="panel-tabs"><b class="on">Console</b><b>Config</b><b>Content</b><b>Backups</b></div>
+          <div class="panel-tabs"><b>Overview</b><b class="on">Console</b><b>Changes</b><b>Mods</b><b>Worlds</b></div>
           <div class="panel-body">
             <div class="console" id="console">
-              <p>[06:11:58] [Spawnpoint] Crafty reachable, 4 servers found</p>
-              <p>[06:12:04] [Server] Loading Fabric 26.2 · 38 mods</p>
+              <p>[06:11:58] [Spawnpoint] Supervisor connected · 2 servers</p>
+              <p>[06:12:04] [Server] Loading Fabric 1.21.1 · 38 mods</p>
               <p>[06:12:31] [Server] Preparing spawn area: 100%</p>
               <p>[06:12:31] [Server] Done (27.4s)! For help, type "help"</p>
               <p>[06:12:32] [Spawnpoint] RCON up on :35565 - genie listening</p>
@@ -158,7 +158,7 @@
           </div>
         </div>
         <h3>Spawnpoint, your panel</h3>
-        <p>Console, config, mods, backups and players in one keyboard-friendly place. Crafty keeps the process alive; Spawnpoint is the face you actually use. This is a live-ish replica. The real one runs on your machine.</p>
+        <p>Console, config, mods, backups and players in one place. A small background service owns the server process, so closing or updating the panel never stops the game. This is a live-ish replica. The real one runs on your machine.</p>
       </article>
 
       <article class="tile tile-packs" data-rv style="--d:.06s">
@@ -166,7 +166,7 @@
         <h3>Mods and plugins, one click</h3>
         <p>All of Modrinth and CurseForge, in one search. It picks the right build for your loader and version, pulls the dependencies, and shows plugins on Paper but mods on Fabric, because it knows which one you're running.</p>
         <ul class="pack-chips">
-          <li>All the Mods 10</li><li>Prominence II</li><li>Create: Astral</li><li>Better MC 4</li><li class="more">+ 6,400 more</li>
+          <li>Lithium</li><li>FerriteCore</li><li>Waystones</li><li>Create</li><li class="more">+ thousands more</li>
         </ul>
       </article>
 
@@ -216,7 +216,7 @@
 
     <figure class="panel-shot" data-rv>
       <figcaption class="depth-tag">straight from the panel · no mockups</figcaption>
-      <img src="panel-dashboard.webp" width="1600" height="1000" loading="lazy" decoding="async" alt="The Spawnpoint dashboard for a running Fabric server: live console, TPS and RAM meters, and a copyable join address.">
+      <img src="panel-dashboard.webp" width="1600" height="1000" loading="lazy" decoding="async" alt="A server's Overview in Spawnpoint: a mod change marked live after passing every step from plan to friend sync, with players, TPS, RAM and CPU tiles below.">
     </figure>
   </div>
 </section>
@@ -227,16 +227,30 @@
     <p class="depth-tag">Y 12 · DIAMOND LEVEL</p>
     <h2 data-rv>Friends get exactly the tested version.</h2>
     <p class="band-lede" data-rv style="--d:.08s">Mod installs and updates are tested on a copy of your server before they go live. A change reaches the server and the friend pack only when it passes, or when you approve one that couldn't be fully tested. You see every verdict, and you can undo recent changes.</p>
+    <ol class="lane" data-rv aria-label="The steps every mod change goes through, as the panel shows them">
+      <li style="--i:0"><i aria-hidden="true">✓</i><b>Plan</b><span>fewest changes</span></li>
+      <li style="--i:1"><i aria-hidden="true">✓</i><b>Server boot</b><span>on a copy</span></li>
+      <li style="--i:2"><i aria-hidden="true">✓</i><b>Client join</b><span>real client</span></li>
+      <li style="--i:3" class="you"><i aria-hidden="true">!</i><b>Your approval</b><span>when it's unclear</span></li>
+      <li style="--i:4"><i aria-hidden="true">✓</i><b>Restart</b><span>when it's empty</span></li>
+      <li style="--i:5"><i aria-hidden="true">✓</i><b>Friends synced</b><span>exact pack</span></li>
+    </ol>
+    <figure class="film" data-rv>
+      <video controls playsinline preload="none" poster="media/tour-poster.webp" width="1920" height="1080">
+        <source src="media/tour.mp4" type="video/mp4">
+      </video>
+      <figcaption class="depth-tag">recorded on a real server · new server to a friend joining · waits sped up</figcaption>
+    </figure>
     <ol class="gates">
       <li class="gate" data-rv>
         <svg class="pi pi-t" aria-hidden="true"><use href="#i-anvil"/></svg>
         <h3>The server dry-boots it</h3>
-        <p>Each change boots the server's own loader in a sandbox first (Fabric, Forge, NeoForge). A missing dependency? The panel reads the loader's error, installs what it names, and tests again. A change that fails never touches your live mods.</p>
+        <p>Before anything boots, a solver checks the whole pack: dependencies, versions and Java. Then the server's own loader boots it in a sandbox (Fabric, Forge, NeoForge). A missing library or the wrong Java gets repaired and tested again. A change that fails never touches your live mods.</p>
       </li>
       <li class="gate" data-rv style="--d:.06s">
         <svg class="pi pi-t" aria-hidden="true"><use href="#i-bolt"/></svg>
         <h3>A real client boots it</h3>
-        <p>On servers that sync mods to friends with AutoModpack, a real Minecraft client launches the pack your friends would get (Fabric and Forge, 1.20 and newer), so client crashes show up before anyone downloads anything.</p>
+        <p>On servers that sync mods to friends with AutoModpack, a real Minecraft client launches the pack your friends would get (Fabric, Forge and NeoForge, Minecraft 1.20 and newer), so client crashes show up before anyone downloads anything.</p>
       </li>
       <li class="gate" data-rv style="--d:.12s">
         <svg class="pi pi-t" aria-hidden="true"><use href="#i-globe"/></svg>
@@ -344,7 +358,7 @@
       </article>
     </div>
 
-    <p class="tiers-foot" data-rv>Every one of these gets the whole panel: both mod sources, the genie, the schematic library, all seven loaders, every version. There is no paid tier, because there is nobody to pay. It runs on your machine. You'll want <b>Crafty Controller</b> underneath it (also free). Short on RAM? Give the server less and drop the view distance. That's the entire negotiation.</p>
+    <p class="tiers-foot" data-rv>Every one of these gets the whole panel: both mod sources, the genie, the schematic library, every loader it supports. There is no paid tier, because there is nobody to pay. It runs on your machine. Short on RAM? Give the server less and drop the view distance. That's the entire negotiation.</p>
   </div>
 </section>
 
@@ -366,7 +380,7 @@
           <tr><th scope="row">RAM you get</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Whatever your box has</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Exactly what you pay for</td></tr>
           <tr><th scope="row">Mods and plugins</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Modrinth + CurseForge, one click</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>One click, or FTP at midnight</td></tr>
           <tr><th scope="row">A broken modpack</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Tested on a copy before it goes live</td><td>Depends on the host</td></tr>
-          <tr><th scope="row">Versions</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>1.20.1 → 26.2, switch any time</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Whatever they've gotten around to</td></tr>
+          <tr><th scope="row">Versions</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Fabric, Forge and NeoForge built in, more with Crafty</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Whatever they've gotten around to</td></tr>
           <tr><th scope="row">The console</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Real RCON, every command</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Whatever the panel allows</td></tr>
           <tr><th scope="row">If you stop paying</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Nothing happens. It's your PC.</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>World deleted on a timer</td></tr>
           <tr><th scope="row">Staying up at 3 a.m.</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Your PC has to be on</td><td><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Someone else's problem</td></tr>
@@ -387,7 +401,7 @@
     <div class="faq-list" data-rv style="--d:.12s">
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa1" id="fq1"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Do I need Crafty Controller?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa1" role="region" aria-labelledby="fq1"><div class="faq-a-in"><p>Yes, and that's the point. Crafty is what actually starts, stops and supervises the Minecraft process, and it does that well for free. Spawnpoint is the panel on top: install Crafty, point Spawnpoint at it, and every server it already knows about turns up, loader and version detected.</p></div></div>
+        <div class="faq-a" id="fa1" role="region" aria-labelledby="fq1"><div class="faq-a-in"><p>No. Spawnpoint installs a small background service (systemd on Linux, launchd on macOS, a Windows service) that starts, stops and supervises your servers, and keeps them running when the panel closes. If you already use Crafty Controller, Spawnpoint can work alongside it instead, and it also covers loaders it can't build itself yet, such as Paper and Quilt.</p></div></div>
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa2" id="fq2"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Is it really free? What's the catch?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
@@ -399,7 +413,7 @@
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa4" id="fq4"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Can I use a server I already have?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa4" role="region" aria-labelledby="fq4"><div class="faq-a-in"><p>Yes, nothing gets moved or converted. Spawnpoint reads the servers Crafty already manages (loader, version, mods, world) where they are. When you start a server from the panel, it turns on RCON with a random password and points the launch command at a Java version that fits.</p></div></div>
+        <div class="faq-a" id="fa4" role="region" aria-labelledby="fq4"><div class="faq-a-in"><p>Yes, if Crafty Controller runs it. Spawnpoint shows Crafty's servers where they are, with loader and version detected. When you're ready, it can import a stopped server into its own service, one at a time: the world and server ID stay exactly as they were, and you confirm each step.</p></div></div>
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa5" id="fq5"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>What exactly is the chat genie?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
@@ -407,7 +421,7 @@
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa6" id="fq6"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Which versions and loaders, really?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa6" role="region" aria-labelledby="fq6"><div class="faq-a-in"><p>Vanilla, Paper, Purpur, Fabric, Quilt, Forge and NeoForge, from 1.20.1 through 26.2. The panel branches wherever Minecraft did: item NBT before 1.20.5 and components after, the structure folder that was renamed in 1.21, the Java version each loader will and won't tolerate. Mod testing covers Fabric, Forge and NeoForge servers; the client test covers Fabric and Forge.</p></div></div>
+        <div class="faq-a" id="fa6" role="region" aria-labelledby="fq6"><div class="faq-a-in"><p>Spawnpoint creates Fabric 1.21.1, Forge 1.20.1 and NeoForge 1.21.1 servers itself, from pinned, hash-checked installers. Through Crafty Controller it manages Vanilla, Paper, Purpur, Fabric, Quilt, Forge and NeoForge from 1.20.1 through 26.2. The panel branches wherever Minecraft did: item NBT before 1.20.5 and components after, the structure folder that was renamed in 1.21, the Java version each loader will and won't tolerate. Mod testing covers Fabric, Forge and NeoForge servers, including the client test.</p></div></div>
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa7" id="fq7"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Do my friends pay anything?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
@@ -434,7 +448,7 @@
     <div class="cta-row" data-rv style="--d:.14s">
       <a class="btn btn-emerald btn-lg" href="https://github.com/vayungodara/spawnpoint" rel="noopener" data-burst>Install Spawnpoint</a>
     </div>
-    <p class="micro" data-rv style="--d:.2s">Free · self-hosted · pairs with Crafty Controller · your world never leaves your disk</p>
+    <p class="micro" data-rv style="--d:.2s">Free · self-hosted · alpha, so keep backups · your world never leaves your disk</p>
   </div>
 
   <footer class="site-foot">
@@ -450,7 +464,7 @@
         <ul><li><a href="#features">What it does</a></li><li><a href="#verify">Verification</a></li><li><a href="#features">Mods &amp; plugins</a></li><li><a href="#features">Chat genie</a></li><li><a href="#versions">Loaders &amp; versions</a></li></ul>
       </nav>
       <nav aria-label="Setup"><h3>Setup</h3>
-        <ul><li><a href="#start">Install</a></li><li><a href="https://craftycontrol.com" rel="noopener">Crafty Controller ↗</a></li><li><a href="#faq">Letting friends in</a></li><li><a href="#features">Backups</a></li><li><a href="#pricing">How much RAM?</a></li></ul>
+        <ul><li><a href="#start">Install</a></li><li><a href="#faq">Coming from Crafty</a></li><li><a href="#faq">Letting friends in</a></li><li><a href="#features">Backups</a></li><li><a href="#pricing">How much RAM?</a></li></ul>
       </nav>
       <nav aria-label="Project"><h3>Project</h3>
         <ul><li><a href="https://github.com/vayungodara/spawnpoint" rel="noopener">Source ↗</a></li><li><a href="https://github.com/vayungodara/spawnpoint/releases" rel="noopener">Changelog ↗</a></li><li><a href="https://github.com/vayungodara/spawnpoint/issues" rel="noopener">Roadmap ↗</a></li><li><a href="#faq">FAQ</a></li><li><a href="https://github.com/vayungodara/spawnpoint/blob/main/LICENSE" rel="noopener">Licence ↗</a></li></ul>
