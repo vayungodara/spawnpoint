@@ -221,7 +221,8 @@ h1 em {
 }
 .hero-copy { position: relative; z-index: 1; }
 .hero-copy > * + * { margin-top: clamp(16px, 2.2vh, 24px); }
-.lede { font-size: clamp(1.14rem, 1.5vw, 1.32rem); font-weight: 500; max-width: 36ch; text-wrap: balance; }
+.lede { font-size: clamp(1.14rem, 1.5vw, 1.32rem); font-weight: 500; max-width: 44ch; text-wrap: balance; }
+.lede-who { font-size: 1rem; font-weight: 600; max-width: 52ch; margin-top: .75rem; opacity: .8; }
 .hero-copy .cta-row { margin-top: clamp(26px, 4vh, 40px); }
 .cta-row { display: flex; flex-wrap: wrap; gap: 16px; }
 

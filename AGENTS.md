@@ -145,7 +145,13 @@ Fabric before pushing. Do not turn an inconclusive test into a pass.
 
 ## Delivery
 
-Use the configured noreply git identity. Phase pushes to main require live
+Use the configured noreply git identity. Write commit messages the way a
+person would: a one-line subject under about 60 characters in the imperative
+("Fix join test timeout"), then a blank line and two or three short lines
+of body only when the why isn't obvious from the diff. Don't list every
+file, test run or edge case; that belongs in the PR or AGENTS.md.
+
+Phase pushes to main require live
 proof and a blocker-free `plugins.oracle` review. Subscribe to CI for the
 exact pushed SHA and check all OS jobs plus gitleaks. Dependabot PRs #1
 through #6 were closed on 2026-10-30, when main's history was rewritten to

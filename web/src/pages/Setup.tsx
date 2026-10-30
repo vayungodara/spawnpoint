@@ -165,8 +165,8 @@ export default function Setup() {
               <>
                 <h1 className="text-[28px] mb-2">Welcome to your server.</h1>
                 <p className="text-text-dim mb-1">
-                  Two quick questions and you're in. Then Spawnpoint builds your first server, sets up Java and the
-                  mod sync, and gives you an address to send your friends.
+                  Two quick questions, then Spawnpoint builds your first server, sets up Java and the mod sync, and
+                  gives you an address to send your friends.
                 </p>
 
                 {crafty === 'off' ? (
@@ -325,8 +325,8 @@ function GenieStep({ claudeInstalled, onNext }: { claudeInstalled: boolean; onNe
     <>
       <h1 className="text-[28px] mb-2">Meet the genie.</h1>
       <p className="text-text-dim mb-4">
-        Players type <span className="font-mono text-text">genie build me a lighthouse</span> in chat and an AI does it,
-        with undo. Connect your Claude subscription to power it, or skip this and do it later in Settings.
+        Players type <span className="font-mono text-text">server build me a lighthouse</span> in chat and Claude builds
+        it; <span className="font-mono text-text">server undo</span> takes it back. Connect your Claude account here, or skip this and do it later in Settings.
       </p>
       {ok ? (
         <p className="text-emerald font-semibold pop-in py-3" role="status">✓ Connected. The genie is ready when you turn it on for a server.</p>

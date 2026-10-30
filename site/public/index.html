@@ -6,7 +6,7 @@
 <title>Spawnpoint · the Minecraft control panel you host yourself</title>
 <link rel="canonical" href="https://spawnpoint.vayun.net/">
 <meta name="description" content="A self-hosted Minecraft server panel. Mod changes are tested on a copy of your server first: friends get exactly the tested version, you see what was tested, skipped or uncertain, and you can roll back.">
-<meta property="og:title" content="Spawnpoint · run your own Minecraft server, beautifully">
+<meta property="og:title" content="Spawnpoint · test mod updates before your friends hit them">
 <meta property="og:description" content="Mod changes are tested on a copy of your server first. Friends get exactly the tested version, you see what was tested, skipped or uncertain, and you can roll back.">
 <meta property="og:url" content="https://spawnpoint.vayun.net/">
 <meta property="og:image" content="https://spawnpoint.vayun.net/og.png">
@@ -93,8 +93,9 @@
   </div>
   <div class="wrap hero">
     <div class="hero-copy">
-      <h1 data-rv>Host it yourself. <em>Without the pain.</em></h1>
-      <p class="lede" data-rv style="--d:.08s">A Minecraft server panel that tests mod changes before they go live.</p>
+      <h1 data-rv>One bad mod update <em>locks everyone out.</em></h1>
+      <p class="lede" data-rv style="--d:.08s">Usually you find out when a friend messages you. Spawnpoint is a self-hosted Minecraft server panel that boots every mod change on a copy of your server before it goes live. On AutoModpack servers, a real client joins the copy too.</p>
+      <p class="lede lede-who" data-rv style="--d:.12s">For people who run a modded server for friends on a spare machine, a home server or a cheap VPS. Servers can stop on their own when nobody's online.</p>
       <div class="cta-row" data-rv style="--d:.14s">
         <a class="btn btn-emerald btn-lg" href="#start" data-burst>Install Spawnpoint</a>
         <a class="btn btn-ghost btn-lg" href="#features">See what it does&nbsp;<svg class="pi pi-s" aria-hidden="true"><use href="#i-arrowdn"/></svg></a>
@@ -111,8 +112,8 @@
 <section class="band band-grass" id="versions" data-biome="SURFACE" data-ylabel="63">
   <div class="wrap">
     <p class="depth-tag">Y 63 · SURFACE</p>
-    <h2 class="strip-h" data-rv>Runs the servers you actually play.</h2>
-    <p class="strip-lede" data-rv style="--d:.08s">Spawnpoint builds and runs <strong>Fabric, Forge and NeoForge</strong> servers itself. With Crafty Controller it also manages Vanilla, Paper, Purpur and Quilt, <strong>1.20.1 → 26.2</strong>, and knows the difference: item components, the 1.21 structure-folder rename, the Java version each loader demands.</p>
+    <h2 class="strip-h" data-rv>Fabric, Forge and NeoForge, built in.</h2>
+    <p class="strip-lede" data-rv style="--d:.08s">Spawnpoint creates and runs <strong>Fabric, Forge and NeoForge</strong> servers itself. With Crafty Controller it also manages Vanilla, Paper, Purpur and Quilt, from <strong>1.20.1 to 26.2</strong>. It handles the differences between versions for you, like item components, the 1.21 structure folder rename and which Java each loader needs.</p>
   </div>
   <div class="loaders" data-rv style="--d:.14s">
     <ul class="loader-track">
@@ -131,8 +132,8 @@
 <section class="band band-dirt" id="features" data-biome="TOPSOIL" data-ylabel="24">
   <div class="wrap">
     <p class="depth-tag">Y 24 · TOPSOIL</p>
-    <h2 data-rv>Everything self-hosting needs.</h2>
-    <p class="band-lede" data-rv style="--d:.08s">There is no plan tier and no per-player fee. The panel does the tedious parts (mods, config, versions, backups) and then gets out of your way.</p>
+    <h2 data-rv>What the panel does.</h2>
+    <p class="band-lede" data-rv style="--d:.08s">It's free and runs on your own machine. Mods, config, versions and backups are all handled in one place.</p>
 
     <div class="bento">
       <article class="tile tile-panel" data-rv>
@@ -155,14 +156,14 @@
             </aside>
           </div>
         </div>
-        <h3>Spawnpoint, your panel</h3>
-        <p>Console, config, mods, backups and players in one place. A small background service owns the server process, so closing or updating the panel never stops the game. This is a live-ish replica. The real one runs on your machine.</p>
+        <h3>Console, config, mods and players</h3>
+        <p>A small background service owns the server process, so closing or updating the panel doesn't stop the game. The box above is a mockup; the screenshot further down is the real panel.</p>
       </article>
 
       <article class="tile tile-packs" data-rv style="--d:.06s">
         <svg class="pi pi-t" aria-hidden="true"><use href="#i-crate"/></svg>
-        <h3>Mods and plugins, one click</h3>
-        <p>All of Modrinth and CurseForge, in one search. It picks the right build for your loader and version, pulls the dependencies, and shows plugins on Paper but mods on Fabric, because it knows which one you're running.</p>
+        <h3>Mods and plugins</h3>
+        <p>Search Modrinth and CurseForge together. It picks the build for your loader and Minecraft version, adds the dependencies, and shows plugins on Paper servers and mods on modded ones.</p>
         <ul class="pack-chips">
           <li>Lithium</li><li>FerriteCore</li><li>Waystones</li><li>Create</li><li class="more">+ thousands more</li>
         </ul>
@@ -170,14 +171,14 @@
 
       <article class="tile tile-setup" data-rv style="--d:.1s">
         <p class="stat-big"><b>€0</b><span>/mo</span></p>
-        <h3>Costs nothing, forever</h3>
-        <p>There is nothing to subscribe to and nobody counting seats. It runs on the machine you already own, so the only thing you spend is electricity.</p>
+        <h3>Free</h3>
+        <p>No subscription and no player slots. It runs on a machine you already have.</p>
       </article>
 
       <article class="tile tile-ddos" data-rv style="--d:.14s">
         <svg class="pi pi-t" aria-hidden="true"><use href="#i-bolt"/></svg>
         <h3>A genie in chat</h3>
-        <p>Type a wish in game, like "give everyone a maxed pickaxe". It writes the commands, runs them over RCON, and reads the world back before it reports success.</p>
+        <p>Type a request in chat, like "server give everyone a maxed pickaxe". It writes the commands, runs them over RCON and checks the result before it says it's done.</p>
         <p class="engines-label">Optional · uses your Claude plan or API key</p>
         <ul class="engine-chips" aria-label="Genie engines">
           <li class="ec ec-claude"><svg class="pi" aria-hidden="true"><use href="#i-aiclaude"/></svg><span>Claude</span></li>
@@ -188,15 +189,15 @@
 
       <article class="tile tile-backups" data-rv style="--d:.18s">
         <svg class="pi pi-t" aria-hidden="true"><use href="#i-chest"/></svg>
-        <h3>Backups you'll actually use</h3>
-        <p>A nightly world backup whenever the world changed, restored in one click, sitting on your own disk. No billing dispute can ever delete your world.</p>
+        <h3>Nightly backups</h3>
+        <p>A world backup every night the world changed, kept on your own disk and restored in one click.</p>
         <ol class="snap-row" aria-label="Recent snapshots"><li title="06:00"></li><li title="12:00"></li><li title="18:00"></li><li title="00:00"></li><li class="now" title="just now"></li></ol>
       </article>
 
       <article class="tile tile-regions" data-rv style="--d:.1s">
-        <svg class="worldmap" viewBox="-2 -2 48 28" shape-rendering="crispEdges" role="img" aria-label="A stylised in-game world map: friends connect from anywhere, no port forwarding"><rect x="-2" y="-2" width="48" height="28" fill="#7d5934"/><rect x="-1" y="-1" width="46" height="26" fill="#e9e2cf"/><path fill="#7cc24f" d="M0 0h1v1h-1zM3 0h1v1h-1zM20 0h2v1h-2zM23 0h3v1h-3zM28 0h2v1h-2zM33 0h4v1h-4zM38 0h1v1h-1zM1 1h1v1h-1zM19 1h3v1h-3zM23 1h5v1h-5zM29 1h1v1h-1zM33 1h1v1h-1zM7 2h2v1h-2zM10 2h2v1h-2zM18 2h1v1h-1zM21 2h2v1h-2zM24 2h3v1h-3zM28 2h2v1h-2zM33 2h1v1h-1zM35 2h2v1h-2zM43 2h1v1h-1zM1 3h3v1h-3zM6 3h3v1h-3zM10 3h3v1h-3zM17 3h4v1h-4zM22 3h3v1h-3zM27 3h2v1h-2zM34 3h3v1h-3zM41 3h3v1h-3zM1 4h1v1h-1zM4 4h1v1h-1zM7 4h3v1h-3zM12 4h1v1h-1zM17 4h1v1h-1zM19 4h3v1h-3zM24 4h5v1h-5zM40 4h3v1h-3zM0 5h1v1h-1zM2 5h2v1h-2zM5 5h5v1h-5zM11 5h2v1h-2zM16 5h1v1h-1zM18 5h1v1h-1zM20 5h1v1h-1zM25 5h1v1h-1zM27 5h3v1h-3zM41 5h1v1h-1zM43 5h1v1h-1zM1 6h11v1h-11zM17 6h2v1h-2zM20 6h1v1h-1zM26 6h3v1h-3zM30 6h3v1h-3zM39 6h2v1h-2zM42 6h2v1h-2zM0 7h5v1h-5zM6 7h1v1h-1zM8 7h2v1h-2zM11 7h1v1h-1zM18 7h2v1h-2zM26 7h1v1h-1zM28 7h5v1h-5zM38 7h2v1h-2zM41 7h3v1h-3zM3 8h5v1h-5zM9 8h3v1h-3zM28 8h4v1h-4zM33 8h1v1h-1zM35 8h1v1h-1zM37 8h3v1h-3zM41 8h3v1h-3zM0 9h2v1h-2zM3 9h1v1h-1zM5 9h4v1h-4zM30 9h3v1h-3zM34 9h9v1h-9zM1 10h1v1h-1zM5 10h5v1h-5zM29 10h3v1h-3zM33 10h4v1h-4zM39 10h5v1h-5zM1 11h3v1h-3zM5 11h4v1h-4zM10 11h2v1h-2zM20 11h2v1h-2zM36 11h3v1h-3zM40 11h4v1h-4zM0 12h6v1h-6zM7 12h4v1h-4zM12 12h1v1h-1zM19 12h4v1h-4zM37 12h1v1h-1zM39 12h3v1h-3zM0 13h2v1h-2zM3 13h2v1h-2zM6 13h2v1h-2zM9 13h7v1h-7zM18 13h6v1h-6zM27 13h3v1h-3zM39 13h3v1h-3zM0 14h10v1h-10zM11 14h2v1h-2zM15 14h1v1h-1zM17 14h2v1h-2zM20 14h3v1h-3zM24 14h1v1h-1zM26 14h3v1h-3zM30 14h2v1h-2zM33 14h1v1h-1zM37 14h1v1h-1zM39 14h1v1h-1zM41 14h1v1h-1zM2 15h7v1h-7zM11 15h1v1h-1zM13 15h16v1h-16zM32 15h5v1h-5zM38 15h6v1h-6zM3 16h1v1h-1zM5 16h1v1h-1zM8 16h8v1h-8zM17 16h2v1h-2zM20 16h1v1h-1zM24 16h2v1h-2zM27 16h1v1h-1zM29 16h3v1h-3zM33 16h1v1h-1zM35 16h1v1h-1zM37 16h6v1h-6zM6 17h1v1h-1zM8 17h3v1h-3zM13 17h3v1h-3zM18 17h2v1h-2zM21 17h5v1h-5zM27 17h1v1h-1zM29 17h10v1h-10zM5 18h1v1h-1zM7 18h3v1h-3zM12 18h1v1h-1zM14 18h1v1h-1zM20 18h1v1h-1zM22 18h1v1h-1zM24 18h2v1h-2zM27 18h1v1h-1zM29 18h1v1h-1zM31 18h11v1h-11zM5 19h1v1h-1zM7 19h3v1h-3zM20 19h14v1h-14zM35 19h4v1h-4zM42 19h1v1h-1zM4 20h2v1h-2zM8 20h2v1h-2zM19 20h1v1h-1zM21 20h1v1h-1zM23 20h3v1h-3zM27 20h4v1h-4zM32 20h3v1h-3zM39 20h5v1h-5zM2 21h1v1h-1zM4 21h6v1h-6zM20 21h3v1h-3zM24 21h1v1h-1zM27 21h2v1h-2zM30 21h4v1h-4zM38 21h1v1h-1zM40 21h3v1h-3zM0 22h3v1h-3zM4 22h7v1h-7zM18 22h1v1h-1zM20 22h5v1h-5zM28 22h5v1h-5zM38 22h3v1h-3zM42 22h2v1h-2zM1 23h2v1h-2zM4 23h2v1h-2zM7 23h2v1h-2zM10 23h1v1h-1zM18 23h2v1h-2zM21 23h4v1h-4zM28 23h1v1h-1zM31 23h1v1h-1zM33 23h1v1h-1zM38 23h1v1h-1zM40 23h2v1h-2zM43 23h1v1h-1z"/><path fill="#5c9c3c" d="M1 0h1v1h-1zM19 0h1v1h-1zM22 0h1v1h-1zM26 0h2v1h-2zM37 0h1v1h-1zM0 1h1v1h-1zM3 1h1v1h-1zM22 1h1v1h-1zM34 1h1v1h-1zM36 1h1v1h-1zM1 2h1v1h-1zM3 2h1v1h-1zM19 2h2v1h-2zM37 2h1v1h-1zM0 3h1v1h-1zM4 3h1v1h-1zM21 3h1v1h-1zM25 3h1v1h-1zM0 4h1v1h-1zM2 4h2v1h-2zM5 4h2v1h-2zM16 4h1v1h-1zM43 4h1v1h-1zM1 5h1v1h-1zM17 5h1v1h-1zM19 5h1v1h-1zM26 5h1v1h-1zM40 5h1v1h-1zM19 6h1v1h-1zM25 6h1v1h-1zM41 6h1v1h-1zM5 7h1v1h-1zM7 7h1v1h-1zM10 7h1v1h-1zM27 7h1v1h-1zM0 8h3v1h-3zM8 8h1v1h-1zM27 8h1v1h-1zM32 8h1v1h-1zM40 8h1v1h-1zM4 9h1v1h-1zM9 9h1v1h-1zM11 9h1v1h-1zM28 9h2v1h-2zM33 9h1v1h-1zM43 9h1v1h-1zM0 10h1v1h-1zM4 10h1v1h-1zM11 10h1v1h-1zM32 10h1v1h-1zM38 10h1v1h-1zM0 11h1v1h-1zM35 11h1v1h-1zM39 11h1v1h-1zM6 12h1v1h-1zM11 12h1v1h-1zM36 12h1v1h-1zM2 13h1v1h-1zM36 13h1v1h-1zM38 13h1v1h-1zM42 13h1v1h-1zM13 14h2v1h-2zM23 14h1v1h-1zM25 14h1v1h-1zM29 14h1v1h-1zM32 14h1v1h-1zM40 14h1v1h-1zM42 14h2v1h-2zM9 15h2v1h-2zM12 15h1v1h-1zM29 15h3v1h-3zM37 15h1v1h-1zM4 16h1v1h-1zM6 16h2v1h-2zM16 16h1v1h-1zM21 16h1v1h-1zM23 16h1v1h-1zM26 16h1v1h-1zM34 16h1v1h-1zM36 16h1v1h-1zM11 17h2v1h-2zM20 17h1v1h-1zM26 17h1v1h-1zM39 17h1v1h-1zM41 17h1v1h-1zM6 18h1v1h-1zM11 18h1v1h-1zM13 18h1v1h-1zM19 18h1v1h-1zM21 18h1v1h-1zM23 18h1v1h-1zM26 18h1v1h-1zM6 19h1v1h-1zM10 19h1v1h-1zM34 19h1v1h-1zM39 19h1v1h-1zM6 20h2v1h-2zM22 20h1v1h-1zM37 20h2v1h-2zM3 21h1v1h-1zM18 21h2v1h-2zM23 21h1v1h-1zM29 21h1v1h-1zM43 21h1v1h-1zM19 22h1v1h-1zM33 22h1v1h-1zM41 22h1v1h-1zM3 23h1v1h-1zM9 23h1v1h-1zM20 23h1v1h-1zM29 23h1v1h-1zM32 23h1v1h-1zM39 23h1v1h-1z"/><path fill="#a4d97a" d="M2 0h1v1h-1zM2 1h1v1h-1zM28 1h1v1h-1zM35 1h1v1h-1zM0 2h1v1h-1zM27 2h1v1h-1zM42 2h1v1h-1zM10 4h2v1h-2zM10 5h1v1h-1zM0 6h1v1h-1zM29 6h1v1h-1zM40 7h1v1h-1zM34 8h1v1h-1zM10 9h1v1h-1zM3 10h1v1h-1zM10 10h1v1h-1zM37 10h1v1h-1zM9 11h1v1h-1zM42 12h2v1h-2zM43 13h1v1h-1zM36 14h1v1h-1zM38 14h1v1h-1zM5 17h1v1h-1zM40 17h1v1h-1zM28 18h1v1h-1zM30 18h1v1h-1zM41 19h1v1h-1zM31 20h1v1h-1zM39 21h1v1h-1zM3 22h1v1h-1zM30 23h1v1h-1zM42 23h1v1h-1z"/><path fill="#5b97d9" d="M4 0h15v1h-15zM30 0h3v1h-3zM39 0h5v1h-5zM4 1h2v1h-2zM7 1h7v1h-7zM15 1h4v1h-4zM30 1h3v1h-3zM39 1h5v1h-5zM4 2h3v1h-3zM12 2h6v1h-6zM30 2h3v1h-3zM38 2h4v1h-4zM5 3h1v1h-1zM13 3h4v1h-4zM29 3h5v1h-5zM37 3h4v1h-4zM13 4h3v1h-3zM22 4h2v1h-2zM29 4h3v1h-3zM33 4h2v1h-2zM36 4h4v1h-4zM13 5h3v1h-3zM21 5h4v1h-4zM30 5h3v1h-3zM34 5h6v1h-6zM12 6h5v1h-5zM22 6h3v1h-3zM33 6h6v1h-6zM12 7h6v1h-6zM20 7h1v1h-1zM22 7h4v1h-4zM34 7h4v1h-4zM12 8h15v1h-15zM36 8h1v1h-1zM12 9h16v1h-16zM12 10h15v1h-15zM28 10h1v1h-1zM12 11h8v1h-8zM22 11h4v1h-4zM27 11h8v1h-8zM13 12h6v1h-6zM23 12h6v1h-6zM30 12h6v1h-6zM8 13h1v1h-1zM16 13h2v1h-2zM24 13h3v1h-3zM30 13h6v1h-6zM34 14h2v1h-2zM0 15h2v1h-2zM0 16h3v1h-3zM43 16h1v1h-1zM0 17h5v1h-5zM17 17h1v1h-1zM43 17h1v1h-1zM0 18h5v1h-5zM15 18h4v1h-4zM42 18h2v1h-2zM0 19h5v1h-5zM11 19h8v1h-8zM43 19h1v1h-1zM0 20h4v1h-4zM10 20h9v1h-9zM35 20h2v1h-2zM0 21h2v1h-2zM10 21h8v1h-8zM25 21h2v1h-2zM34 21h1v1h-1zM36 21h2v1h-2zM11 22h7v1h-7zM25 22h3v1h-3zM34 22h4v1h-4zM11 23h2v1h-2zM14 23h4v1h-4zM25 23h3v1h-3zM34 23h2v1h-2z"/><path fill="#3a6fb0" d="M6 1h1v1h-1zM14 1h1v1h-1zM32 4h1v1h-1zM35 4h1v1h-1zM33 5h1v1h-1zM21 6h1v1h-1zM21 7h1v1h-1zM27 10h1v1h-1zM26 11h1v1h-1zM29 12h1v1h-1zM16 17h1v1h-1zM42 17h1v1h-1zM35 21h1v1h-1zM13 23h1v1h-1zM36 23h2v1h-2z"/><path fill="#8a5f3c" d="M37 1h2v1h-2zM2 2h1v1h-1zM9 2h1v1h-1zM23 2h1v1h-1zM34 2h1v1h-1zM9 3h1v1h-1zM26 3h1v1h-1zM18 4h1v1h-1zM4 5h1v1h-1zM42 5h1v1h-1zM33 7h1v1h-1zM2 9h1v1h-1zM2 10h1v1h-1zM4 11h1v1h-1zM38 12h1v1h-1zM5 13h1v1h-1zM37 13h1v1h-1zM10 14h1v1h-1zM16 14h1v1h-1zM19 14h1v1h-1zM19 16h1v1h-1zM22 16h1v1h-1zM28 16h1v1h-1zM32 16h1v1h-1zM7 17h1v1h-1zM28 17h1v1h-1zM10 18h1v1h-1zM19 19h1v1h-1zM40 19h1v1h-1zM20 20h1v1h-1zM26 20h1v1h-1zM0 23h1v1h-1zM6 23h1v1h-1z"/><g class="map-pins"><rect x="6" y="6" width="2" height="2" fill="#e2483d"/><rect x="10" y="14" width="2" height="2" fill="#e2483d"/><rect x="14" y="9" width="2" height="2" fill="#e2483d"/><rect x="19" y="4" width="2" height="2" fill="#e2483d"/><rect x="26" y="6" width="2" height="2" fill="#e2483d"/><rect x="30" y="16" width="2" height="2" fill="#e2483d"/><rect x="34" y="5" width="2" height="2" fill="#e2483d"/><rect x="37" y="12" width="2" height="2" fill="#e2483d"/><rect x="40" y="18" width="2" height="2" fill="#e2483d"/><rect x="16" y="19" width="2" height="2" fill="#e2483d"/><rect x="28" y="20" width="2" height="2" fill="#e2483d"/><rect x="23" y="11" width="2" height="2" fill="#eafff2"/><rect x="22.5" y="10.5" width="3" height="3" fill="none" stroke="#1b2130" stroke-width="0.5"/></g></svg>
-        <h3>Friends join from anywhere</h3>
-        <p>Forward the port, or use a tunnel such as playit.gg when your router can't. The panel shows the address to share. Keep the panel itself on your LAN or a VPN like Tailscale.</p>
+        <svg class="worldmap" viewBox="-2 -2 48 28" shape-rendering="crispEdges" role="img" aria-label="A stylised in-game world map with pins where friends join from"><rect x="-2" y="-2" width="48" height="28" fill="#7d5934"/><rect x="-1" y="-1" width="46" height="26" fill="#e9e2cf"/><path fill="#7cc24f" d="M0 0h1v1h-1zM3 0h1v1h-1zM20 0h2v1h-2zM23 0h3v1h-3zM28 0h2v1h-2zM33 0h4v1h-4zM38 0h1v1h-1zM1 1h1v1h-1zM19 1h3v1h-3zM23 1h5v1h-5zM29 1h1v1h-1zM33 1h1v1h-1zM7 2h2v1h-2zM10 2h2v1h-2zM18 2h1v1h-1zM21 2h2v1h-2zM24 2h3v1h-3zM28 2h2v1h-2zM33 2h1v1h-1zM35 2h2v1h-2zM43 2h1v1h-1zM1 3h3v1h-3zM6 3h3v1h-3zM10 3h3v1h-3zM17 3h4v1h-4zM22 3h3v1h-3zM27 3h2v1h-2zM34 3h3v1h-3zM41 3h3v1h-3zM1 4h1v1h-1zM4 4h1v1h-1zM7 4h3v1h-3zM12 4h1v1h-1zM17 4h1v1h-1zM19 4h3v1h-3zM24 4h5v1h-5zM40 4h3v1h-3zM0 5h1v1h-1zM2 5h2v1h-2zM5 5h5v1h-5zM11 5h2v1h-2zM16 5h1v1h-1zM18 5h1v1h-1zM20 5h1v1h-1zM25 5h1v1h-1zM27 5h3v1h-3zM41 5h1v1h-1zM43 5h1v1h-1zM1 6h11v1h-11zM17 6h2v1h-2zM20 6h1v1h-1zM26 6h3v1h-3zM30 6h3v1h-3zM39 6h2v1h-2zM42 6h2v1h-2zM0 7h5v1h-5zM6 7h1v1h-1zM8 7h2v1h-2zM11 7h1v1h-1zM18 7h2v1h-2zM26 7h1v1h-1zM28 7h5v1h-5zM38 7h2v1h-2zM41 7h3v1h-3zM3 8h5v1h-5zM9 8h3v1h-3zM28 8h4v1h-4zM33 8h1v1h-1zM35 8h1v1h-1zM37 8h3v1h-3zM41 8h3v1h-3zM0 9h2v1h-2zM3 9h1v1h-1zM5 9h4v1h-4zM30 9h3v1h-3zM34 9h9v1h-9zM1 10h1v1h-1zM5 10h5v1h-5zM29 10h3v1h-3zM33 10h4v1h-4zM39 10h5v1h-5zM1 11h3v1h-3zM5 11h4v1h-4zM10 11h2v1h-2zM20 11h2v1h-2zM36 11h3v1h-3zM40 11h4v1h-4zM0 12h6v1h-6zM7 12h4v1h-4zM12 12h1v1h-1zM19 12h4v1h-4zM37 12h1v1h-1zM39 12h3v1h-3zM0 13h2v1h-2zM3 13h2v1h-2zM6 13h2v1h-2zM9 13h7v1h-7zM18 13h6v1h-6zM27 13h3v1h-3zM39 13h3v1h-3zM0 14h10v1h-10zM11 14h2v1h-2zM15 14h1v1h-1zM17 14h2v1h-2zM20 14h3v1h-3zM24 14h1v1h-1zM26 14h3v1h-3zM30 14h2v1h-2zM33 14h1v1h-1zM37 14h1v1h-1zM39 14h1v1h-1zM41 14h1v1h-1zM2 15h7v1h-7zM11 15h1v1h-1zM13 15h16v1h-16zM32 15h5v1h-5zM38 15h6v1h-6zM3 16h1v1h-1zM5 16h1v1h-1zM8 16h8v1h-8zM17 16h2v1h-2zM20 16h1v1h-1zM24 16h2v1h-2zM27 16h1v1h-1zM29 16h3v1h-3zM33 16h1v1h-1zM35 16h1v1h-1zM37 16h6v1h-6zM6 17h1v1h-1zM8 17h3v1h-3zM13 17h3v1h-3zM18 17h2v1h-2zM21 17h5v1h-5zM27 17h1v1h-1zM29 17h10v1h-10zM5 18h1v1h-1zM7 18h3v1h-3zM12 18h1v1h-1zM14 18h1v1h-1zM20 18h1v1h-1zM22 18h1v1h-1zM24 18h2v1h-2zM27 18h1v1h-1zM29 18h1v1h-1zM31 18h11v1h-11zM5 19h1v1h-1zM7 19h3v1h-3zM20 19h14v1h-14zM35 19h4v1h-4zM42 19h1v1h-1zM4 20h2v1h-2zM8 20h2v1h-2zM19 20h1v1h-1zM21 20h1v1h-1zM23 20h3v1h-3zM27 20h4v1h-4zM32 20h3v1h-3zM39 20h5v1h-5zM2 21h1v1h-1zM4 21h6v1h-6zM20 21h3v1h-3zM24 21h1v1h-1zM27 21h2v1h-2zM30 21h4v1h-4zM38 21h1v1h-1zM40 21h3v1h-3zM0 22h3v1h-3zM4 22h7v1h-7zM18 22h1v1h-1zM20 22h5v1h-5zM28 22h5v1h-5zM38 22h3v1h-3zM42 22h2v1h-2zM1 23h2v1h-2zM4 23h2v1h-2zM7 23h2v1h-2zM10 23h1v1h-1zM18 23h2v1h-2zM21 23h4v1h-4zM28 23h1v1h-1zM31 23h1v1h-1zM33 23h1v1h-1zM38 23h1v1h-1zM40 23h2v1h-2zM43 23h1v1h-1z"/><path fill="#5c9c3c" d="M1 0h1v1h-1zM19 0h1v1h-1zM22 0h1v1h-1zM26 0h2v1h-2zM37 0h1v1h-1zM0 1h1v1h-1zM3 1h1v1h-1zM22 1h1v1h-1zM34 1h1v1h-1zM36 1h1v1h-1zM1 2h1v1h-1zM3 2h1v1h-1zM19 2h2v1h-2zM37 2h1v1h-1zM0 3h1v1h-1zM4 3h1v1h-1zM21 3h1v1h-1zM25 3h1v1h-1zM0 4h1v1h-1zM2 4h2v1h-2zM5 4h2v1h-2zM16 4h1v1h-1zM43 4h1v1h-1zM1 5h1v1h-1zM17 5h1v1h-1zM19 5h1v1h-1zM26 5h1v1h-1zM40 5h1v1h-1zM19 6h1v1h-1zM25 6h1v1h-1zM41 6h1v1h-1zM5 7h1v1h-1zM7 7h1v1h-1zM10 7h1v1h-1zM27 7h1v1h-1zM0 8h3v1h-3zM8 8h1v1h-1zM27 8h1v1h-1zM32 8h1v1h-1zM40 8h1v1h-1zM4 9h1v1h-1zM9 9h1v1h-1zM11 9h1v1h-1zM28 9h2v1h-2zM33 9h1v1h-1zM43 9h1v1h-1zM0 10h1v1h-1zM4 10h1v1h-1zM11 10h1v1h-1zM32 10h1v1h-1zM38 10h1v1h-1zM0 11h1v1h-1zM35 11h1v1h-1zM39 11h1v1h-1zM6 12h1v1h-1zM11 12h1v1h-1zM36 12h1v1h-1zM2 13h1v1h-1zM36 13h1v1h-1zM38 13h1v1h-1zM42 13h1v1h-1zM13 14h2v1h-2zM23 14h1v1h-1zM25 14h1v1h-1zM29 14h1v1h-1zM32 14h1v1h-1zM40 14h1v1h-1zM42 14h2v1h-2zM9 15h2v1h-2zM12 15h1v1h-1zM29 15h3v1h-3zM37 15h1v1h-1zM4 16h1v1h-1zM6 16h2v1h-2zM16 16h1v1h-1zM21 16h1v1h-1zM23 16h1v1h-1zM26 16h1v1h-1zM34 16h1v1h-1zM36 16h1v1h-1zM11 17h2v1h-2zM20 17h1v1h-1zM26 17h1v1h-1zM39 17h1v1h-1zM41 17h1v1h-1zM6 18h1v1h-1zM11 18h1v1h-1zM13 18h1v1h-1zM19 18h1v1h-1zM21 18h1v1h-1zM23 18h1v1h-1zM26 18h1v1h-1zM6 19h1v1h-1zM10 19h1v1h-1zM34 19h1v1h-1zM39 19h1v1h-1zM6 20h2v1h-2zM22 20h1v1h-1zM37 20h2v1h-2zM3 21h1v1h-1zM18 21h2v1h-2zM23 21h1v1h-1zM29 21h1v1h-1zM43 21h1v1h-1zM19 22h1v1h-1zM33 22h1v1h-1zM41 22h1v1h-1zM3 23h1v1h-1zM9 23h1v1h-1zM20 23h1v1h-1zM29 23h1v1h-1zM32 23h1v1h-1zM39 23h1v1h-1z"/><path fill="#a4d97a" d="M2 0h1v1h-1zM2 1h1v1h-1zM28 1h1v1h-1zM35 1h1v1h-1zM0 2h1v1h-1zM27 2h1v1h-1zM42 2h1v1h-1zM10 4h2v1h-2zM10 5h1v1h-1zM0 6h1v1h-1zM29 6h1v1h-1zM40 7h1v1h-1zM34 8h1v1h-1zM10 9h1v1h-1zM3 10h1v1h-1zM10 10h1v1h-1zM37 10h1v1h-1zM9 11h1v1h-1zM42 12h2v1h-2zM43 13h1v1h-1zM36 14h1v1h-1zM38 14h1v1h-1zM5 17h1v1h-1zM40 17h1v1h-1zM28 18h1v1h-1zM30 18h1v1h-1zM41 19h1v1h-1zM31 20h1v1h-1zM39 21h1v1h-1zM3 22h1v1h-1zM30 23h1v1h-1zM42 23h1v1h-1z"/><path fill="#5b97d9" d="M4 0h15v1h-15zM30 0h3v1h-3zM39 0h5v1h-5zM4 1h2v1h-2zM7 1h7v1h-7zM15 1h4v1h-4zM30 1h3v1h-3zM39 1h5v1h-5zM4 2h3v1h-3zM12 2h6v1h-6zM30 2h3v1h-3zM38 2h4v1h-4zM5 3h1v1h-1zM13 3h4v1h-4zM29 3h5v1h-5zM37 3h4v1h-4zM13 4h3v1h-3zM22 4h2v1h-2zM29 4h3v1h-3zM33 4h2v1h-2zM36 4h4v1h-4zM13 5h3v1h-3zM21 5h4v1h-4zM30 5h3v1h-3zM34 5h6v1h-6zM12 6h5v1h-5zM22 6h3v1h-3zM33 6h6v1h-6zM12 7h6v1h-6zM20 7h1v1h-1zM22 7h4v1h-4zM34 7h4v1h-4zM12 8h15v1h-15zM36 8h1v1h-1zM12 9h16v1h-16zM12 10h15v1h-15zM28 10h1v1h-1zM12 11h8v1h-8zM22 11h4v1h-4zM27 11h8v1h-8zM13 12h6v1h-6zM23 12h6v1h-6zM30 12h6v1h-6zM8 13h1v1h-1zM16 13h2v1h-2zM24 13h3v1h-3zM30 13h6v1h-6zM34 14h2v1h-2zM0 15h2v1h-2zM0 16h3v1h-3zM43 16h1v1h-1zM0 17h5v1h-5zM17 17h1v1h-1zM43 17h1v1h-1zM0 18h5v1h-5zM15 18h4v1h-4zM42 18h2v1h-2zM0 19h5v1h-5zM11 19h8v1h-8zM43 19h1v1h-1zM0 20h4v1h-4zM10 20h9v1h-9zM35 20h2v1h-2zM0 21h2v1h-2zM10 21h8v1h-8zM25 21h2v1h-2zM34 21h1v1h-1zM36 21h2v1h-2zM11 22h7v1h-7zM25 22h3v1h-3zM34 22h4v1h-4zM11 23h2v1h-2zM14 23h4v1h-4zM25 23h3v1h-3zM34 23h2v1h-2z"/><path fill="#3a6fb0" d="M6 1h1v1h-1zM14 1h1v1h-1zM32 4h1v1h-1zM35 4h1v1h-1zM33 5h1v1h-1zM21 6h1v1h-1zM21 7h1v1h-1zM27 10h1v1h-1zM26 11h1v1h-1zM29 12h1v1h-1zM16 17h1v1h-1zM42 17h1v1h-1zM35 21h1v1h-1zM13 23h1v1h-1zM36 23h2v1h-2z"/><path fill="#8a5f3c" d="M37 1h2v1h-2zM2 2h1v1h-1zM9 2h1v1h-1zM23 2h1v1h-1zM34 2h1v1h-1zM9 3h1v1h-1zM26 3h1v1h-1zM18 4h1v1h-1zM4 5h1v1h-1zM42 5h1v1h-1zM33 7h1v1h-1zM2 9h1v1h-1zM2 10h1v1h-1zM4 11h1v1h-1zM38 12h1v1h-1zM5 13h1v1h-1zM37 13h1v1h-1zM10 14h1v1h-1zM16 14h1v1h-1zM19 14h1v1h-1zM19 16h1v1h-1zM22 16h1v1h-1zM28 16h1v1h-1zM32 16h1v1h-1zM7 17h1v1h-1zM28 17h1v1h-1zM10 18h1v1h-1zM19 19h1v1h-1zM40 19h1v1h-1zM20 20h1v1h-1zM26 20h1v1h-1zM0 23h1v1h-1zM6 23h1v1h-1z"/><g class="map-pins"><rect x="6" y="6" width="2" height="2" fill="#e2483d"/><rect x="10" y="14" width="2" height="2" fill="#e2483d"/><rect x="14" y="9" width="2" height="2" fill="#e2483d"/><rect x="19" y="4" width="2" height="2" fill="#e2483d"/><rect x="26" y="6" width="2" height="2" fill="#e2483d"/><rect x="30" y="16" width="2" height="2" fill="#e2483d"/><rect x="34" y="5" width="2" height="2" fill="#e2483d"/><rect x="37" y="12" width="2" height="2" fill="#e2483d"/><rect x="40" y="18" width="2" height="2" fill="#e2483d"/><rect x="16" y="19" width="2" height="2" fill="#e2483d"/><rect x="28" y="20" width="2" height="2" fill="#e2483d"/><rect x="23" y="11" width="2" height="2" fill="#eafff2"/><rect x="22.5" y="10.5" width="3" height="3" fill="none" stroke="#1b2130" stroke-width="0.5"/></g></svg>
+        <h3>Letting friends in from outside</h3>
+        <p>Friends outside your home need a way in: forward the game port on your router, or use a free tunnel such as <a href="https://playit.gg" rel="noopener">playit.gg</a> if you can't. The panel shows the address to share. Keep the panel itself on your LAN or a VPN like Tailscale.</p>
       </article>
 
       <article class="tile tile-scale" data-rv style="--d:.14s">
@@ -207,13 +208,13 @@
 
       <article class="tile tile-support" data-rv style="--d:.18s">
         <svg class="pi pi-t" aria-hidden="true"><use href="#i-shield"/></svg>
-        <h3>It says what it didn't do</h3>
-        <p>Actions are checked against the server before the panel calls them done. A mod change that couldn't be fully tested says so and waits for you. A build that didn't land says so.</p>
+        <h3>It tells you what it couldn't check</h3>
+        <p>The panel checks actions against the server before calling them done. If a mod change couldn't be fully tested, it says so and waits for you.</p>
       </article>
     </div>
 
     <figure class="panel-shot" data-rv>
-      <figcaption class="depth-tag">straight from the panel · no mockups</figcaption>
+      <figcaption class="depth-tag">screenshot of the real panel</figcaption>
       <img src="panel-dashboard.webp" width="1600" height="1000" loading="lazy" decoding="async" alt="A server's Overview in Spawnpoint: a mod change marked live after passing every step from plan to friend sync, with players, TPS, RAM and CPU tiles below.">
     </figure>
   </div>
@@ -223,8 +224,8 @@
 <section class="band band-ore" id="verify" data-biome="ORE" data-ylabel="12">
   <div class="wrap">
     <p class="depth-tag">Y 12 · DIAMOND LEVEL</p>
-    <h2 data-rv>Friends get exactly the tested version.</h2>
-    <p class="band-lede" data-rv style="--d:.08s">Mod installs and updates are tested on a copy of your server before they go live. A change reaches the server and the friend pack only when it passes, or when you approve one that couldn't be fully tested. You see every verdict, and you can undo recent changes.</p>
+    <h2 data-rv>Mod changes are tested before they go live.</h2>
+    <p class="band-lede" data-rv style="--d:.08s">Installs and updates run on a copy of your server first. A change reaches the live server and your friends' pack only when it passes, or when you approve one that couldn't be fully tested. Each change shows its results, and you can undo the last five.</p>
     <ol class="lane" data-rv aria-label="The steps every mod change goes through, as the panel shows them">
       <li style="--i:0"><i aria-hidden="true">✓</i><b>Plan</b><span>fewest changes</span></li>
       <li style="--i:1"><i aria-hidden="true">✓</i><b>Server boot</b><span>on a copy</span></li>
@@ -248,7 +249,7 @@
           <button class="pl-btn pl-fs" type="button" aria-label="Full screen"><svg class="pi" aria-hidden="true"><use href="#i-full"/></svg></button>
         </div>
       </div>
-      <figcaption class="depth-tag">recorded on a real server · new server to a friend joining · waits sped up · no sound</figcaption>
+      <figcaption class="depth-tag">recorded on a real server · add a mod, test it, go live · waits sped up · no sound</figcaption>
     </figure>
     <ol class="gates">
       <li class="gate" data-rv>
@@ -263,7 +264,7 @@
       </li>
       <li class="gate" data-rv style="--d:.12s">
         <svg class="pi pi-t" aria-hidden="true"><use href="#i-globe"/></svg>
-        <h3>It actually joins</h3>
+        <h3>Then it joins</h3>
         <p>The panel boots a throwaway server with the same mods and a fresh world, and the test client joins it for real, because some mods only break at the moment a player connects.</p>
       </li>
       <li class="gate" data-rv style="--d:.18s">
@@ -281,7 +282,7 @@
   <div class="wrap">
     <p class="depth-tag">Y 0 · STONE</p>
     <h2 data-rv>Pick your ore.</h2>
-    <p class="band-lede" data-rv style="--d:.08s">The ore is your hardware, not your invoice: Spawnpoint is free on every one of these. RAM is the main limit, so that's what these are. Pull the lever to see what modded does to the numbers.</p>
+    <p class="band-lede" data-rv style="--d:.08s">Spawnpoint is free on all of these. These are rough estimates by memory; CPU and the pack matter too. Pull the lever for modded numbers.</p>
 
     <div class="billing" data-rv style="--d:.12s">
       <span class="bill-lab" id="bill-m">Vanilla</span>
@@ -339,13 +340,13 @@
         <h3>Diamond</h3>
         <p class="tier-for">A gaming PC</p>
         <p class="price"><b class="amt" data-m="60" data-y="25">60</b><span class="per">players</span></p>
-        <p class="billed" data-m="ambitious SMPs, no sweat" data-y="a 300-mod pack, happily">ambitious SMPs, no sweat</p>
+        <p class="billed" data-m="a busy SMP" data-y="a large modpack">a busy SMP</p>
         <ul class="specs">
           <li><b>16 GB</b> given to the server</li>
           <li>The machine you game on</li>
           <li>Big modpacks, 300+ mods</li>
           <li>Room to pregen and back up</li>
-          <li>The sweet spot, honestly</li>
+          <li>What most friend groups need</li>
         </ul>
         <a class="btn btn-emerald" href="#start" data-burst>Install Spawnpoint</a>
       </article>
@@ -355,19 +356,19 @@
         <h3>Netherite</h3>
         <p class="tier-for">A box that lives in a cupboard</p>
         <p class="price"><b class="amt" data-m="150" data-y="50">150</b><span class="per">players</span></p>
-        <p class="billed" data-m="a public server, properly" data-y="the heaviest packs there are">a public server, properly</p>
+        <p class="billed" data-m="a public server" data-y="the heaviest packs there are">a public server</p>
         <ul class="specs">
           <li><b>32 GB</b> given to the server</li>
           <li>A machine you bought on purpose</li>
           <li>Several servers at once</li>
           <li>Public SMPs, the heaviest packs</li>
-          <li>Now you're just showing off</li>
+          <li>Plenty of headroom</li>
         </ul>
         <a class="btn btn-stone" href="#start" data-burst>Install Spawnpoint</a>
       </article>
     </div>
 
-    <p class="tiers-foot" data-rv>Every one of these gets the whole panel: both mod sources, the genie, the schematic library, every loader it supports. There is no paid tier, because there is nobody to pay. It runs on your machine. Short on RAM? Give the server less and drop the view distance. That's the entire negotiation.</p>
+    <p class="tiers-foot" data-rv>Every tier gets the whole panel, including both mod sources, the genie, the schematic library and every loader. Short on RAM? Give the server less and lower the view distance.</p>
   </div>
 </section>
 
@@ -375,8 +376,8 @@
 <section class="band band-tuff" id="compare" data-biome="TUFF" data-ylabel="-24">
   <div class="wrap wrap-narrow">
     <p class="depth-tag">Y -24 · TUFF</p>
-    <h2 data-rv>Why people stop renting.</h2>
-    <p class="band-lede" data-rv style="--d:.08s">The machine is already in your house. The only thing you were ever really renting was the panel.</p>
+    <h2 data-rv>Your machine or a rented host.</h2>
+    <p class="band-lede" data-rv style="--d:.08s">If you already have a PC that can stay on, this is how they compare.</p>
     <div class="vs-scroll" data-rv style="--d:.12s">
       <table class="vs">
         <caption class="visually-hidden">Spawnpoint on your own machine compared with a rented Minecraft host</caption>
@@ -384,19 +385,19 @@
           <tr><td></td><th scope="col" class="us">Spawnpoint · your machine</th><th scope="col">Rented host</th></tr>
         </thead>
         <tbody>
-          <tr><th scope="row">Cost</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>€0, forever</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>€10–35 a month, forever</td></tr>
-          <tr><th scope="row">Where the world lives</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Your disk, in your house</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Their disk, on their terms</td></tr>
+          <tr><th scope="row">Cost</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>€0</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>€10–35 a month</td></tr>
+          <tr><th scope="row">Where the world lives</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Your disk, in your house</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Their disk</td></tr>
           <tr><th scope="row">RAM you get</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Whatever your box has</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Exactly what you pay for</td></tr>
-          <tr><th scope="row">Mods and plugins</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Modrinth + CurseForge, one click</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>One click, or FTP at midnight</td></tr>
+          <tr><th scope="row">Mods and plugins</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Modrinth + CurseForge, one click</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Varies by host</td></tr>
           <tr><th scope="row">A broken modpack</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Tested on a copy before it goes live</td><td>Depends on the host</td></tr>
-          <tr><th scope="row">Versions</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Fabric, Forge and NeoForge built in, more with Crafty</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Whatever they've gotten around to</td></tr>
+          <tr><th scope="row">Versions</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Fabric, Forge and NeoForge built in, more with Crafty</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Whatever the host supports</td></tr>
           <tr><th scope="row">The console</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Real RCON, every command</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Whatever the panel allows</td></tr>
-          <tr><th scope="row">If you stop paying</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Nothing happens. It's your PC.</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>World deleted on a timer</td></tr>
+          <tr><th scope="row">If you stop paying</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Nothing changes</td><td><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>World deleted after a grace period</td></tr>
           <tr><th scope="row">Staying up at 3 a.m.</th><td class="us"><svg class="pi" aria-hidden="true"><use href="#i-cross"/></svg>Your PC has to be on</td><td><svg class="pi" aria-hidden="true"><use href="#i-check"/></svg>Someone else's problem</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="foot-note" data-rv>That last row is not a typo. A rented host is on around the clock, has real DDoS scrubbing, and is somebody else's emergency at three in the morning. If that's what you want, go and rent one. Spawnpoint is for people who would rather own the box. It will tell you the truth about what your box can do.</p>
+    <p class="foot-note" data-rv>A rented host stays up around the clock, has real DDoS protection, and someone else fixes it at 3 a.m. If you need that, rent one.</p>
   </div>
 </section>
 
@@ -409,40 +410,48 @@
 
     <div class="faq-list" data-rv style="--d:.12s">
       <div class="faq-item">
+        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa0" id="fq0"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Is this for me?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
+        <div class="faq-a" id="fa0" role="region" aria-labelledby="fq0"><div class="faq-a-in"><p>It's for people who run a modded server for friends on a spare machine, a home server or a cheap VPS, so the world is there when they want to play. If you only play while you're online yourself, hosting from your own PC or using <a href="https://modrinth.com/mod/e4mc" rel="noopener">e4mc</a> is simpler.</p></div></div>
+      </div>
+      <div class="faq-item">
+        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa3" id="fq3"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>How do friends outside my home join?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
+        <div class="faq-a" id="fa3" role="region" aria-labelledby="fq3"><div class="faq-a-in"><p>Forward the game port the panel shows (usually 25565) on your router. If you can't, for example behind CGNAT, a free tunnel such as <a href="https://playit.gg" rel="noopener">playit.gg</a> gives your server a public address. Spawnpoint doesn't set either up for you. Keep the panel itself private, on your LAN or behind a VPN like Tailscale.</p></div></div>
+      </div>
+      <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa1" id="fq1"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Do I need Crafty Controller?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
         <div class="faq-a" id="fa1" role="region" aria-labelledby="fq1"><div class="faq-a-in"><p>No. Spawnpoint installs a small background service (systemd on Linux, launchd on macOS, a Windows service) that starts, stops and supervises your servers, and keeps them running when the panel closes. If you already use Crafty Controller, Spawnpoint can work alongside it instead, and it also covers loaders it can't build itself yet, such as Paper and Quilt.</p></div></div>
       </div>
       <div class="faq-item">
-        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa2" id="fq2"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Is it really free? What's the catch?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa2" role="region" aria-labelledby="fq2"><div class="faq-a-in"><p>It's free because there is nobody to pay. Spawnpoint runs on your machine, uses your disk and your uplink, and never phones home for a licence. The catch is the honest one: your PC is the server, so it has to be switched on for anyone to play.</p></div></div>
-      </div>
-      <div class="faq-item">
-        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa3" id="fq3"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>How do friends join without port forwarding?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa3" role="region" aria-labelledby="fq3"><div class="faq-a-in"><p>Spawnpoint doesn't set up a tunnel for you. If you can't forward a port (for example behind CGNAT), a tunnel service such as playit.gg gives your server a public address. Either way, keep the panel itself private: on your LAN or behind a VPN like Tailscale.</p></div></div>
+        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa2" id="fq2"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Is it free?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
+        <div class="faq-a" id="fa2" role="region" aria-labelledby="fq2"><div class="faq-a-in"><p>Yes. There's no account and no licence check, and it doesn't phone home. Your PC is the server, so it has to be on for anyone to play.</p></div></div>
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa4" id="fq4"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Can I use a server I already have?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
         <div class="faq-a" id="fa4" role="region" aria-labelledby="fq4"><div class="faq-a-in"><p>Yes, if Crafty Controller runs it. Spawnpoint shows Crafty's servers where they are, with loader and version detected. When you're ready, it can import a stopped server into its own service, one at a time: the world and server ID stay exactly as they were, and you confirm each step.</p></div></div>
       </div>
       <div class="faq-item">
-        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa5" id="fq5"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>What exactly is the chat genie?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa5" role="region" aria-labelledby="fq5"><div class="faq-a-in"><p>Type a wish in chat and it writes the Minecraft commands, runs them over RCON, and then reads the world back to check they actually worked. It watches the server's own replies and reports commands Minecraft rejected instead of claiming success. If it couldn't do the thing, it says so. It needs a Claude subscription token or an Anthropic API key, and it's off until you add one.</p></div></div>
+        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa5" id="fq5"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>What is the chat genie?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
+        <div class="faq-a" id="fa5" role="region" aria-labelledby="fq5"><div class="faq-a-in"><p>Players on its list type <code>server</code> and a request in chat. It writes the Minecraft commands, runs them over RCON, then reads the world back to check they worked. If Minecraft rejected a command, it tells you. It needs a Claude subscription token or an Anthropic API key, and it's off until you add one.</p></div></div>
       </div>
       <div class="faq-item">
-        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa6" id="fq6"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Which versions and loaders, really?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa6" role="region" aria-labelledby="fq6"><div class="faq-a-in"><p>Spawnpoint creates Fabric 1.21.1, Forge 1.20.1 and NeoForge 1.21.1 servers itself, from pinned, hash-checked installers. Through Crafty Controller it manages Vanilla, Paper, Purpur, Fabric, Quilt, Forge and NeoForge from 1.20.1 through 26.2. The panel branches wherever Minecraft did: item NBT before 1.20.5 and components after, the structure folder that was renamed in 1.21, the Java version each loader will and won't tolerate. Mod testing covers Fabric, Forge and NeoForge servers, including the client test.</p></div></div>
+        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa6" id="fq6"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Which versions and loaders?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
+        <div class="faq-a" id="fa6" role="region" aria-labelledby="fq6"><div class="faq-a-in"><p>Spawnpoint creates Fabric 1.21.1, Forge 1.20.1 and NeoForge 1.21.1 servers itself, from pinned, hash-checked installers. Through Crafty Controller it manages Vanilla, Paper, Purpur, Fabric, Quilt, Forge and NeoForge from 1.20.1 through 26.2. It handles the version differences, such as item NBT before 1.20.5 and components after, the structure folder renamed in 1.21, and the Java version each loader accepts. Mod testing covers Fabric, Forge and NeoForge servers, including the client test.</p></div></div>
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa7" id="fq7"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Do my friends pay anything?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa7" role="region" aria-labelledby="fq7"><div class="faq-a-in"><p>Nobody pays anything, ever. There are no slots to buy; RAM is the main limit. Rough guide: 4 GB carries about ten vanilla players, and a heavy modpack wants roughly three times the headroom per person.</p></div></div>
+        <div class="faq-a" id="fa7" role="region" aria-labelledby="fq7"><div class="faq-a-in"><p>No. There are no slots to buy; RAM is the main limit. Rough guide: 4 GB carries about ten vanilla players, and a heavy modpack wants roughly three times the headroom per person.</p></div></div>
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa8" id="fq8"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>Does my PC have to stay on?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa8" role="region" aria-labelledby="fq8"><div class="faq-a-in"><p>Yes. It is the server. That is the honest trade for owning it outright, and it's the one thing a rented host does better. Most people leave the machine on and let it idle: a stopped server costs nothing, and a running one is mostly waiting. Schedule a nightly restart from the panel and forget it exists.</p></div></div>
+        <div class="faq-a" id="fa8" role="region" aria-labelledby="fq8"><div class="faq-a-in"><p>Yes, it's the server. That's the main thing a rented host does better. A stopped server uses almost nothing, and an idle one mostly waits. You can schedule a nightly restart from the panel.</p></div></div>
+      </div>
+      <div class="faq-item">
+        <h3><button class="faq-q" aria-expanded="false" aria-controls="fa10" id="fq10"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>How often do mods really change?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
+        <div class="faq-a" id="fa10" role="region" aria-labelledby="fq10"><div class="faq-a-in"><p>It depends on the pack. Mods update on their own schedules, and friends ask for one more. If your pack never changes, you won't need the tests much. When it does, the update that stops the server booting or keeps everyone from joining is the one they catch.</p></div></div>
       </div>
       <div class="faq-item">
         <h3><button class="faq-q" aria-expanded="false" aria-controls="fa9" id="fq9"><svg class="pi torch" aria-hidden="true"><use href="#i-torch"/></svg><span>What happens when a mod breaks the pack?</span><svg class="pi tgl" aria-hidden="true"><use href="#i-plus"/></svg></button></h3>
-        <div class="faq-a" id="fa9" role="region" aria-labelledby="fq9"><div class="faq-a-in"><p>The change doesn't go live. The server boots it in a sandbox first, and on AutoModpack servers a real client boots the pack and joins a throwaway server with the same mods. A change that fails is discarded and your live mods stay as they were. If a test can't run or the result is unclear, the change waits for you with the reason. And <b>Undo last change</b> puts back whatever the last change replaced.</p></div></div>
+        <div class="faq-a" id="fa9" role="region" aria-labelledby="fq9"><div class="faq-a-in"><p>The change doesn't go live. The server boots it in a sandbox first, and on AutoModpack servers a real client boots the pack and joins a throwaway server with the same mods. A change that fails is discarded and your live mods stay as they were. If a test can't run or the result is unclear, the change waits for you with the reason. <b>Undo last change</b> puts back whatever the last change replaced.</p></div></div>
       </div>
     </div>
   </div>
@@ -453,7 +462,7 @@
   <div class="wrap final-cta">
     <p class="depth-tag">Y -64 · BEDROCK</p>
     <h2 data-rv>You've hit bedrock.</h2>
-    <p class="band-lede" data-rv style="--d:.08s">Nothing below here but the void. The only way left is to build up, on a machine that's already humming away in the next room.</p>
+    <p class="band-lede" data-rv style="--d:.08s">Install it on a machine you already have. It's one command on Linux or macOS.</p>
     <div class="cta-row" data-rv style="--d:.14s">
       <a class="btn btn-emerald btn-lg" href="https://github.com/vayungodara/spawnpoint" rel="noopener" data-burst>Install Spawnpoint</a>
     </div>
@@ -464,7 +473,7 @@
     <div class="wrap foot-grid">
       <div class="foot-brand">
         <a class="logo" href="#spawn"><svg class="pi pi-logo" aria-hidden="true"><use href="#i-flag"/></svg><span>SPAWNPOINT</span></a>
-        <p>A control panel for people who'd rather own the box. Built on a Minecraft server that actually gets played on.</p>
+        <p>A self-hosted Minecraft server panel that tests mod changes before they go live.</p>
         <ul class="socials">
           <li><a href="https://github.com/vayungodara/spawnpoint" rel="noopener">GitHub ↗</a></li>
         </ul>
@@ -480,7 +489,7 @@
       </nav>
     </div>
     <div class="wrap foot-legal">
-      <p>© 2026 Spawnpoint. Free to run, yours to keep. Runs on your hardware, phones home to nobody.</p>
+      <p>© 2026 Spawnpoint. MIT licensed.</p>
       <p class="mojang">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.</p>
     </div>
   </footer>

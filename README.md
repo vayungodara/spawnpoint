@@ -1,7 +1,11 @@
 <h1 align="center">Spawnpoint</h1>
 
 <p align="center">
-  <b>Add mods to your Minecraft server, test them on a copy first, and give your friends exactly the version that passed.</b>
+  <b>A self-hosted Minecraft server panel that tests mod changes on a copy of your server before your friends get them.</b>
+</p>
+
+<p align="center">
+  For people who run a modded server for friends on a spare machine, a home server or a cheap VPS.
 </p>
 
 <p align="center">
@@ -13,11 +17,11 @@
 </p>
 
 <p align="center">
-  <a href="https://spawnpoint.vayun.net/media/tour.mp4"><img src="docs/screenshots/tour.webp" width="820" alt="Spawnpoint: Add mods. Test them on a copy. Then let friends in. Watch the 90-second tour."></a>
+  <a href="https://spawnpoint.vayun.net/media/tour.mp4"><img src="docs/screenshots/tour.webp" width="820" alt="Spawnpoint tour: one mod update can lock everyone out. Watch a mod get tested on a copy before it goes live."></a>
 </p>
 
 <p align="center">
-  <a href="https://spawnpoint.vayun.net/media/tour.mp4"><b>Watch the 90-second tour</b></a>
+  <a href="https://spawnpoint.vayun.net/media/tour.mp4"><b>Watch the one-minute tour</b></a>
   ·
   <a href="https://spawnpoint.vayun.net">Website</a>
   ·
@@ -25,7 +29,7 @@
   ·
   <a href="#documentation">Docs</a>
   <br>
-  <sub>Recorded on a real server: create it, add a mod, approve, go live, a friend joins.</sub>
+  <sub>Recorded on a real server: add a mod, test it on a copy, go live. Waits are sped up.</sub>
 </p>
 
 ## Quick start
@@ -56,32 +60,45 @@ Windows, manual installs and updating are in [docs/install.md](docs/install.md).
 
 ## Why Spawnpoint
 
-Adding a mod to a modded server usually means changing the live server,
-restarting, and hoping everyone can still join. Spawnpoint tries the change
-on a copy first. It checks the whole pack's dependencies, boots a copy of
-the server, and on AutoModpack servers starts a real Minecraft client that
-joins it. Your live server and your friends' pack only change after the
-test passes, or after you've approved what couldn't be tested.
+I run a modded server for friends. Most mod updates are fine. Every so
+often one stops the server from booting, or lets it boot but keeps everyone
+from joining, and I'd find out when someone messaged me.
+
+Spawnpoint tries each change on a copy first. It checks the whole pack's
+dependencies, boots a copy of the server, and on AutoModpack servers starts
+a real Minecraft client that joins it. Your live server and your friends'
+pack only change after the test passes, or after you approve what couldn't
+be tested.
 
 On my Linux server it reached health OK in 0.56 s, using about 60 MB
 (panel only, game servers stopped).
 
-- **Mods and plugins from Modrinth and CurseForge.** Dependencies are
-  resolved for the whole pack, keeping your existing versions where
+### Is this for me?
+
+It's for a server that should be up when your friends want to play, on a
+machine that can stay on: a spare PC, a home server or a cheap VPS.
+Servers can stop on their own after a while with nobody online. If you only
+play while you're online yourself, hosting from your own PC or using
+[e4mc](https://modrinth.com/mod/e4mc) is simpler.
+
+### What it does
+
+- Installs mods and plugins from Modrinth and CurseForge, resolving
+  dependencies for the whole pack and keeping your existing versions where
   possible.
-- **Mod changes tested on a copy.** A server boot, then a real client that
-  joins with the files your friends would get (Fabric, Forge and NeoForge;
-  see [supported servers](#supported-servers)).
-- **Friends stay in sync.**
-  [AutoModpack](https://modrinth.com/mod/automodpack) means they install
-  one starter pack once and get every later change when they join.
-- **See what was tested.** Each change shows what passed, failed, was
-  skipped or is uncertain. *Undo last change* puts back the files a change
-  replaced, for the last five changes.
-- **Servers keep running when the panel stops.** A separate OS service owns
+- Tests each mod change with a server boot and, on AutoModpack servers, a
+  real client that joins with the files your friends would get (Fabric,
+  Forge and NeoForge; see [supported servers](#supported-servers)).
+- Keeps friends in sync with
+  [AutoModpack](https://modrinth.com/mod/automodpack): they install one
+  starter pack once and get every later change when they join.
+- Shows what passed, failed, was skipped or is uncertain for each change.
+  *Undo last change* puts back the files a change replaced, for the last
+  five changes.
+- Keeps servers running when the panel stops. A separate OS service owns
   Java and the console on Linux, macOS and Windows.
-- **Already on Crafty Controller?** Keep using it, or import stopped servers
-  one at a time.
+- Works alongside Crafty Controller, or imports stopped Crafty servers one
+  at a time.
 
 Also included: new servers from modpacks, a config editor, world slots,
 nightly world backups (only when the world changed; newest three kept), a
@@ -148,6 +165,13 @@ Launch recipes and AutoModpack requirements: [docs/recipes.md](docs/recipes.md).
   8 GB for the join test, depending on the mods. Tests wait instead of
   starving the live server.
 - Optional: Crafty Controller on the same machine
+
+## Letting friends in
+
+Friends on your network join at the address the panel shows. Friends
+outside your home need the game port forwarded on your router, or a free
+tunnel such as [playit.gg](https://playit.gg) if you can't forward ports
+(for example behind CGNAT). Spawnpoint doesn't set either up for you.
 
 ## Remote access
 

@@ -231,7 +231,8 @@ function InviteCard({ s }: { s: ServerInfo }) {
         </div>
       )}
       {msg && <p role="status" className="text-xs font-semibold pop-in">{msg}</p>}
-      <p className="text-xs text-text-dim">Only forward the game port. Keep this panel on your LAN or a VPN.</p>
+      <p className="text-sm">Friends outside your home need the game port forwarded on your router, or a free tunnel such as <a href="https://playit.gg" target="_blank" rel="noopener" className="underline underline-offset-2">playit.gg</a>.</p>
+      <p className="text-xs text-text-dim">Forward only the game port. Keep this panel on your LAN or a VPN.</p>
     </section>
   )
 }
