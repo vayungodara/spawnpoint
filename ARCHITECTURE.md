@@ -35,6 +35,18 @@ writes from another origin and rejects any `/api/servers/:id` request whose
 id is not a UUID, since ids become folder paths. File routes resolve real
 paths and refuse anything outside the server folder.
 
+Scoped API tokens (`data/api-tokens.json`, SHA-256 hashes only) let the
+`spawnpoint` CLI and agents work without the admin token. The same hook maps
+each matched route to a scope: reads need `read`, writes need `control`, and
+file-content reads need `control` too, except plain, unlinked files in
+`logs/` and `crash-reports/`. HEAD is judged as GET. Approval, undo, world
+restore and reset, version switches, player-data resets and backup deletion
+need `approve`. Token management, PIN and credential changes, server
+deletion, Crafty import and panel exit stay owner-only. Test JVMs run as
+the panel's user, so control and approve are host-trusted; only `read` is
+safe for an untrusted machine. `cli/` is a dependency-free
+client over these routes; its `mcp` mode exposes the same commands.
+
 The setup wizard is open until the panel has a connected runtime and a PIN.
 Standalone setup checks supervisor health without creating a Crafty token.
 The wizard write routes need the setup code printed by the installer and panel log.

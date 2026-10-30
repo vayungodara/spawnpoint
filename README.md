@@ -159,6 +159,8 @@ steps: [docs/remote-access.md](docs/remote-access.md).
   session or the admin token. There is no trusted local address.
 - Forward only the game port. The panel turns on RCON at the game port plus
   10000 with a random password, and Minecraft binds it to every interface.
+- Coding agents and other machines use the `spawnpoint` CLI with a scoped,
+  revocable token from **Panel settings → API tokens**.
 
 Details, including the admin token and the chat genie's limits:
 [docs/security.md](docs/security.md).
@@ -173,6 +175,7 @@ Details, including the admin token and the chat genie's limits:
 | [The supervisor](docs/supervisor.md) | The OS service on Linux, macOS and Windows |
 | [Crafty Controller](docs/crafty-import.md) | Keeping Crafty or importing servers from it |
 | [Remote access](docs/remote-access.md) | Phones and remote use over Tailscale |
+| [The spawnpoint CLI](docs/cli.md) | Control servers from a terminal or a coding agent, API tokens, MCP |
 | [Security](docs/security.md) | Auth, RCON, the admin token, the chat genie |
 | [Architecture](ARCHITECTURE.md) | How the parts fit together |
 

@@ -12,6 +12,7 @@ Run `npm ci` and `npm run build`, then:
 ```sh
 node .github/smoke-boot.mjs
 node .github/wizard-e2e.mjs
+node .github/cli-test.mjs
 node .github/native-runtime.mjs
 node .github/revision-guard.mjs
 node .github/publication-guard.mjs

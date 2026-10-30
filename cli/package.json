@@ -1,0 +1,22 @@
+{
+  "name": "spawnpoint-cli",
+  "version": "0.1.0",
+  "description": "Command-line and MCP client for the Spawnpoint Minecraft panel",
+  "type": "module",
+  "bin": {
+    "spawnpoint": "spawnpoint.mjs"
+  },
+  "files": [
+    "spawnpoint.mjs",
+    "mcp.mjs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vayungodara/spawnpoint",
+    "directory": "cli"
+  }
+}

@@ -35,6 +35,15 @@ Scripts on the panel machine can use the admin token in
 curl -H "Authorization: Bearer $(cat ~/minecraft/Spawnpoint/data/admin-token)" localhost:25570/api/servers
 ```
 
+## API tokens
+
+Coding agents and other machines should use a scoped token from **Panel
+settings → API tokens**, not the admin token. Read tokens see status, logs
+and test results. Control tokens can start and stop servers, edit files and
+stage mod changes. Approve tokens can also approve changes, undo and restore
+worlds as you. Mods are code, so treat control and approve tokens like shell
+access. See [cli.md](cli.md).
+
 ## Supervisor IPC
 
 The supervisor's runtime directory contains a private IPC capability. Never

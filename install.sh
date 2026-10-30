@@ -56,6 +56,14 @@ npm ci
 say "building the panel"
 npm run build
 
+# ---- CLI -------------------------------------------------------------------
+# `spawnpoint` for terminals and coding agents. On this machine it reads the
+# admin token from the layout, so it needs no login.
+BIN="$HOME/.local/bin"
+mkdir -p "$BIN" && ln -sf "$DIR/cli/spawnpoint.mjs" "$BIN/spawnpoint"
+SPAWNPOINT_ROOT="$ROOT" node -e "const p=require('path'),fs=require('fs'),f=p.join(process.env.XDG_CONFIG_HOME||p.join(require('os').homedir(),'.config'),'spawnpoint','cli.json');let c={};try{c=JSON.parse(fs.readFileSync(f,'utf8'))}catch{}c.root=process.env.SPAWNPOINT_ROOT;fs.mkdirSync(p.dirname(f),{recursive:true});fs.writeFileSync(f,JSON.stringify(c,null,2),{mode:0o600})"
+case ":$PATH:" in *":$BIN:"*) ;; *) say "note: add $BIN to your PATH to use the spawnpoint command";; esac
+
 # Fresh installations use the independent owner. Existing Crafty connections
 # keep their backend; a service install must not transfer server ownership.
 RUNTIME="${SPAWNPOINT_RUNTIME:-standalone}"
@@ -119,6 +127,7 @@ for _ in $(seq 1 30); do
       say "  render on this headless machine. Without it, rendering is not tested."
     fi
     say ""
+    say "  CLI:           spawnpoint status   (for coding agents: spawnpoint help --agent)"
     say "  stop panel:    kill $PANEL_PID (Minecraft keeps running in its owner service)"
     say "  start panel:   SPAWNPOINT_ROOT=\"$ROOT\" node \"$DIR/server/dist/index.js\""
     say "  (tip: wrap that start command in a systemd unit or login item to run on boot)"
