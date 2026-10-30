@@ -4,6 +4,8 @@ set -euo pipefail
 # Reproducible Linux integration prerequisites. Authentication and test worlds
 # are deliberately not snapshotted; see AGENTS.md for the disposable fixture.
 cd "$(dirname "$0")/.."
+# Keeps Amp thread trailers and Claude credit out of commits (AGENTS.md).
+git config core.hooksPath .githooks
 packages=()
 for pair in docker:docker.io xvfb-run:xvfb rsync:rsync zip:zip unzip:unzip; do
   command -v "${pair%%:*}" >/dev/null || packages+=("${pair#*:}")

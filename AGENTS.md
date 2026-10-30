@@ -146,6 +146,22 @@ through #6 were closed on 2026-10-30, when main's history was rewritten to
 remove an old video. Ask the owner before merging or closing new Dependabot
 PRs.
 
+Commits in this repository must never credit Claude or Anthropic: no
+`Co-authored-by` trailer naming Claude or `noreply@anthropic.com`, no
+`Claude-Session` trailer, no "Generated with Claude Code" line, and no Claude
+author or committer. GitHub lists co-authors as repository contributors and
+keeps a removed one in the sidebar for days. Commits also carry no
+`Amp-Thread-ID` trailer. The Amp project sets
+`AMP_DISABLE_AMP_THREAD_TRAILER=1` for orbs, and `.agents/setup` points
+`core.hooksPath` at `.githooks`, whose `commit-msg` drops that trailer and
+refuses Claude or Anthropic credit. Where setup hasn't run, such as on a
+runner, run `git config core.hooksPath .githooks` once. Before pushing, this
+must print nothing:
+
+```sh
+git log --format=%B origin/main..HEAD | rg -i '^(co-authored-by:.*(claude|anthropic)|claude-session:|amp-thread-id:)|generated with \[?claude code'
+```
+
 There is no production panel in this repository to inspect after a code
 push. Rebuild and restart the disposable `sp` service, check `/api/health`,
 and verify the shipped lifecycle path there. A website check alone does not
