@@ -244,8 +244,12 @@ export function solveCandidate(
         return { rows, live, requests, changes, key: JSON.stringify({ rows, live, requests, changes, runtime }) };
       };
       const before = await snapshot();
+      const primary = (path: string): string | undefined => modIds(det.loader === 'fabric' ? readFabricJar(readFileSync(path))
+        : readForgeJar(readFileSync(path), basename(path), { mc: det.mc!, forge: loader, loader: det.loader as 'forge' | 'neoforge' }))[0];
+      // An owner's "keep newest" removes another version of the same native mod.
       const duplicate = (row: typeof before.rows[number]): boolean => before.changes.some((f) => f.remove && f.file === basename(row.path)
-        && f.duplicateOf && before.rows.some((keep) => basename(keep.path) === f.duplicateOf && keep.sha512 === row.sha512));
+        && f.duplicateOf && before.rows.some((keep) => basename(keep.path) === f.duplicateOf
+          && (keep.sha512 === row.sha512 || (!!primary(row.path) && primary(keep.path) === primary(row.path)))));
       const output = await promisify(execFile)(java, ['-version'], { timeout: 5_000 });
       const javaVersion = /version "([^"]+)"/.exec(output.stderr + output.stdout)?.[1];
       if (!javaVersion) throw new Error('Java did not report its runtime version');

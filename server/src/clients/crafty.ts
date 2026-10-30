@@ -1,6 +1,6 @@
 import { craftyApi as legacy, type CraftyServer, type CraftyStats } from './crafty-adapter.js';
 import { loadSettings } from '../config.js';
-import { nativeRecord, nativeRecords, supervisor, transferRecord, transferRecords } from '../services/native.js';
+import { giveToSupervisor, nativeRecord, nativeRecords, serviceAccount, supervisor, transferRecord, transferRecords } from '../services/native.js';
 
 // Preserve the existing callers' data contract while ownership moves one
 // server at a time. A native outage NEVER falls back to the old owner.
@@ -70,6 +70,8 @@ export const craftyApi = {
   action: async (id: string, action: 'start_server' | 'stop_server' | 'restart_server' | 'kill_server' | 'accept_eula') => {
     if (transferRecord(id) && action !== 'stop_server' && action !== 'kill_server') throw new Error('ownership transfer requires completion or abort before starting');
     if (!nativeRecord(id)) return legacy.action(id, action);
+    // Earlier root-panel writes must never strand the server's own account.
+    if (action === 'start_server' || action === 'restart_server') giveToSupervisor(nativeRecord(id)!.path, await serviceAccount());
     const result = await supervisor('action', { id, action });
     nativeStats.delete(id);
     // The watcher registers the new boot attempt, not a restart request while

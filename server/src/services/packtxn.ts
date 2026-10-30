@@ -210,6 +210,29 @@ function arm(id: string, log: (m: string) => void): void {
   timers.set(id, setTimeout(() => { timers.delete(id); void run(id, log); }, QUIET_MS));
 }
 
+/** Skip the quiet period: the owner asked for exactly this test. */
+export function testNow(id: string, log: (m: string) => void): void {
+  if (candidate(id)?.status !== 'collecting') return;
+  clearTimeout(timers.get(id));
+  timers.delete(id);
+  void run(id, log);
+}
+
+/** One owner action for a server with no tested version yet: approve the
+    launch guard and managed publication, optionally keep the newest of each
+    duplicate mod, and test the whole live pack as its first version. */
+export async function createFirstVersion(id: string, keepNewestDuplicates: boolean, log: (m: string) => void): Promise<Candidate | null> {
+  if (revisionState(id).active) throw new Error('this server already has a tested version');
+  if (!revisionState(id).managedHosting) await installLaunchGuard(id);
+  const { keepNewest } = await import('./repairs.js');
+  const staged = keepNewestDuplicates ? keepNewest(id, log) : 0;
+  const c = candidate(id);
+  if (!isOpen(c) && !staged) stage(id, [], log);
+  else if (c?.status === 'needs-approval' || c?.status === 'ready') retest(id, log);
+  testNow(id, log);
+  return candidate(id);
+}
+
 /** Apply a candidate whose tests could not run, on the owner's say-so. */
 export async function approve(id: string, log: (m: string) => void, consent = false, expectedRevision?: string, by?: string): Promise<Candidate | null> {
   const c = candidate(id);
@@ -582,8 +605,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       // servers test it with a real client
       let client: Verdict | undefined;
       if (autoModpackActive(id)) {
-        const changed = candidate(id)!.files.map((f) => f.file);
-        client = await clientGate(id, { files: set.client, serverJars: set.serverJars, label: 'candidate', changed, sourceDir: sealed.sourceDir, lock: sealed.lock }, status, log);
+        client = await clientGate(id, { files: set.client, serverJars: set.serverJars, label: 'candidate', sourceDir: sealed.sourceDir, lock: sealed.lock }, status, log);
         reportRevision(id, revision, { tests: { client: { ...client, result: client.result === 'unverified' ? 'inconclusive' : client.result }, ...client.checks } });
         if (client.result === 'failed') {
           if (stale()) continue;
@@ -592,9 +614,9 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
           // failure repeats (mixin-heavy packs can crash at random)
           status('the client test failed; testing the current pack without this change');
           const live = sealedSet(id, baseline);
-          const before = await clientGate(id, { files: live.client, serverJars: live.serverJars, sourceDir: live.sourceDir, lock: live.lock, label: 'live', changed: [] }, status, log);
+          const before = await clientGate(id, { files: live.client, serverJars: live.serverJars, sourceDir: live.sourceDir, lock: live.lock, label: 'live' }, status, log);
           if (before.result === 'passed') status('the current pack passed; testing this change once more');
-          const again = before.result === 'passed' ? await clientGate(id, { files: set.client, serverJars: set.serverJars, sourceDir: sealed.sourceDir, lock: sealed.lock, label: 'candidate', changed }, status, log) : before;
+          const again = before.result === 'passed' ? await clientGate(id, { files: set.client, serverJars: set.serverJars, sourceDir: sealed.sourceDir, lock: sealed.lock, label: 'candidate' }, status, log) : before;
           if (stale()) continue;
           if (before.result === 'passed' && again.result === 'failed') return reject(id, server, again, log);
           // what the owner needs is what applying it would do: keep the candidate's own crash
@@ -630,11 +652,18 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
   }
 }
 
+function sameBytes(id: string, f: StagedFile): boolean {
+  if (f.replaces !== f.file) return false;
+  const live = join(f.to === 'mods' ? join(serverDir(id), 'mods') : clientShelfDir(id), f.file);
+  try { return readFileSync(live).equals(readFileSync(join(filesDir(id), f.file))); } catch { return false; }
+}
+
 /** Park a candidate for the owner: apply anyway, test again or discard. */
 function wait(id: string, verdicts: Pick<Candidate, 'server' | 'client'>, why: string, log: (m: string) => void): void {
   const c = candidate(id)!;
   const consent = revisionState(id).managedHosting ? [
-    ...c.files.filter((f) => f.path || f.replaces || f.remove).map((f) => f.path ? `${f.remove ? 'Remove config' : 'Write config'} ${f.path}` : f.remove ? `Remove ${f.file}` : `${f.replaces} → ${f.file}`),
+    // A reconciled source record for byte-identical live bytes is not a change to consent to.
+    ...c.files.filter((f) => f.path || f.remove || (f.replaces && !sameBytes(id, f))).map((f) => f.path ? `${f.remove ? 'Remove config' : 'Write config'} ${f.path}` : f.remove ? `Remove ${f.file}` : `${f.replaces} → ${f.file}`),
     ...c.repairs?.map((r) => `${r.kind}: ${r.detail}`) ?? [],
   ] : c.consent;
   save(id, { ...c, ...verdicts, consent, status: 'needs-approval', detail: why });

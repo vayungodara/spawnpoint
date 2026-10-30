@@ -18,7 +18,10 @@ import { maintenanceOf, busyReason, clearInterrupted, beginMaintenance, endMaint
 import { restartServer, startServer } from '../services/promote.js';
 import { nativeRecord, nativeRecords, supervisor, transferRecord } from '../services/native.js';
 import { nativeInstallJob } from '../services/nativeinstall.js';
-import { prepareCraftyImport, commitCraftyImport, abortCraftyImport } from '../services/nativeimport.js';
+import { prepareCraftyImport, commitCraftyImport, abortCraftyImport, singleServerMove, craftyOffline } from '../services/nativeimport.js';
+import { revisionState } from '../services/revisions.js';
+import { candidate } from '../services/packtxn.js';
+import { duplicateMods } from '../services/repairs.js';
 
 /** Wait for the JVM to actually let go of its jars, then apply what the player
  *  queued. Crafty reports "stopped" the moment the process exits, but Windows can
@@ -312,26 +315,46 @@ export default async function serverRoutes(app: FastifyInstance) {
     return { ok: true };
   });
   app.get<{ Params: { id: string } }>('/api/servers/:id/runtime', async (req) => {
-    const owned = nativeRecord(req.params.id), plan = transferRecord(req.params.id);
-    return { owner: owned ? 'standalone' : 'crafty', autoStart: owned?.auto_start, blocked: owned?.blocked,
-      transfer: plan ? { phase: plan.phase, revision: plan.revision } : null };
+    const id = req.params.id;
+    const owned = nativeRecord(id), plan = transferRecord(id);
+    if (owned && !plan) return { owner: 'standalone', autoStart: owned.auto_start, blocked: owned.blocked, transfer: null };
+    // Everything the import review needs in one poll: the tested version,
+    // its test, duplicate mods, and how this server can leave Crafty.
+    const state = revisionState(id), c = candidate(id), single = singleServerMove();
+    return {
+      owner: owned ? 'standalone' : 'crafty', transfer: plan ? { phase: plan.phase, revision: plan.revision } : null,
+      active: state.active ?? null, managedHosting: state.managedHosting === true,
+      // An observed pre-change baseline is locked, not tested: it only counts
+      // once a tested candidate for it is waiting or applied.
+      tested: !!state.active && (!state.active.endsWith('-baseline') || c?.status === 'ready' || c?.status === 'applied'),
+      candidate: c && { status: c.status, detail: c.detail, revision: c.revision, files: c.files.map((f) => ({ file: f.file, to: f.to, remove: f.remove, duplicateOf: f.duplicateOf })),
+        consent: c.consent, server: c.server && { result: c.server.result, detail: c.server.detail }, client: c.client && { result: c.client.result, detail: c.client.detail, checks: c.client.checks } },
+      duplicates: c && ['collecting', 'testing', 'needs-approval', 'ready'].includes(c.status) ? [] : duplicateMods(id),
+      move: single ? 'single' : 'all-crafty',
+      crafty: plan && !single ? await craftyOffline() : undefined,
+    };
   });
   app.put<{ Params: { id: string }; Body: { autoStart: boolean } }>('/api/servers/:id/runtime', async (req, reply) => {
     if (!nativeRecord(req.params.id) || typeof req.body?.autoStart !== 'boolean') return reply.code(400).send({ error: 'a native server and an explicit autostart choice are required' });
     await craftyApi.patchServer(req.params.id, { auto_start: req.body.autoStart });
     return { ok: true };
   });
-  app.post<{ Params: { id: string }; Body: { action: 'prepare' | 'commit' | 'abort'; revision?: string; approve?: boolean; craftyStopped?: boolean } }>(
+  app.post<{ Params: { id: string }; Body: { action: 'prepare' | 'commit' | 'move' | 'abort'; revision?: string; approve?: boolean; craftyStopped?: boolean } }>(
     '/api/servers/:id/runtime/import', async (req, reply) => {
       if (req.body?.approve !== true) return reply.code(409).send({ error: 'explicit ownership-transfer consent is required; worlds are never restored' });
-      if (req.body.action === 'commit' && req.body.craftyStopped !== true) return reply.code(409).send({ error: 'confirm the entire Crafty service or container and its workers have exited; a closed API port alone is not proof' });
       try {
         const id = req.params.id;
         if (req.body.action === 'prepare') return { ok: true, revision: (await prepareCraftyImport(id)).revision };
-        if (req.body.action === 'commit') await commitCraftyImport(id, req.body.revision ?? '');
-        else if (req.body.action === 'abort') await abortCraftyImport(id);
-        else return reply.code(400).send({ error: 'choose prepare, commit or abort' });
+        // One consented step when this server can move while Crafty keeps running.
+        if (req.body.action === 'move') {
+          const plan = await prepareCraftyImport(id);
+          if (plan.revision !== req.body.revision) throw new Error('the active revision changed since you reviewed it; review it again');
+          return { ok: true, ...await commitCraftyImport(id, plan.revision, req.body.craftyStopped === true) };
+        }
+        if (req.body.action === 'commit') return { ok: true, ...await commitCraftyImport(id, req.body.revision ?? '', req.body.craftyStopped === true) };
+        if (req.body.action === 'abort') await abortCraftyImport(id);
+        else return reply.code(400).send({ error: 'choose prepare, move, commit or abort' });
         return { ok: true };
-      } catch (error) { return reply.code(409).send({ error: String(error) }); }
+      } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
     });
 }

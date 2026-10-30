@@ -271,7 +271,7 @@ export async function sealRevision(id: string, revision: string, inputs: Revisio
 async function launchSpec(id: string, dir = serverDir(id), proposedJava?: string) {
   const det = detect(dir, id);
   const loader = loaderVersion(dir, det);
-  if (!det.mc || !loader) throw new Error('Minecraft and loader versions must be known before sealing a revision');
+  if (!det.mc || !loader) throw new Error('Spawnpoint cannot read this server’s Minecraft and loader versions yet. Start it once (in Crafty is fine), stop it, then try again.');
   if (det.loader !== 'fabric' && !(det.loader === 'forge' && det.mc === '1.20.1' && loader === '47.4.28')
     && !(det.loader === 'neoforge' && det.mc === '1.21.1' && loader === '21.1.219')) throw new Error('locked revisions support Fabric, Forge 1.20.1 / 47.4.28 and NeoForge 1.21.1 / 21.1.219');
   let command = (await craftyApi.getServer(id)).execution_command;

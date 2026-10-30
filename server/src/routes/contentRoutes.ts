@@ -15,7 +15,7 @@ import {
 import { detect } from '../services/detect.js';
 import { serverDir } from '../services/servers.js';
 import { publishPack, stageClientAsset, buildStarterPack, buildStarterPackCF } from '../services/automodpack.js';
-import { candidate, approve, discard, retest, liveChanged, lastChange, undoLast, recentRejections, clearRejections, assertCanStage } from '../services/packtxn.js';
+import { candidate, approve, createFirstVersion, testNow, discard, retest, liveChanged, lastChange, undoLast, recentRejections, clearRejections, assertCanStage } from '../services/packtxn.js';
 import { promotion, lastSeen, choose, cancelUndo } from '../services/promote.js';
 import { craftyApi } from '../clients/crafty.js';
 import { join } from 'node:path';
@@ -150,6 +150,13 @@ export default async function contentRoutes(app: FastifyInstance) {
     try { return { candidate: await approve(req.params.id, log, req.body?.consent === true, req.body?.revision, req.access?.by === 'api' ? `API token "${req.access.name}"` : undefined) }; }
     catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
   });
+  // Create the first tested version: the launch-guard consent and an optional
+  // keep-newest duplicate cleanup ride along in this one consented request.
+  app.post<{ Params: { id: string }; Body: { consent?: boolean; keepNewest?: boolean } }>('/api/servers/:id/revision/first', async (req, reply) => {
+    if (req.body?.consent !== true) return reply.code(409).send({ error: 'explicit owner consent is required' });
+    try { return { candidate: await createFirstVersion(req.params.id, req.body.keepNewest === true, log) }; }
+    catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+  });
   app.get<{ Params: { id: string }; Querystring: { path: string; revision: string } }>('/api/servers/:id/candidate/config', async (req, reply) => {
     const { id } = req.params;
     const c = candidate(id);
@@ -205,6 +212,7 @@ export default async function contentRoutes(app: FastifyInstance) {
   });
   app.post<{ Params: { id: string } }>('/api/servers/:id/candidate/retest', async (req) => {
     retest(req.params.id, log);
+    testNow(req.params.id, log); // the owner asked: no quiet period
     return { candidate: candidate(req.params.id) };
   });
   app.delete<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req, reply) => {

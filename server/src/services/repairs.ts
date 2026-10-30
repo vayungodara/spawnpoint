@@ -13,7 +13,8 @@ import { ledgerEntries } from './ledger.js';
 import { writeFileAtomic } from './platform.js';
 import { ensureJdk } from './temurin.js';
 import { NetworkCatalog } from './solver/catalog.js';
-import { readFabricJar } from './solver/fabric.js';
+import { compareFabricVersions, readFabricJar } from './solver/fabric.js';
+import { compareMavenVersions } from './solver/maven.js';
 import { readForgeJar } from './solver/forge.js';
 import { modIds } from './solver/index.js';
 
@@ -169,4 +170,49 @@ export async function repairCandidate(id: string, log: (m: string) => void, fail
     throw new Error(`wrong-loader: no identity-preserving compatible build was verified within the repair limits for ${row.file}`);
   }
   return false;
+}
+
+export interface DuplicateMod {
+  id: string;
+  name: string;
+  keep: { file: string; to: 'mods' | 'shelf'; version: string };
+  drop: { file: string; to: 'mods' | 'shelf'; version: string }[];
+}
+
+/** Top-level jars in mods/ and on the client shelf that are versions of one
+    native mod, newest first. Friends would receive both. Shared nested IDs
+    and provides aliases are not duplicates; unreadable jars are skipped. */
+export function duplicateMods(id: string): DuplicateMod[] {
+  const det = detect(serverDir(id), id);
+  const loader = loaderVersion(serverDir(id), det);
+  if (!det.mc || !loader || !['fabric', 'forge', 'neoforge'].includes(det.loader)) return [];
+  const set = candidateSet(id, { files: [] });
+  const jars = [...set.serverJars.map((path) => ({ path, to: 'mods' as const })),
+    ...set.client.filter((f) => f.rel.startsWith('mods/') && f.rel.endsWith('.jar') && !set.serverJars.includes(f.src)).map((f) => ({ path: f.src, to: 'shelf' as const }))];
+  const groups = new Map<string, { file: string; to: 'mods' | 'shelf'; version: string; name: string }[]>();
+  for (const jar of jars) {
+    try {
+      const meta = det.loader === 'fabric' ? readFabricJar(readFileSync(jar.path))
+        : readForgeJar(readFileSync(jar.path), basename(jar.path), { mc: det.mc, forge: loader, loader: det.loader as 'forge' | 'neoforge' });
+      const mod = modIds(meta)[0];
+      if (!mod) continue;
+      const version = 'loader' in meta ? meta.mods[0]?.version ?? meta.jarVersion : meta.version;
+      const name = ('name' in meta && meta.name) || mod;
+      groups.set(mod, [...groups.get(mod) ?? [], { file: basename(jar.path), to: jar.to, version, name }]);
+    } catch { /* unreadable: never guess */ }
+  }
+  const newer = (a: string, b: string): number => (det.loader === 'fabric' ? compareFabricVersions(b, a) : compareMavenVersions(b, a))
+    ?? b.localeCompare(a, undefined, { numeric: true });
+  return [...groups].filter(([, list]) => list.length > 1).map(([mod, list]) => {
+    const [keep, ...drop] = list.sort((a, b) => newer(a.version, b.version) || a.file.localeCompare(b.file));
+    return { id: mod, name: keep.name, keep: { file: keep.file, to: keep.to, version: keep.version }, drop: drop.map(({ name: _, ...d }) => d) };
+  });
+}
+
+/** Stage removal of every older duplicate; the normal tested flow and
+    exact-revision consent apply before anything live changes. */
+export function keepNewest(id: string, log: (m: string) => void): number {
+  const drops = duplicateMods(id).flatMap((d) => d.drop.map((x): StagedFile => ({ file: x.file, to: x.to, remove: true, duplicateOf: d.keep.file })));
+  if (drops.length) stage(id, drops, log);
+  return drops.length;
 }

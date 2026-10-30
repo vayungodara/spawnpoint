@@ -1,10 +1,11 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { renameSync, statSync, copyFileSync, constants, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { renameSync, statSync, lchownSync, openSync, closeSync, fchownSync, copyFileSync, constants, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { freemem } from 'node:os';
 import { cp, rm } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const run = promisify(execFile);
 
@@ -12,13 +13,38 @@ const run = promisify(execFile);
 // Windows; coreutils on Linux and macOS) lives behind a helper here, so the
 // rest of the panel is platform-neutral.
 export const IS_WIN = process.platform === 'win32';
+/** A root panel writes for other accounts: Crafty's user, or the supervisor's. */
+export const ROOT_PANEL = !IS_WIN && process.getuid?.() === 0;
+
+/** As root, give trees to uid:gid without following links (supervisor.py
+    --give walks through open directory descriptors). Inodes are kept: the
+    runtime fence must never be replaced. */
+export function giveTree(uid: number, gid: number, ...paths: string[]): void {
+  const script = fileURLToPath(new URL('./supervisor.py', import.meta.url));
+  const out = spawnSync('python3', [script, '--give', String(uid), String(gid), ...paths], { encoding: 'utf8', timeout: 300_000 });
+  if (out.status !== 0) throw new Error(`could not hand the files over: ${(out.stderr || out.error?.message || '').trim().split('\n').pop()}`);
+}
+
+/** As root, new directories take the owner of the directory they are made in. */
+function inheritDirs(made: string | undefined, last: string): { uid: number; gid: number } | null {
+  if (!ROOT_PANEL) return null;
+  const { uid, gid } = statSync(made ? dirname(made) : last);
+  if (uid === 0) return null;
+  if (made) for (let p = last; ; p = dirname(p)) { lchownSync(p, uid, gid); if (p === made || p === dirname(p)) break; }
+  return { uid, gid };
+}
 
 /** Replace a file in one rename, so a crash leaves the old file or the new
     one, never half of one. Concurrent writers each get a private part file. */
 export function writeFileAtomic(path: string, data: string | Buffer): void {
-  mkdirSync(dirname(path), { recursive: true });
+  const owner = inheritDirs(mkdirSync(dirname(path), { recursive: true }), dirname(path));
   const part = `${path}.${randomBytes(4).toString('hex')}.part`;
-  writeFileSync(part, data);
+  // Own the new file through its descriptor, never by a path a tree owner could swap.
+  const fd = openSync(part, 'wx', 0o644);
+  try {
+    writeFileSync(fd, data);
+    if (owner) fchownSync(fd, owner.uid, owner.gid);
+  } finally { closeSync(fd); }
   renameSync(part, path);
 }
 

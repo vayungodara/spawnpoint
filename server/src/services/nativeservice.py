@@ -188,9 +188,90 @@ def install(root, node, system, user):
     raise RuntimeError("installed service did not become ready; inspect its service log before starting the panel")
 
 
+PANEL_UNIT = Path("/etc/systemd/system/spawnpoint.service")
+
+
+def give(path, uid, gid):
+    """Hand a tree over without following links; secrets keep their 0600/0700 modes."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from supervisor import give_tree
+    give_tree(str(path), uid, gid)
+
+
+def install_panel(root, node, user, keep_crafty):
+    """Run the panel as an unprivileged Linux account in a system unit. An
+    existing root unit is migrated in place; Minecraft keeps running in its
+    owner service and Crafty while the panel restarts."""
+    import pwd
+    if sys.platform != "linux" or os.geteuid() != 0:
+        raise ValueError("run this with sudo on Linux")
+    account = pwd.getpwnam(user)
+    if account.pw_uid == 0:
+        raise ValueError("choose an unprivileged account; the panel would otherwise stay root")
+    checkout = Path(__file__).resolve().parents[3]
+    data = root / "Spawnpoint/data"
+    servers = root / "Crafty/servers"
+    stranded = sorted(p.name for p in servers.iterdir() if p.is_dir() and p.stat().st_uid != account.pw_uid) if servers.is_dir() else []
+    runtime = data / "runtime"
+    if runtime.exists() and runtime.stat().st_uid != account.pw_uid:
+        raise ValueError("the supervisor runs as " + pwd.getpwuid(runtime.stat().st_uid).pw_name + "; run the panel as that same account")
+    if stranded and not keep_crafty:
+        raise ValueError(str(len(stranded)) + " Crafty server folders belong to another account (" + ", ".join(stranded[:3]) + ("…" if len(stranded) > 3 else "")
+                         + "). Import them first while the panel is root, or pass --keep-crafty-servers to leave their files read-only to the panel.")
+    old = PANEL_UNIT.read_text(encoding="utf-8") if PANEL_UNIT.exists() else ""
+    port = json.loads((data / "settings.json").read_text(encoding="utf-8-sig")).get("port", 25570) if (data / "settings.json").exists() else 25570
+    if old and subprocess.run(["systemctl", "is-active", "--quiet", "spawnpoint.service"]).returncode == 0:
+        # Ask first: the panel refuses to exit mid-test, mid-wish or mid-creation.
+        token = (data / "admin-token").read_text(encoding="utf-8").strip()
+        request = urllib.request.Request("http://127.0.0.1:" + str(port) + "/api/admin/exit", data=b"{}", method="POST",
+                                         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        try:
+            urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=10).close()
+        except urllib.error.HTTPError as error:
+            raise ValueError("the panel is busy (" + error.read().decode("utf-8", "replace")[:200] + "); retry when it finishes") from None
+        run("systemctl", "stop", "spawnpoint.service")
+    quote = lambda value: json.dumps(str(value)).replace("%", "%%")
+    lines = old.splitlines()
+    unit = ["[Unit]", "Description=Spawnpoint panel", "After=network-online.target spawnpoint-supervisor.service",
+            *[line for line in lines if line.startswith(("After=", "Wants=", "Requires="))], "",
+            "[Service]", "Type=simple", "User=" + user, "Group=" + str(account.pw_gid),
+            *[line for line in lines if line.startswith("EnvironmentFile=")],
+            "Environment=" + quote("SPAWNPOINT_ROOT=" + str(root)), "WorkingDirectory=" + str(checkout),
+            "ExecStart=" + quote(node) + " server/dist/index.js", "Restart=always", "RestartSec=5", "NoNewPrivileges=true", "",
+            "[Install]", "WantedBy=multi-user.target", ""]
+    if old:
+        Path(str(PANEL_UNIT) + ".root-backup").write_text(old, encoding="utf-8")
+    PANEL_UNIT.write_text("\n".join(unit), encoding="utf-8")
+    # Root must never execute code the account can rewrite: the unprivileged
+    # unit is loaded before the checkout and data change hands.
+    run("systemctl", "daemon-reload")
+    # The panel's own state, shared tools and backups. Crafty's tree stays Crafty's.
+    os.lchown(root, account.pw_uid, account.pw_gid)
+    for path in [checkout, root / "Spawnpoint", root / "Shared", root / "Tools", root / "Backups", root / "Servers"]:
+        if path.exists():
+            give(path, account.pw_uid, account.pw_gid)
+    if data.exists():
+        data.chmod(0o700)
+    run("systemctl", "enable", "spawnpoint.service")
+    run("systemctl", "restart", "spawnpoint.service")
+    for _ in range(60):
+        try:
+            pid = int(subprocess.check_output(["systemctl", "show", "--property=MainPID", "--value", "spawnpoint.service"], text=True))
+            if pid and os.stat("/proc/" + str(pid)).st_uid == account.pw_uid:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open("http://127.0.0.1:" + str(port) + "/api/health", timeout=2) as response:
+                    if response.status == 200:
+                        print("Spawnpoint panel runs as " + user + (" (previous unit kept as " + str(PANEL_UNIT) + ".root-backup)" if old else ""))
+                        return
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        time.sleep(1)
+    raise RuntimeError("the panel did not become healthy as " + user + "; inspect journalctl -u spawnpoint.service")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["install", "run"])
+    parser.add_argument("action", choices=["install", "run", "panel"])
+    parser.add_argument("--keep-crafty-servers", action="store_true")
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--node", type=Path, default=Path(shutil.which("node") or "node"))
     parser.add_argument("--system", action="store_true")
@@ -200,5 +281,9 @@ if __name__ == "__main__":
         if os.name != "nt":
             raise ValueError("run is the Windows SCM entrypoint; Unix services invoke supervisor.py")
         windows_service(args.root.resolve(), args.node.resolve())
+    elif args.action == "panel":
+        if not args.user:
+            raise ValueError("--user names the account the panel will run as")
+        install_panel(args.root.resolve(), args.node.resolve(), args.user, args.keep_crafty_servers)
     else:
         install(args.root.resolve(), args.node.resolve(), args.system, args.user)

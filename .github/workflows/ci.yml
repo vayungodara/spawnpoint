@@ -43,6 +43,12 @@ jobs:
       - run: node .github/native-runtime.mjs --service
       # The same shipped gate must hash exact UTF-8 bytes and fence starts
       # against a running JVM or stopped revision mutation on all three OSes.
+      # A root panel hands a Crafty-owned server to an unprivileged
+      # supervisor account; every path a start writes must then be its own.
+      - if: runner.os == 'Linux'
+        run: sudo -E env "PATH=$PATH" node .github/ownership-handover.mjs
+      # Rendering passes only on a named GL/Vulkan device, never a stub.
+      - run: node .github/client-evidence.mjs
       - run: node .github/revision-guard.mjs
       - run: node .github/publication-guard.mjs
       # Solver metadata and the public installer contract run offline with

@@ -28,7 +28,8 @@ import { resumePromotions } from './services/promote.js';
 import { listJobs } from './services/servercreate.js';
 import { isServerId } from './services/servers.js';
 import { craftyApi } from './clients/crafty.js';
-import { startNativeWatcher } from './services/native.js';
+import { giveToSupervisor, nativeRecords, serviceAccount, startNativeWatcher } from './services/native.js';
+import { thawAbandonedCrafty } from './services/nativeimport.js';
 
 declare module 'fastify' {
   interface FastifyRequest { access?: Access }
@@ -138,6 +139,15 @@ startCraftyDoctor(log);
 await resumeCandidates(log);
 await resumePromotions(log);
 startNativeWatcher(log);
+thawAbandonedCrafty();
+// A root panel's earlier writes must not strand the supervisor's account
+// before an owner-side autostart that never passes through the panel.
+void (async () => {
+  try {
+    const account = await serviceAccount();
+    for (const record of nativeRecords()) giveToSupervisor(record.path, account);
+  } catch { /* supervisor offline: the next panel start repeats this */ }
+})();
 // pre-fill the joinability cache so a panel restart doesn't flash running servers as "starting"
 setTimeout(() => {
   void import('./services/phase.js').then(({ warmPhaseCache }) =>

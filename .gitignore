@@ -12,3 +12,4 @@ autostart/
 .amp/in/
 CLAUDE.md
 .wrangler/
+__pycache__/

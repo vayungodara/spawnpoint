@@ -14,6 +14,7 @@ import secrets
 import shlex
 import signal
 import socketserver
+import stat
 import subprocess
 import sys
 import threading
@@ -306,10 +307,181 @@ def metrics(running, path):
     return percent, rss, pid
 
 
+def give_tree(path, uid, gid):
+    """Run as root: give a tree to uid:gid with owner read/write/traverse
+    bits. Every step is relative to an already-open directory and never
+    follows a link, so a tree owner swapping a directory for a symlink cannot
+    redirect root outside it. Inodes, including the runtime fence, are kept."""
+    nofollow = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+
+    def fix(fd, folder):
+        st = os.fstat(fd)
+        if not folder and st.st_nlink > 1 and st.st_uid != uid:
+            raise ValueError("a hard-linked file inside the server folder belongs to another account; remove the extra link")
+        if (st.st_uid, st.st_gid) != (uid, gid):
+            os.fchown(fd, uid, gid)
+        need = 0o700 if folder else 0o600
+        if st.st_mode & need != need:
+            os.fchmod(fd, (st.st_mode & 0o7777) | need)
+
+    def walk(dfd):
+        fix(dfd, True)
+        for name in os.listdir(dfd):
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            if stat.S_ISDIR(st.st_mode):
+                child = os.open(name, nofollow | os.O_DIRECTORY, dir_fd=dfd)
+                try:
+                    walk(child)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(st.st_mode):
+                child = os.open(name, nofollow, dir_fd=dfd)
+                try:
+                    fix(child, False)
+                finally:
+                    os.close(child)
+            elif (st.st_uid, st.st_gid) != (uid, gid):
+                os.chown(name, uid, gid, dir_fd=dfd, follow_symlinks=False)  # links, sockets, fifos
+
+    top = os.open(path, nofollow | os.O_DIRECTORY)
+    try:
+        walk(top)
+    finally:
+        os.close(top)
+
+
+def writers(src, panel, panel_start):
+    """Processes, other than the panel and its children, that keep a working
+    directory, an open directory or a writable file inside src. Rescans until
+    no unseen PID appears, so a holder cannot fork and close to hide a child.
+    None when some process cannot be inspected."""
+    inside = set()
+    for base, dirs, files in os.walk(src):
+        for name in [None, *dirs, *files]:
+            st = os.lstat(base if name is None else os.path.join(base, name))
+            inside.add((st.st_dev, st.st_ino))
+
+    def fields(pid):
+        with open("/proc/%d/stat" % pid, encoding="utf-8", errors="replace") as stream:
+            return stream.read().rsplit(") ", 1)[1].split(" ")
+
+    def ours(pid):
+        for _ in range(64):
+            if pid <= 1:
+                return False
+            try:
+                info = fields(pid)
+            except OSError:
+                return False
+            if pid == panel and info[19] == panel_start:
+                return True
+            pid = int(info[1])
+        return False
+
+    def holds(pid):
+        for link in ("cwd", "root"):
+            try:
+                st = os.stat("/proc/%d/%s" % (pid, link))
+            except FileNotFoundError:
+                continue
+            if (st.st_dev, st.st_ino) in inside:
+                return True
+        for fd in os.listdir("/proc/%d/fd" % pid):
+            try:
+                st = os.stat("/proc/%d/fd/%s" % (pid, fd))
+            except FileNotFoundError:
+                continue
+            if (st.st_dev, st.st_ino) not in inside:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                return True
+            with open("/proc/%d/fdinfo/%s" % (pid, fd), encoding="ascii") as stream:
+                flags = int(next(line for line in stream if line.startswith("flags:")).split()[1], 8)
+            if flags & 3:
+                return True
+        return False
+
+    seen, found = set(), []
+    while True:
+        fresh = [int(e) for e in os.listdir("/proc") if e.isdigit() and int(e) not in seen]
+        if not fresh:
+            return found
+        for pid in fresh:
+            seen.add(pid)
+            if pid == os.getpid() or ours(pid):
+                continue
+            try:
+                if holds(pid):
+                    try:
+                        with open("/proc/%d/comm" % pid, encoding="utf-8", errors="replace") as stream:
+                            found.append("%s (pid %d)" % (stream.read().strip(), pid))
+                    except OSError:
+                        found.append("pid %d" % pid)
+            except (FileNotFoundError, ProcessLookupError, StopIteration):
+                pass
+            except PermissionError:
+                return None
+
+
+def freeze_move(spec):
+    """Freeze Crafty's cgroups, prove nothing else can write into the server
+    folder, and rename it away. Runs as its own transient systemd unit: its
+    RuntimeMaxSec kills it, and ExecStopPost thaws Crafty only after systemd
+    has seen this whole unit exit, so no rename can land after the thaw."""
+    files = [Path("/sys/fs/cgroup" + g) for g in spec["groups"]]
+    for path in files:
+        (path / "cgroup.freeze").write_text("1")
+    deadline = time.monotonic() + 5
+    while not all("frozen 1" in (path / "cgroup.events").read_text().splitlines() for path in files):
+        if time.monotonic() > deadline:
+            print(json.dumps({"error": "Crafty did not pause; try again"}))
+            sys.exit(5)
+        time.sleep(0.02)
+    found = writers(spec["src"], spec["panel"], spec["start"])
+    if found is None or found:
+        print(json.dumps({"writers": found}))
+        sys.exit(3)
+    os.rename(spec["src"], spec["dst"])
+    print(json.dumps({"moved": True}))
+
+
+def unwritable(paths):
+    """The first path this service account could not write when it runs a
+    server there, or None. Links are not followed: imports refuse them."""
+    def first(path):
+        if path.is_symlink():
+            return None
+        folder = path.is_dir()
+        if not os.access(path, os.R_OK | os.W_OK | (os.X_OK if folder else 0)):
+            return str(path)
+        for child in sorted(path.iterdir()) if folder else []:
+            found = first(child)
+            if found:
+                return found
+        return None
+    for top in paths:
+        if not top.is_absolute():
+            raise ValueError("access checks need absolute paths")
+        if not top.exists():
+            # Created on first use: only its nearest existing parent matters.
+            while not top.exists():
+                top = top.parent
+            if not os.access(top, os.W_OK | os.X_OK):
+                return str(top)
+            continue
+        found = first(top)
+        if found:
+            return found
+    return None
+
+
 def rpc(body):
     op = body["op"]
     if op == "health":
-        return {"ok": True, "pid": os.getpid()}
+        return {"ok": True, "pid": os.getpid(), "uid": getattr(os, "getuid", lambda: None)(), "gid": getattr(os, "getgid", lambda: None)()}
+    if op == "access":
+        # Ask this account, not a permission-bit model: groups and ACLs count.
+        return unwritable([Path(p) for p in body["paths"]])
     id = body.get("id")
     if op == "register":
         value = body["server"]
@@ -526,5 +698,11 @@ def main():
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--run"]:
         run_java(sys.argv[2])
+    elif sys.argv[1:2] == ["--freeze-move"]:
+        import base64
+        freeze_move(json.loads(base64.b64decode(sys.argv[2])))
+    elif sys.argv[1:2] == ["--give"]:
+        for target in sys.argv[4:]:
+            give_tree(target, int(sys.argv[2]), int(sys.argv[3]))
     else:
         lifetime = main()

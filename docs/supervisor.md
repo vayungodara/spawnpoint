@@ -8,7 +8,8 @@ up as a user service on Linux and macOS. The panel itself is a normal
 process; the installer prints the command to start it again.
 
 Use absolute paths and a layout path without spaces. Run the panel as the
-layout's owner. Do not run Java as root or install a second owner for the
+layout's owner, or as root while Crafty's own account still owns server
+folders. Do not run Java as root or install a second owner for the
 same layout.
 
 ## Linux

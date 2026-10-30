@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { PATHS } from '../config.js';
+import { ROOT_PANEL, giveTree } from './platform.js';
 import type { CraftyServer } from '../clients/crafty-adapter.js';
 
 export interface NativeServer extends CraftyServer {
@@ -20,6 +21,8 @@ export interface Transfer {
   destination: string;
   identity: { device: string; inode: string };
   revision: string;
+  /** Crafty's owner of the directory, restored if the move is undone. */
+  owner?: { uid: number; gid: number };
 }
 export function transferRecord(id: string): Transfer | null {
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error('invalid server id');
@@ -56,6 +59,23 @@ export async function supervisor<T = unknown>(op: string, args: Record<string, u
   const body = await res.json() as { result: T; error?: string };
   if (!res.ok) throw new Error(body.error ?? 'supervisor refused request');
   return body.result;
+}
+
+/** The account the supervisor runs Java as; null on Windows, where the
+    installer grants its virtual account the layout instead. */
+export async function serviceAccount(): Promise<{ uid: number; gid: number } | null> {
+  const { uid, gid } = await supervisor<{ uid?: number | null; gid?: number | null }>('health');
+  return typeof uid === 'number' && typeof gid === 'number' ? { uid, gid } : null;
+}
+
+/** A root panel writes for the supervisor's account: hand it a native server
+    tree and the shared hosting state it rewrites on every start. Inodes,
+    including the runtime fence, are kept. */
+export function giveToSupervisor(path: string, account: { uid: number; gid: number } | null): void {
+  if (!ROOT_PANEL || !account || account.uid === 0) return;
+  const hosting = join(PATHS.data, 'pack-hosting');
+  mkdirSync(hosting, { recursive: true });
+  giveTree(account.uid, account.gid, path, hosting);
 }
 
 /** Discover owner-initiated boots while connected, and reconcile the newest

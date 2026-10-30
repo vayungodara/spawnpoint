@@ -14,6 +14,8 @@ node .github/smoke-boot.mjs
 node .github/wizard-e2e.mjs
 node .github/cli-test.mjs
 node .github/native-runtime.mjs
+sudo -E env "PATH=$PATH" node .github/ownership-handover.mjs   # Linux
+node .github/client-evidence.mjs
 node .github/revision-guard.mjs
 node .github/publication-guard.mjs
 node .github/solver-test.mjs

@@ -100,16 +100,34 @@ Only the panel writes shared detection and mod metadata while configuring the
 whole pack and auto-sync. A durable phase fences every start until that finishes.
 Modpack jobs retain exact source versions or a private hash-checked uploaded pack.
 
-`nativeimport.ts` freezes a stopped, certified Crafty source under maintenance,
-then requires the owner to stop the entire local Crafty service or container
-and attest that its workers exited. A refused loopback TCP connection is an
-additional check, not automatic proof of worker exit. The Crafty watchdog stays
-paused while any transfer journal exists. Commit holds the JVM fence, checks
-directory device/inode, closed game port and exact sealed bytes, persists a
-mutation marker, then atomically renames the directory into `Servers/<uuid>`.
-Linked trees, external worlds and cross-volume copies are refused. One native
-registry write commits ownership. Abort restores Crafty settings before commit;
-an interrupted commit recovers forward. The world, UUID and client shelf survive.
+`nativeimport.ts` freezes a stopped, tested Crafty source under maintenance.
+Commit holds the JVM fence, checks directory device/inode, closed game port
+and exact sealed bytes, persists a mutation marker, then atomically renames
+the directory into `Servers/<uuid>`. On Linux, when the panel can inspect
+every process (a root panel), only this server moves while Crafty keeps
+running. Crafty's cgroup v2 groups (its unit or container, with every
+worker) are frozen while the panel scans every process until no unscanned
+PID remains, refusing any working directory, open directory or writable file
+inside the tree (by device and inode, retried for ten seconds), and renames
+it. After the thaw Crafty cannot open the tree by path; the identity, exact
+sealed bytes and confinement are checked again. Without full process
+visibility or a freezable group, the entire local Crafty service must be
+offline: its loopback port refused and, on Linux, no visible Crafty process.
+Before the registry write, a root panel hands the whole tree to the
+supervisor's account (owner read/write/traverse bits, inodes kept)
+through `supervisor.py --give` (descriptor-relative, never following links)
+and that account itself confirms through the `access` RPC that it can write
+the tree and `data/pack-hosting`. Any failure before registration renames the
+tree back with Crafty's ownership. Linked trees, external worlds and cross-volume copies
+are refused. One native registry write commits ownership; an interrupted
+commit recovers forward. The world, UUID and client shelf survive.
+
+A root panel keeps that ownership: atomic writes and the directories they
+create take the owner of their parent directory, and every native start from
+the panel, and panel startup, hand stray files in the server tree and the
+hosting state back to the supervisor's account. `nativeservice.py panel`
+moves an existing root panel to an unprivileged system unit once Crafty no
+longer owns server folders.
 
 ## Mod changes are transactions (`packtxn.ts`)
 
@@ -319,6 +337,16 @@ operations return 409 until the owner clears it on the dashboard.
 - `headless`: anything else runs with HeadlessMC's stubbed LWJGL. Mod
   loading, mixins and init are tested; rendering is not, and the verdict
   says so.
+
+A display mode is not rendering evidence. Rendering passes only when the
+client log names a GL or Vulkan backend and device; HeadlessMC's offline stub
+(which macOS window mode also hits) or missing strings are never a pass, and
+software or paravirtual devices are reported as not verified on real hardware.
+Mods known to break under Xvfb (ImmediatelyFast) are always included first.
+Only a crash naming one of them leads to a retry in a real window when the
+host has a display, or else a run without it. That run is never a pass:
+it reports that AutoModpack's handshake and the exact friend download were
+not proven.
 
 ## Client sync
 

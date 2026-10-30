@@ -25,9 +25,12 @@ import { packFiles, type RevisionLock } from './revisions.js';
 // The client runs in HeadlessMC's offline mode, its documented mode for
 // automated tests.
 
-type GateMode = 'xvfb' | 'window' | 'headless';
+export type GateMode = 'xvfb' | 'window' | 'headless';
 let modeState: GateMode | undefined;
+/** Set for one serialized retry in a real window after a virtual-display crash. */
+let modeOverride: GateMode | undefined;
 function gateMode(): GateMode {
+  if (modeOverride) return modeOverride;
   if (modeState) return modeState;
   if (process.platform === 'linux' && spawnSync('which', ['xvfb-run'], { stdio: 'ignore' }).status === 0) modeState = 'xvfb';
   else if (IS_WIN || process.platform === 'darwin' || process.env.DISPLAY || process.env.WAYLAND_DISPLAY) modeState = 'window';
@@ -35,9 +38,10 @@ function gateMode(): GateMode {
   return modeState;
 }
 
-// Mods that crash only under Xvfb's software GL while working on real GPUs.
-// They are left out of xvfb-mode boots; every entry is a hole in the test.
-const ENV_SKIP = ['immediatelyfast']; // FontSet.resetTextures NPE under Mesa
+// Mods seen crashing only under Xvfb's software GL. They are always tried
+// first; only a crash that names one of them leads to a real-window retry or
+// a run without it, and the verdict then says exactly what went unproven.
+const ENV_SENSITIVE = [{ name: /immediatelyfast/i, frames: /net\.raphimc\.immediatelyfast|\[ImmediatelyFast[^\]]*\.jar/i }];
 
 const HMC = join(PATHS.root, 'Tools', 'headlessmc');
 const HMC_VERSION = '2.10.0';
@@ -202,8 +206,6 @@ export interface ClientSet {
   serverJars: string[];
   /** names this run's log file: <label>-client.log */
   label: 'candidate' | 'live';
-  /** file names this change adds; a change the test must leave out is untested */
-  changed: string[];
   /** Sealed server/config inputs for this revision; absent for legacy callers. */
   sourceDir?: string;
   lock?: RevisionLock;
@@ -222,12 +224,66 @@ let chain: Promise<unknown> = Promise.resolve();
 
 /** Boot a real client with `set`, then join a throwaway copy of the server. Serialized globally. */
 export function clientGate(serverId: string, set: ClientSet, onStatus: (d: string) => void, log: (m: string) => void): Promise<Verdict> {
-  const run = chain.then(() => clientGateInner(serverId, set, onStatus, log), () => clientGateInner(serverId, set, onStatus, log));
+  const run = chain.then(() => clientGateFallback(serverId, set, onStatus, log), () => clientGateFallback(serverId, set, onStatus, log));
   chain = run.catch(() => {});
-  return run.then((v) => ({ ...v, renderer: gateMode() }));
+  return run;
 }
 
-async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: string) => void, log: (m: string) => void): Promise<Verdict> {
+/** What a client log proves about rendering. A display mode is not evidence:
+    offline HeadlessMC without xvfb silently switches on its LWJGL stubs and
+    the game then reports empty driver and device strings. Only a named
+    backend and device count, and software or paravirtual devices are not
+    real-hardware proof. */
+export function renderingEvidence(out: string, mode: GateMode): { result: 'passed' | 'inconclusive' | 'skipped'; detail: string; stubbed: boolean } {
+  if (mode === 'headless' || /game will start in headless mode/i.test(out)) return { result: 'skipped', detail: 'LWJGL was stubbed; nothing was rendered', stubbed: true };
+  const backend = /Using graphics backend (\S+), using drivers: *(\S[^\r\n]*)/.exec(out);
+  const device = /Using graphics device: *([^\r\n]*?) *$/m.exec(out)?.[1];
+  // Older clients do not log the device; Sodium logs the GL renderer it uses.
+  const legacy = /OpenGL Renderer: *(\S[^\r\n]*)/.exec(out)?.[1];
+  const named = device && !/^\(?\s*\)?$/.test(device) ? device : legacy;
+  if (!named || (backend === null && !legacy)) return { result: 'inconclusive', detail: 'The client did not report a GL or Vulkan driver and device, so rendering is unproven', stubbed: false };
+  const where = backend ? `${backend[1]} ${backend[2].trim()} on ${named}` : `OpenGL on ${named}`;
+  if (/llvmpipe|softpipe|swiftshader|software|paravirtual|basic render|virgl|svga3d/i.test(named)) {
+    return { result: 'passed', detail: `Rendered with ${where}: a software or virtual device, so rendering was not verified on real hardware`, stubbed: false };
+  }
+  return { result: 'passed', detail: `Rendered with ${where}; one GPU and driver, not every player's`, stubbed: false };
+}
+
+/** The env-sensitive jar a virtual-display client crash names, if any. */
+function displayCulprit(serverId: string, set: ClientSet): { file: string; cause: string } | null {
+  const work = join(PATHS.data, 'launchgate', serverId);
+  const out = ['client.log', 'join-client.log'].map((f) => { try { return readFileSync(join(work, f === 'client.log' ? `${set.label}-client.log` : f), 'utf8'); } catch { return ''; } }).join('\n');
+  for (const f of set.files) {
+    const name = basename(f.rel);
+    const known = ENV_SENSITIVE.find((m) => m.name.test(name));
+    if (!known || !known.frames.test(out)) continue;
+    const cause = /Caused by: ([^\n]{1,160})/.exec(out.slice(out.search(known.frames)))?.[1] ?? 'see the client log';
+    return { file: name, cause };
+  }
+  return null;
+}
+
+async function clientGateFallback(serverId: string, set: ClientSet, onStatus: (d: string) => void, log: (m: string) => void): Promise<Verdict> {
+  const first = await clientGateInner(serverId, set, onStatus, log, []);
+  const culprit = gateMode() === 'xvfb' && first.result === 'failed' ? displayCulprit(serverId, set) : null;
+  if (!culprit) return { ...first, renderer: gateMode() };
+  const why = `${culprit.file} crashed the test client on the virtual display (${culprit.cause})`;
+  if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
+    log(`launchgate: ${why}; retrying in a real window`);
+    modeOverride = 'window';
+    try {
+      const real = await clientGateInner(serverId, set, onStatus, log, []);
+      return { ...real, detail: `${why}; in a real window: ${real.detail}`, renderer: 'window' };
+    } finally { modeOverride = undefined; }
+  }
+  log(`launchgate: ${why}; testing the rest of the pack without it`);
+  onStatus(`${culprit.file} cannot run on the virtual display; testing the rest of the pack without it`);
+  const rest = await clientGateInner(serverId, set, onStatus, log, [culprit.file]);
+  // Never a pass: the friend pack that includes this jar was not handshaken.
+  return { ...rest, result: rest.result === 'passed' ? 'unverified' : rest.result, detail: `${why}. Without it: ${rest.detail}`, renderer: gateMode() };
+}
+
+async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: string) => void, log: (m: string) => void, leaveOut: string[]): Promise<Verdict> {
   const blocker = clientGateBlocker(serverId);
   if (blocker) return { result: 'unverified', detail: blocker };
   const sourceDir = set.sourceDir ?? serverDir(serverId);
@@ -249,12 +305,10 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   const testJar = await runtimeTestJar(det.mc, det.loader);
   if (!testJar) return { result: 'unverified', detail: `mc-runtime-test has no build for ${det.mc}` };
 
-  const skipped = (name: string): boolean => gateMode() === 'xvfb' && ENV_SKIP.some((s) => name.toLowerCase().includes(s));
-  const untestable = set.changed.filter(skipped);
-  if (untestable.length) return { result: 'unverified', detail: `${untestable.join(', ')} cannot run on the virtual display, so the client test cannot cover it` };
-  // AutoModpack's handshake needs the client to hold the exact pack, so it is
-  // skipped when a mod has to be left out for the virtual display; the join
-  // then runs without AutoModpack, and the live pack is checked after the restart
+  const skipped = (name: string): boolean => leaveOut.includes(name);
+  // AutoModpack's handshake needs the client to hold the exact pack, so it
+  // cannot run once a mod has to be left out for the virtual display; the
+  // join then runs without AutoModpack and the verdict says so.
   const amJar = set.serverJars.find((p) => /^automodpack.*\.jar$/i.test(basename(p)));
   const handshakeOff = !!amJar && set.files.some((f) => skipped(basename(f.rel)));
   const tested: AutoModpackFile[] | null = amJar && !handshakeOff ? [] : null;
@@ -351,9 +405,14 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
     });
   }));
   if (typeof sp === 'string') return { result: 'unverified', detail: sp, checks: { clientBoot: { result: 'inconclusive', detail: sp, renderer: gateMode() } } };
+  let clientOut = '';
+  try { clientOut = readFileSync(join(work, `${set.label}-client.log`), 'utf8'); } catch { /* no log: no evidence */ }
+  const seen = renderingEvidence(clientOut, gateMode());
   const checks: NonNullable<Verdict['checks']> = {
     clientBoot: { result: sp.result === 'unverified' ? 'inconclusive' : sp.result, detail: sp.detail, renderer: gateMode() },
-    rendering: { result: gateMode() === 'headless' || left.length ? 'skipped' : sp.result === 'passed' ? 'passed' : 'inconclusive', detail: gateMode() === 'headless' ? 'LWJGL was stubbed; no rendering coverage' : left.length ? `Not rendered: ${left.join(', ')}` : sp.result === 'passed' ? 'Rendered with the complete client set; not a real-GPU certification' : 'The client did not complete its rendering check', renderer: gateMode() },
+    rendering: left.length ? { result: 'skipped', detail: `Not loaded or rendered: ${left.join(', ')}`, renderer: gateMode() }
+      : sp.result !== 'passed' ? { result: 'inconclusive', detail: 'The client did not complete its rendering check', renderer: gateMode() }
+        : { result: seen.result, detail: seen.detail, renderer: gateMode() },
   };
   if (sp.result !== 'passed') return { ...sp, checks };
 
@@ -367,14 +426,15 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   if (typeof join_ === 'string') return { result: 'unverified', detail: `${sp.detail}, but the join could not be tested: ${join_}`, checks: { ...checks, join: { result: 'inconclusive', detail: join_, renderer: gateMode() } } };
   if (join_.result !== 'passed') return { ...join_, detail: `${sp.detail}, but ${join_.detail}`, checks: { ...checks, join: { result: join_.result === 'unverified' ? 'inconclusive' : join_.result, detail: join_.detail, renderer: gateMode() }, handshake: { result: tested ? 'inconclusive' : 'skipped', detail: 'The complete AutoModpack handshake and inventory check did not pass', renderer: gateMode() } } };
   const notes = [
-    gateMode() === 'headless' && 'graphics stubbed: install xvfb to test rendering too',
-    gateMode() !== 'headless' && left.length && `${left.join(', ')} left out: it cannot run on the virtual display${handshakeOff ? ', so AutoModpack\'s handshake was not run' : ''}`,
+    seen.stubbed && (gateMode() === 'headless' ? 'graphics stubbed: install xvfb to test rendering too' : 'the launcher stubbed graphics, so rendering was not tested'),
+    gateMode() !== 'headless' && left.length && `${left.join(', ')} left out${handshakeOff ? ', so AutoModpack\'s handshake and the exact friend download were not proven' : ''}`,
   ].filter(Boolean);
   return { result: notes.length ? 'unverified' : 'passed', detail: `${sp.detail}, then ${join_.detail}${notes.length ? ` (${notes.join('; ')})` : ''}`, seconds: Math.round((Date.now() - started) / 1000),
     checks: {
       ...checks,
       join: { result: 'passed', detail: join_.detail, renderer: gateMode() },
-      handshake: { result: tested ? 'passed' : 'skipped', detail: tested ? 'AutoModpack handshake and exact client inventory verified' : 'AutoModpack handshake was not run', renderer: gateMode() },
+      handshake: { result: tested ? 'passed' : 'skipped', detail: tested ? 'AutoModpack handshake and exact client inventory verified'
+        : handshakeOff ? `AutoModpack handshake was not run: ${left.join(', ')} had to be left out of the client` : 'AutoModpack handshake was not run', renderer: gateMode() },
     } };
 }
 

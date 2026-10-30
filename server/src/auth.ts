@@ -146,6 +146,7 @@ const NEEDS: Record<string, Scope | 'admin'> = {
   'GET /api/servers/:id/candidate/config': 'control',
   'GET /api/servers/:id/bobby/download': 'control',
   'POST /api/servers/:id/candidate/apply': 'approve',
+  'POST /api/servers/:id/revision/first': 'approve',
   'POST /api/servers/:id/last-change/undo': 'approve',
   'POST /api/servers/:id/backups/restore': 'approve',
   'POST /api/servers/:id/worlds/reset': 'approve',

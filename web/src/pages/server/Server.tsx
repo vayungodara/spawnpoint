@@ -62,60 +62,209 @@ function Section({ tag, title, children }: { tag: string; title: string; childre
   )
 }
 
+interface Check { result: string; detail: string; renderer?: string }
+interface RuntimeView {
+  owner: 'crafty' | 'standalone'
+  autoStart?: boolean
+  blocked?: string
+  transfer: { phase: string; revision: string } | null
+  active?: string | null
+  tested?: boolean
+  candidate?: {
+    status: string; detail: string; revision?: string; consent?: string[]
+    files: { file: string; to: string; remove?: boolean; duplicateOf?: string }[]
+    server?: { result: string; detail: string }; client?: { result: string; detail: string; checks?: Record<string, Check> }
+  } | null
+  duplicates?: { id: string; name: string; keep: { file: string; to: string; version: string }; drop: { file: string; to: string; version: string }[] }[]
+  move?: 'single' | 'all-crafty'
+  crafty?: { port: 'closed' | 'open' | 'unknown'; processes: string[] | null }
+}
+
+const CHECK_LABELS: Record<string, string> = { server: 'Server boot', solver: 'Dependencies', clientBoot: 'Client boot', rendering: 'Rendering', join: 'Join', handshake: 'AutoModpack handshake' }
+
+/** Exactly what the client test proved, one line per check. */
+function Proof({ checks }: { checks?: Record<string, Check> }) {
+  if (!checks) return null
+  return (
+    <ul className="text-xs space-y-1 mt-2">
+      {Object.entries(checks).map(([k, v]) => (
+        <li key={k}><b className={v.result === 'passed' ? 'text-emerald' : v.result === 'failed' ? 'text-redstone' : 'text-gold'}>{CHECK_LABELS[k] ?? k}: {v.result}</b> · {v.detail}</li>
+      ))}
+    </ul>
+  )
+}
+
+function Step({ n, done, title, children }: { n: number; done: boolean; title: string; children: React.ReactNode }) {
+  return (
+    <li className="flex gap-3">
+      <span className={`hud !opacity-100 w-6 shrink-0 ${done ? 'text-emerald' : ''}`} aria-hidden>{done ? '✓' : n}</span>
+      <div className="min-w-0 flex-1 text-sm">
+        <div className="font-bold">{title}{done && <span className="sr-only"> (done)</span>}</div>
+        {children}
+      </div>
+    </li>
+  )
+}
+
 function RuntimeSection({ id }: { id: string }) {
   const qc = useQueryClient()
-  const [approve, setApprove] = useState(false)
-  const [craftyStopped, setCraftyStopped] = useState(false)
+  const { data: stats } = useStats(id)
+  const [confirmed, setConfirmed] = useState(false)
+  const [moved, setMoved] = useState<string | null>(null)
   const { data: runtime, error } = useQuery({
     queryKey: ['server-runtime', id],
-    queryFn: () => api<{ owner: 'crafty' | 'standalone'; autoStart?: boolean; blocked?: string; transfer: { phase: string; revision: string } | null }>(`/api/servers/${id}/runtime`),
-    refetchInterval: 5000,
+    queryFn: () => api<RuntimeView>(`/api/servers/${id}/runtime`),
+    refetchInterval: 3000,
   })
-  const change = useMutation({
-    mutationFn: (body: { autoStart: boolean } | { action: string; revision?: string; approve: boolean; craftyStopped?: boolean }) =>
-      api(`/api/servers/${id}/runtime${'action' in body ? '/import' : ''}`, { method: 'action' in body ? 'POST' : 'PUT', body: JSON.stringify(body) }),
-    onSuccess: () => { setApprove(false); setCraftyStopped(false); qc.invalidateQueries() },
+  const post = useMutation({
+    mutationFn: ({ path, body }: { path: string; body: unknown }) => api<{ account?: string; crafty?: string }>(path, { method: 'POST', body: JSON.stringify(body) }),
+    onSuccess: (r, v) => {
+      if (v.path.endsWith('/runtime/import') && (v.body as { action: string }).action !== 'prepare' && (v.body as { action: string }).action !== 'abort') {
+        setMoved(`Moved. Spawnpoint now runs this server${r.account ? ` as ${r.account}` : ''}${r.crafty === 'running' ? '; Crafty kept running your other servers' : '; you can start Crafty again'}. Press Start at the top of the page.`)
+      }
+      setConfirmed(false)
+      qc.invalidateQueries()
+    },
   })
-  return (
-    <div className="block px-5 py-4">
-      <h2 className="font-extrabold mb-2">Server runtime</h2>
-      {!runtime && <p className="text-sm">{error ? error.message : 'Checking ownership…'}</p>}
-      {runtime?.owner === 'standalone' && !runtime.transfer ? <>
+  const autoStart = useMutation({
+    mutationFn: (value: boolean) => api(`/api/servers/${id}/runtime`, { method: 'PUT', body: JSON.stringify({ autoStart: value }) }),
+    onSuccess: () => qc.invalidateQueries(),
+  })
+  const importAction = (action: string, extra: Record<string, unknown> = {}) =>
+    post.mutate({ path: `/api/servers/${id}/runtime/import`, body: { action, approve: true, ...extra } })
+  const errorText = (post.error ?? autoStart.error)?.message.replace(/^\d+: /, '').replace(/^\{"error":"(.*)"\}$/, '$1')
+
+  if (!runtime) return <div className="block px-5 py-4"><p className="text-sm">{error ? error.message : 'Checking ownership…'}</p></div>
+  if (runtime.owner === 'standalone' && !runtime.transfer) {
+    return (
+      <div className="block px-5 py-4">
+        <h2 className="font-extrabold mb-2">Server runtime</h2>
+        {moved && <p role="status" className="text-sm mb-3 text-emerald">{moved}</p>}
         <p className="text-text-dim text-sm max-w-[68ch]">Spawnpoint owns this server independently of the panel. Crafty is never used as a fallback.</p>
         <label className="flex items-start gap-3 text-sm mt-3">
-          <input type="checkbox" className="mt-1" checked={runtime.autoStart === true} disabled={change.isPending}
-            onChange={(e) => change.mutate({ autoStart: e.target.checked })} />
+          <input type="checkbox" className="mt-1" checked={runtime.autoStart === true} disabled={autoStart.isPending}
+            onChange={(e) => autoStart.mutate(e.target.checked)} />
           <span>Start when the supervisor service starts<br /><span className="text-xs text-text-dim">Includes OS startup and service restarts. Interrupted transactions still block boot.</span></span>
         </label>
         {runtime.blocked && <p role="alert" className="text-sm mt-3">Automatic start paused: {runtime.blocked}. Resolve this, then press Start at the top of the page.</p>}
-      </> : runtime && <>
-        <p className="text-text-dim text-sm max-w-[68ch]">
-          Import a stopped, revision-certified Crafty server. Its UUID, exact pack and world stay intact;
-          the directory moves into native storage on the same filesystem. No world restore occurs.
-        </p>
-        {runtime.transfer && <div className="mt-3 text-sm space-y-2">
-          <p className="font-bold">{runtime.transfer.phase === 'preparing' ? 'Freeze interrupted — cancel and retry preparation.' : runtime.transfer.phase === 'committing' ? 'Commit interrupted — complete forward recovery.' : 'Crafty launch settings frozen. Stop the entire local Crafty service before committing.'}</p>
-          <p className="text-text-dim">Stopping Crafty also stops its other servers. It can be restarted after this server has moved.</p>
-          <p className="break-all font-mono text-xs">Revision: {runtime.transfer.revision}</p>
-        </div>}
-        <label className="flex items-start gap-3 text-sm mt-4 max-w-[68ch]">
-          <input type="checkbox" className="mt-1" checked={approve} onChange={(e) => setApprove(e.target.checked)} />
-          <span>{runtime.transfer ? 'I approve importing this exact revision and leaving this server disabled in Crafty.' : 'I approve freezing this stopped server’s Crafty launch settings for transfer.'}</span>
+        {errorText && <p role="alert" className="text-sm mt-3 break-words">{errorText}</p>}
+      </div>
+    )
+  }
+
+  const c = runtime.candidate
+  const testing = !!c && ['collecting', 'testing', 'activating'].includes(c.status)
+  const tested = !!runtime.tested
+  const dupes = runtime.duplicates ?? []
+  const running = !!stats?.running || !!stats?.waiting_start
+  const t = runtime.transfer
+  const offline = runtime.crafty
+  const craftyDown = offline && offline.port === 'closed' && (offline.processes ? offline.processes.length === 0 : confirmed)
+  const busy = post.isPending
+  const craftyStatus = (
+    <>
+      <ul className="text-xs space-y-0.5" role="status">
+        <li>Crafty web port: <b className={offline?.port === 'closed' ? 'text-emerald' : 'text-gold'}>{offline?.port === 'closed' ? 'closed' : offline?.port === 'open' ? 'still open' : 'unknown'}</b></li>
+        <li>Crafty processes: {offline?.processes ? <b className={offline.processes.length ? 'text-gold' : 'text-emerald'}>{offline.processes.length ? `${offline.processes.length} still running (${offline.processes.join(', ')})` : 'none'}</b> : 'not visible on this system'}</li>
+      </ul>
+      {offline && !offline.processes && (
+        <label className="flex items-start gap-3 text-xs max-w-[68ch]">
+          <input type="checkbox" className="mt-0.5" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+          <span>Crafty and its workers have exited (a closed web port alone is not proof).</span>
         </label>
-        {runtime.transfer && <label className="flex items-start gap-3 text-sm mt-3 max-w-[68ch]">
-          <input type="checkbox" className="mt-1" checked={craftyStopped} onChange={(e) => setCraftyStopped(e.target.checked)} />
-          <span>I checked that the entire Crafty service or container and its workers have exited. A closed web port is not enough.</span>
-        </label>}
-        <div className="flex flex-wrap gap-3 mt-3">
-          <button className="btn btn-emerald px-4 py-2 text-sm" disabled={!approve || change.isPending || runtime.transfer?.phase === 'preparing' || (!!runtime.transfer && !craftyStopped)}
-            onClick={() => change.mutate({ action: runtime.transfer ? 'commit' : 'prepare', approve: true, revision: runtime.transfer?.revision, craftyStopped })}>
-            {change.isPending ? 'Saving transfer…' : runtime.transfer ? 'Commit exact revision' : 'Prepare Crafty import'}
-          </button>
-          {runtime.transfer && runtime.transfer.phase !== 'committing' && <button className="btn btn-block px-4 py-2 text-sm" disabled={change.isPending}
-            onClick={() => change.mutate({ action: 'abort', approve: true })}>Cancel and restore Crafty settings</button>}
-        </div>
-      </>}
-      {change.error && <p role="alert" className="text-sm mt-3 break-words">{change.error.message}</p>}
+      )}
+    </>
+  )
+  return (
+    <div className="block px-5 py-4">
+      <h2 className="font-extrabold mb-1">Move to Spawnpoint</h2>
+      <p className="text-text-dim text-sm max-w-[68ch]">
+        Crafty runs this server today. Spawnpoint can run it instead, with the same world, server ID and players. Two steps; nothing in the world is rewritten.
+      </p>
+      <ol className="space-y-4 mt-4">
+        <Step n={1} done={tested} title="Create a tested version">
+          {testing ? (
+            <p role="status" className="mt-1">Testing the current pack: {c!.detail}…<br /><span className="text-xs text-text-dim">Boots a copy of the server, then a real client joins it. A few minutes; the server can keep running.</span></p>
+          ) : c?.status === 'needs-approval' && c.revision ? (
+            <div className="mt-1 space-y-2">
+              <p>{c.detail}</p>
+              {!!c.consent?.length && <ul className="text-text-dim list-disc pl-5">{c.consent.map((x) => <li key={x}>{x}</li>)}</ul>}
+              <Proof checks={{ ...(c.server ? { server: c.server } : {}), ...c.client?.checks }} />
+              <div className="flex flex-wrap gap-3">
+                <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy}
+                  onClick={() => post.mutate({ path: `/api/servers/${id}/candidate/apply`, body: { consent: true, revision: c.revision } })}>Approve this exact version</button>
+                <button className="btn btn-block px-4 py-2 text-sm" disabled={busy}
+                  onClick={() => post.mutate({ path: `/api/servers/${id}/candidate/retest`, body: {} })}>Test again</button>
+              </div>
+            </div>
+          ) : tested ? (
+            <p className="text-text-dim mt-1">{c?.status === 'ready' ? 'Tested. It goes live on the first start after the move.' : 'This server’s pack is locked and tested.'}</p>
+          ) : (
+            <div className="mt-1 space-y-2">
+              {c?.status === 'needs-approval' && <p className="text-gold">Last test: {c.detail}</p>}
+              {dupes.length > 0 && (
+                <div>
+                  <p>Two versions of the same mod would both reach your friends:</p>
+                  <ul className="mt-1 space-y-1">
+                    {dupes.map((d) => (
+                      <li key={d.id} className="text-text-dim"><b className="text-text">{d.name}</b>: keep {d.keep.version} ({d.keep.file}), remove {d.drop.map((x) => `${x.version} (${x.file})`).join(', ')}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy}
+                onClick={() => post.mutate({ path: `/api/servers/${id}/revision/first`, body: { consent: true, keepNewest: dupes.length > 0 } })}>
+                {busy ? 'Starting…' : dupes.length ? 'Keep newest and test' : 'Create first tested version'}
+              </button>
+              <p className="text-xs text-text-dim max-w-[68ch]">
+                Clicking approves Spawnpoint’s launch guard in this server’s start command and keeps AutoModpack hosting off until each boot and
+                exact pack are verified. Minecraft, the loader and the world are not changed.{dupes.length ? ' Older copies are removed only after you approve the tested result.' : ''}
+              </p>
+            </div>
+          )}
+        </Step>
+        <Step n={2} done={false} title="Move the server">
+          {t?.phase === 'committing' ? (
+            <div className="mt-1 space-y-2">
+              <p>A move was interrupted. Finishing it is safe: the folder is already Spawnpoint’s.</p>
+              {runtime.move !== 'single' && <>
+                <p className="text-text-dim">Crafty must still be stopped to finish.</p>
+                {craftyStatus}
+              </>}
+              <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy || (runtime.move !== 'single' && !craftyDown)} onClick={() => importAction('commit', { revision: t.revision, craftyStopped: !!craftyDown })}>Finish the move</button>
+            </div>
+          ) : runtime.move === 'single' ? (
+            <div className="mt-1 space-y-2">
+              <p className="text-text-dim max-w-[68ch]">
+                Crafty keeps running your other servers; they pause for about a second while Spawnpoint checks that nothing still has this server’s files open and moves the folder on the same disk. The folder then belongs to the supervisor’s account. Crafty keeps a disabled entry; its schedules for this server stop working.
+              </p>
+              {running && <p className="text-gold">Stop this server first.</p>}
+              <div className="flex flex-wrap gap-3">
+                {running && <button className="btn btn-block px-4 py-2 text-sm" disabled={busy}
+                  onClick={() => post.mutate({ path: `/api/servers/${id}/action`, body: { action: 'stop_server' } })}>Stop server</button>}
+                <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy || !tested || running || testing}
+                  onClick={() => importAction('move', { revision: runtime.active })}>{busy ? 'Moving…' : 'Move to Spawnpoint'}</button>
+                {t && <button className="btn btn-block px-4 py-2 text-sm" disabled={busy} onClick={() => importAction('abort')}>Cancel and restore Crafty settings</button>}
+              </div>
+            </div>
+          ) : !t ? (
+            <div className="mt-1 space-y-2">
+              <p className="text-text-dim max-w-[68ch]">This panel cannot see every process on the machine, so Crafty must stop completely for the move. First freeze this server’s Crafty settings; then stop Crafty and move.</p>
+              <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy || !tested || running || testing} onClick={() => importAction('prepare')}>Freeze in Crafty</button>
+            </div>
+          ) : (
+            <div className="mt-1 space-y-2">
+              <p>Stop Crafty on this machine, for example <code className="font-mono">sudo systemctl stop crafty</code> or <code className="font-mono">docker stop crafty</code>. Its other servers go offline until you start it again.</p>
+              {craftyStatus}
+              <div className="flex flex-wrap gap-3">
+                <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy || !craftyDown} onClick={() => importAction('commit', { revision: t.revision, craftyStopped: true })}>{busy ? 'Moving…' : 'Move to Spawnpoint'}</button>
+                <button className="btn btn-block px-4 py-2 text-sm" disabled={busy} onClick={() => importAction('abort')}>Cancel and restore Crafty settings</button>
+              </div>
+            </div>
+          )}
+        </Step>
+      </ol>
+      {errorText && <p role="alert" className="text-sm mt-3 break-words">{errorText}</p>}
     </div>
   )
 }
