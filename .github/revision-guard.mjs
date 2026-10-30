@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
-import { portListening } from '../server/dist/services/platform.js';
+import { portListening, vmStatAvailableBytes } from '../server/dist/services/platform.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'spawnpoint-guard-'));
 const python = process.platform === 'win32' ? 'python' : 'python3';
@@ -24,6 +24,29 @@ try {
   try { check('stopped-server check detects a real TCP listener', await portListening(port)); }
   finally { await new Promise((r) => listener.close(r)); }
   check('stopped-server check confirms the closed TCP port', !await portListening(port));
+  // macOS keeps free pages low and caches files in the rest. Test JVMs are
+  // admitted against free pages plus file cache, never idle application
+  // memory (inactive anonymous pages), and never against free pages alone.
+  const vmStat = `Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   10000.
+Pages active:                                200000.
+Pages inactive:                              150000.
+Pages speculative:                             2000.
+Pages throttled:                                  0.
+Pages wired down:                             90000.
+Pages purgeable:                               3000.
+"Translation faults":                     123456789.
+File-backed pages:                            30000.
+Anonymous pages:                             322000.
+Pages stored in compressor:                   40000.
+Pages occupied by compressor:                 12000.
+`;
+  check('macOS available memory is free pages plus file cache, not idle app memory', vmStatAvailableBytes(vmStat) === (10000 + 30000) * 16384);
+  check('unreadable vm_stat output falls back instead of guessing', vmStatAvailableBytes(vmStat.replace(/^File-backed pages:.*\n/m, '')) === null);
+  if (process.platform === 'darwin') {
+    const live = vmStatAvailableBytes(spawnSync('/usr/bin/vm_stat', { encoding: 'utf8' }).stdout);
+    check('this Mac\'s vm_stat output parses, so admission does not fall back to free pages', live > 0);
+  }
   mkdirSync(join(dir, 'config'));
   mkdirSync(join(dir, 'mods'));
   mkdirSync(join(dir, 'automodpack'));

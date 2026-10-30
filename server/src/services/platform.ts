@@ -22,13 +22,32 @@ export function writeFileAtomic(path: string, data: string | Buffer): void {
   renameSync(part, path);
 }
 
-/** Memory the OS can hand out now. On Linux that is MemAvailable, which
-    counts reclaimable cache; os.freemem() may not. */
-function availableGb(): number {
+/** Bytes macOS can hand out without compressing or swapping anything, from
+    vm_stat output: free pages plus file-backed cache, which includes
+    read-ahead pages. Inactive pages are not counted: they include idle
+    application memory, such as a live server's heap. os.freemem() counts
+    free pages only, which macOS keeps low by caching, so a Mac with
+    gigabytes of cache looked full. */
+export function vmStatAvailableBytes(text: string): number | null {
+  const page = /page size of (\d+) bytes/.exec(text)?.[1];
+  const pages = ['Pages free', 'File-backed pages'].map((label) => new RegExp(`^${label}:\\s+(\\d+)\\.$`, 'm').exec(text)?.[1]);
+  if (!page || pages.some((n) => n === undefined)) return null;
+  return pages.reduce((sum, n) => sum + Number(n), 0) * Number(page);
+}
+
+/** Memory the OS can hand out now, counting reclaimable cache: Linux
+    MemAvailable, macOS vm_stat, Windows available physical memory. */
+async function availableGb(): Promise<number> {
   if (process.platform === 'linux') {
     try {
       const kb = /MemAvailable:\s+(\d+) kB/.exec(readFileSync('/proc/meminfo', 'utf8'))?.[1];
       if (kb) return Number(kb) / 1024 / 1024;
+    } catch { /* fall back */ }
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const bytes = vmStatAvailableBytes((await run('/usr/bin/vm_stat', [], { timeout: 5_000 })).stdout);
+      if (bytes !== null) return bytes / 1024 ** 3;
     } catch { /* fall back */ }
   }
   return freemem() / 1024 ** 3;
@@ -44,7 +63,7 @@ let reservedGb = 0;
 export async function withMemory<T>(needGb: number, what: string, onStatus: (d: string) => void, fn: () => Promise<T>): Promise<T | string> {
   const deadline = Date.now() + 10 * 60_000;
   for (;;) {
-    const free = availableGb() - reservedGb;
+    const free = await availableGb() - reservedGb;
     if (free >= needGb) break;
     const why = `${what} needs about ${needGb} GB of free memory and ${Math.max(0, free).toFixed(1)} GB is free`;
     if (Date.now() > deadline) return why;

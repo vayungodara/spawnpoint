@@ -192,10 +192,13 @@ They are also refused when another installed mod declares the jar as a dependenc
 
 Client tests wait while anyone is online on any server, and run one at a
 time under `nice`. Every test JVM first waits (up to 10 minutes, then
-`unverified`) until `MemAvailable` minus the memory promised to other
-running tests covers it (`withMemory` in `platform.ts`): 1 GB for the
-server test; 1, 2 or 4.5 GB for the client test and 2, 3.5 or 8 GB for the
-join, by mod count (up to 50, up to 150, more). On a 4 GB machine a client
+`unverified`) until available memory minus the memory promised to other
+running tests covers it (`withMemory` in `platform.ts`). Available memory
+counts what the OS can reclaim: `MemAvailable` on Linux, free pages plus
+file-backed cache from `vm_stat` on macOS (never idle application memory),
+and available physical memory on Windows. A test needs 1 GB for the
+server; 1, 2 or 4.5 GB for the client and 2, 3.5 or 8 GB for the join, by
+mod count (up to 50, up to 150, more). On a 4 GB machine a client
 test next to the live server and a server copy otherwise gets the panel
 OOM-killed.
 
