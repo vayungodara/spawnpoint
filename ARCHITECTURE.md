@@ -215,6 +215,16 @@ proposals, resealed and retested, at most three times. The owner reviews the
 before/after bytes before approving config writes. Report entries retain
 passed, failed, skipped or inconclusive results and their renderer. An
 observed rollback baseline is explicitly not a client-certified revision.
+AutoModpack fills in its missing defaults on its first boot. Until the first
+baseline becomes active it is provisional and is rebuilt from the live files
+on every attempt. A disposable boot of AutoModpack alone runs with the sealed
+config; if AutoModpack rewrote it, those bytes are written to the live config
+under the stopped fence and the baseline is sealed again. If that boot fails,
+the server is running when a write is needed, or the server's locked files
+changed meanwhile, the change waits for Test again instead of activating a
+stale baseline. Otherwise a server whose first mod is approved
+before its first start would seal the short provisioned config, and every
+live boot would refuse publication.
 
 The owner must first approve the mandatory launch guard and managed
 publication. Locked revisions currently accept Fabric's explicit Tools Java

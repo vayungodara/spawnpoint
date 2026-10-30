@@ -26,6 +26,21 @@ export interface Verdict {
   checks?: Record<string, import('./revisions.js').TestResult>;
   /** Disposable boot outputs, proposed for a new test, never live edits. */
   configs?: { path: string; src?: string; remove?: boolean }[];
+  /** AutoModpack's config as its first boot left it, when that differs. */
+  autoModpackConfig?: string;
+}
+
+const AM_CONFIG = 'automodpack/automodpack-server.json';
+const HOSTING_KEYS = ['modpackHost', 'generateModpackOnStart', 'selfUpdater'];
+
+/** The Forge test turns hosting off in its copy. Put the owner's publication
+    settings back so only what AutoModpack itself added can differ. */
+function withOwnerHosting(before: string, after: string): string {
+  const owner = JSON.parse(before) as Record<string, unknown>;
+  const out = JSON.parse(after) as Record<string, unknown>;
+  const keys = HOSTING_KEYS.filter((k) => k in owner);
+  return keys.every((k) => out[k] === owner[k]) ? after
+    : JSON.stringify({ ...out, ...Object.fromEntries(keys.map((k) => [k, owner[k]])) }, null, 2);
 }
 
 export const FORGE_ARGFILE = IS_WIN ? 'win_args.txt' : 'unix_args.txt';
@@ -85,13 +100,14 @@ let chain: Promise<unknown> = Promise.resolve();
 
 /** Boot this server's loader with exactly `jars` (absolute paths) as its
     mods folder. Serialized globally. */
-export function dryBoot(serverId: string, jars: string[], onStatus: (d: string) => void = () => {}, sourceDir = serverDir(serverId), lock?: RevisionLock): Promise<Verdict> {
+export function dryBoot(serverId: string, jars: string[], onStatus: (d: string) => void = () => {}, sourceDir = serverDir(serverId), lock?: RevisionLock,
+  opts: { autoModpackDefaults?: boolean } = {}): Promise<Verdict> {
   const test = async (): Promise<Verdict> => {
     // a mods-only boot stays well under 1 GB; the live server keeps its share
     let waited = false;
     const v = await withMemory(1, 'the server test', (d) => { waited = true; onStatus(d); }, () => {
       if (waited) onStatus('boot-testing the server with this change');
-      return dryBootInner(serverId, jars, sourceDir, lock);
+      return dryBootInner(serverId, jars, sourceDir, lock, opts.autoModpackDefaults);
     });
     return typeof v === 'string' ? { result: 'unverified', detail: v } : v;
   };
@@ -100,7 +116,7 @@ export function dryBoot(serverId: string, jars: string[], onStatus: (d: string) 
   return run;
 }
 
-async function dryBootInner(serverId: string, jars: string[], dir: string, lock?: RevisionLock): Promise<Verdict> {
+async function dryBootInner(serverId: string, jars: string[], dir: string, lock?: RevisionLock, autoModpackDefaults = false): Promise<Verdict> {
   const det = detect(dir, serverId);
   const launchArgs = lock ? lockedLaunchArgs(lock, '-Xmx1G') : loaderLaunchArgs(dir, det, '-Xmx2G');
   if (!launchArgs) return { result: 'unverified', detail: `Spawnpoint cannot boot-test ${det.loader} servers yet` };
@@ -154,6 +170,13 @@ async function dryBootInner(serverId: string, jars: string[], dir: string, lock?
           }
           for (const path of before.keys()) configs.push({ path, remove: true });
           if (configs.length) v = { ...v, configs };
+          // AutoModpack fills in its missing defaults on its first boot, before
+          // Fabric's EULA check and during Forge's construction
+          if (autoModpackDefaults && lock.files.some((f) => f.location === 'server' && f.path === AM_CONFIG)) {
+            const sealed = readFileSync(join(dir, AM_CONFIG), 'utf8');
+            const booted = withOwnerHosting(sealed, readFileSync(join(sandbox, AM_CONFIG), 'utf8'));
+            if (booted !== sealed) v = { ...v, autoModpackConfig: booted };
+          }
         }
       } catch (e) { v = { result: 'unverified', detail: `could not capture generated configs: ${String(e)}` }; }
       // the log outlives the sandbox wipe so the panel can show it

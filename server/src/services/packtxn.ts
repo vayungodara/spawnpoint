@@ -9,7 +9,7 @@ import { chownToDirOwner, moveFile, writeFileAtomic } from './platform.js';
 import { ledgerEntries, updateLedger, type LedgerEntry } from './ledger.js';
 import { dryBoot, type Verdict } from './preflight.js';
 import { isServerOnly } from './jardeps.js';
-import { autoModpackActive, extrasDir, publishPack } from './automodpack.js';
+import { autoModpackActive, extrasDir, hostingHold, publishPack } from './automodpack.js';
 import { clientGate, type ClientSet } from './launchgate.js';
 import { isRunningSafe, busyReason } from './maintenance.js';
 import { promotion, requestPromotion, restarting } from './promote.js';
@@ -414,6 +414,44 @@ function inputsFor(id: string, c: Pick<Candidate, 'files'>): RevisionInput[] {
   return inputs;
 }
 
+/** AutoModpack writes its missing defaults into its config on its first
+    boot. A server that has never started would seal the short config
+    Spawnpoint provisioned, every live boot would then differ from the lock,
+    and publication would refuse. Run that boot on a copy, with AutoModpack
+    alone so the rest of the pack cannot fail it, and keep the result, written
+    only while the server is confirmed stopped. Returns why it could not. */
+async function adoptFirstBootDefaults(id: string, baseline: string, status: (d: string) => void, log: (m: string) => void): Promise<boolean | string> {
+  if (!autoModpackActive(id) || hostingHold(id)) return false;
+  status('letting AutoModpack write its default settings on a copy');
+  const set = sealedSet(id, baseline);
+  const own = set.serverJars.filter((jar) => /^automodpack.*\.jar$/i.test(basename(jar)));
+  const v = await dryBoot(id, own.length ? own : set.serverJars, status, set.sourceDir, set.lock, { autoModpackDefaults: true });
+  if (v.result !== 'passed') return `AutoModpack could not write its default settings on a copy (${v.detail}); test again`;
+  if (v.autoModpackConfig === undefined) {
+    // nothing to write, but files edited while the copy booted would make
+    // the baseline stale the moment it became active
+    try { await verifyRevision(id, baseline, true); } catch (e) { return `the server's files changed during the test (${String(e).replace(/^Error: /, '')}); test again`; }
+    return false;
+  }
+  const live = join(serverDir(id), 'automodpack', 'automodpack-server.json');
+  const sealed = readFileSync(join(set.sourceDir, 'automodpack', 'automodpack-server.json'));
+  let refused: string | undefined;
+  try {
+    refused = await withStoppedRevision(id, async () => {
+      // an edit made while the copy booted is the owner's; keep it
+      if (!readFileSync(live).equals(sealed)) return 'the AutoModpack config changed during the test';
+      writeFileAtomic(live, v.autoModpackConfig!);
+      return undefined;
+    });
+  } catch (e) {
+    refused = String(e).replace(/^Error: /, ''); // a running or unreachable server
+  }
+  if (refused) return `AutoModpack's default settings were not saved (${refused}); test again`;
+  await chownToDirOwner(join(serverDir(id), 'automodpack'));
+  log(`packtxn: ${id}: AutoModpack wrote its first-boot defaults; sealing those`);
+  return true;
+}
+
 function sealedSet(id: string, revision: string) {
   const dir = revisionDir(id, revision);
   const serverJars: string[] = [];
@@ -436,7 +474,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
   const status = (detail: string): void => { c = save(id, { ...candidate(id)!, status: 'testing', detail }); };
   try {
     if (!revisionState(id).managedHosting) {
-      c = save(id, { ...c, consent: ['Install the required Crafty launch guard and hold AutoModpack hosting off until each boot and exact pack are verified. Permit pack rollback to restore locked configs and pack inputs, retaining altered copies for inspection. This changes the launch command and hosting flag, never Minecraft, the loader, or the world.'] });
+      c = save(id, { ...c, consent: [`Install the required Crafty launch guard and hold AutoModpack hosting off until each boot and exact pack are verified. Permit pack rollback to restore locked configs and pack inputs, retaining altered copies for inspection. If AutoModpack would add default settings on its next boot, let it write them on a copy first and keep them. This changes the launch command, the hosting flag and AutoModpack's own defaults, never Minecraft, the loader, or the world.`] });
       return wait(id, {}, 'owner consent is required to manage revision-checked starts and publication', log);
     }
     const { repairCandidate, repairInventory, repairKey } = await import('./repairs.js');
@@ -461,9 +499,19 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
         if (solved.candidate) continue;
       }
 
-      const baseline = revisionState(id).active ?? `${c.txn}-baseline`;
+      const active = revisionState(id).active;
+      const baseline = active ?? `${c.txn}-baseline`;
+      // a baseline is provisional until it becomes active: an interrupted
+      // first run rebuilds it from the live files instead of trusting its lock
+      if (!active) rmSync(revisionDir(id, baseline), { recursive: true, force: true });
       if (!existsSync(join(revisionDir(id, baseline), 'lock.json'))) {
         await sealRevision(id, baseline, inputsFor(id, { files: [] }));
+        const defaults = await adoptFirstBootDefaults(id, baseline, status, log);
+        if (typeof defaults === 'string') return wait(id, {}, defaults, log);
+        if (defaults) {
+          rmSync(revisionDir(id, baseline), { recursive: true, force: true });
+          await sealRevision(id, baseline, inputsFor(id, { files: [] }));
+        }
         reportRevision(id, baseline, { tests: { server: { result: 'inconclusive', detail: 'Observed pre-change pack; not certified by this test' }, client: { result: 'inconclusive', detail: 'Observed pre-change pack; not certified by this test' } } });
       } else await verifyRevision(id, baseline, true);
       if (!revisionState(id).active) {
