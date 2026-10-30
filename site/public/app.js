@@ -61,14 +61,14 @@ const PALETTES = {
 document.addEventListener("pointerdown", e => {
   const el = e.target.closest("[data-burst]");
   if (!el) return;
-  const pal = el.classList.contains("btn-emerald") || el.classList.contains("slot-go")
+  const pal = el.classList.contains("btn-emerald") || el.classList.contains("slot-go") || el.classList.contains("pl-big")
     ? PALETTES.emerald : PALETTES.stone;
   burst(e.clientX, e.clientY, pal, 18);
 });
 
 /* ---------- block-targeting outline ---------- */
 const tgt = $("#tgt");
-const TGT_SEL = ".btn, .slot, .faq-q, .tier, .loader-track li, .lever, .tile, .logo";
+const TGT_SEL = ".btn, .slot, .faq-q, .tier, .loader-track li, .lever, .tile, .logo, .pl-big";
 if (FINE && !PRM) {
   let cur = null;
   document.addEventListener("pointerover", e => {
@@ -274,6 +274,127 @@ function fpsTick(t) {
 }
 const startFps = () => { lastT = 0; fpsRAF = requestAnimationFrame(fpsTick); };
 const stopFps = () => { cancelAnimationFrame(fpsRAF); fpsRAF = null; };
+
+/* ---------- tour player ---------- */
+/* Replaces the native controls (kept without JS) with an XP-bar timeline,
+   keyboard shortcuts, and full screen that keeps the controls. */
+const player = $(".player");
+if (player) {
+  const video = $("video", player), big = $(".pl-big", player), bar = $(".pl-bar", player);
+  const playBtn = $(".pl-play", player), seek = $(".pl-seek", player), fsBtn = $(".pl-fs", player);
+  const cur = $(".pl-cur", player), dur = $(".pl-dur", player), bigText = $(".pl-big-t", player);
+  const fmt = s => `${(s / 60) | 0}:${String((s % 60) | 0).padStart(2, "0")}`;
+  const length = () => video.duration || 0;
+  let raf = 0;
+
+  video.controls = false;
+  video.tabIndex = -1;   /* clicking the picture focuses the player, so its keys work */
+  big.hidden = bar.hidden = false;
+
+  const toggle = () => { video.paused || video.ended ? video.play().catch(() => {}) : video.pause(); };
+  const jump = to => { video.currentTime = clamp(to, 0, length()); render(); };
+
+  function render() {
+    const t = video.currentTime, d = length();
+    seek.value = t;
+    seek.style.setProperty("--p", d ? (t / d).toFixed(4) : 0);
+    const label = fmt(t);
+    if (cur.textContent !== label) {
+      cur.textContent = label;
+      seek.setAttribute("aria-valuetext", d ? `${label} of ${fmt(d)}` : label);
+    }
+  }
+  function frame() { render(); raf = video.paused ? 0 : requestAnimationFrame(frame); }
+
+  function sync() {
+    const playing = !video.paused && !video.ended;
+    /* the big button hides once playback starts; keep keyboard focus in the player */
+    if (playing && document.activeElement === big) playBtn.focus({ preventScroll: true });
+    if (playing) player.classList.add("is-started");
+    player.classList.toggle("is-ended", video.ended);
+    $("use", playBtn).setAttribute("href", playing ? "#i-pause" : "#i-play");
+    playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
+    bigText.textContent = video.ended ? "Watch again" : "Watch the tour";
+    if (playing && !raf) raf = requestAnimationFrame(frame);
+  }
+  ["play", "pause", "ended", "seeked"].forEach(ev => video.addEventListener(ev, sync));
+  video.addEventListener("waiting", () => player.classList.add("is-wait"));
+  ["playing", "pause", "canplay"].forEach(ev => video.addEventListener(ev, () => player.classList.remove("is-wait")));
+  video.addEventListener("loadedmetadata", () => {
+    seek.max = length();
+    dur.textContent = $(".pl-len", player).textContent = fmt(length());
+    render();
+  });
+  video.addEventListener("timeupdate", () => { if (!raf) render(); });
+  /* light the bar up to the end of the buffered stretch being played;
+     anything before it is under the played fill anyway */
+  function paintBuffered() {
+    const b = video.buffered, d = length(), t = video.currentTime;
+    let end = t;
+    for (let i = 0; i < b.length; i++) if (b.start(i) <= t && t <= b.end(i)) end = b.end(i);
+    seek.style.setProperty("--b", d ? (end / d).toFixed(4) : 0);
+  }
+  video.addEventListener("progress", paintBuffered);
+  video.addEventListener("seeked", paintBuffered);
+
+  big.addEventListener("click", toggle);
+  playBtn.addEventListener("click", toggle);
+  video.addEventListener("click", toggle);
+  seek.addEventListener("input", () => jump(+seek.value));
+
+  /* full screen: the player itself, so the controls come along; an iPhone can
+     only take the bare video full screen, with its own controls */
+  const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement;
+  const enterFs = player.requestFullscreen || player.webkitRequestFullscreen;
+  function toggleFs() {
+    if (fsElement()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else if (enterFs) enterFs.call(player)?.catch?.(() => {});
+    else video.webkitEnterFullscreen?.();
+  }
+  function syncFs() {
+    const on = fsElement() === player;
+    $("use", fsBtn).setAttribute("href", on ? "#i-unfull" : "#i-full");
+    fsBtn.setAttribute("aria-label", on ? "Exit full screen" : "Full screen");
+  }
+  fsBtn.hidden = !enterFs && !video.webkitEnterFullscreen;
+  fsBtn.addEventListener("click", toggleFs);
+  video.addEventListener("dblclick", toggleFs);
+  document.addEventListener("fullscreenchange", syncFs);
+  document.addEventListener("webkitfullscreenchange", syncFs);
+
+  /* keys anywhere in the player: Space/K play, arrows ±5 s, J/L ±10 s, F full screen */
+  player.addEventListener("keydown", e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if ((k === " " || k === "enter") && e.target.closest("button")) return;
+    const step = { arrowleft: -5, arrowdown: -5, arrowright: 5, arrowup: 5, j: -10, pagedown: -10, l: 10, pageup: 10 }[k];
+    if (step) jump(video.currentTime + step);
+    else if (k === " " || k === "k") toggle();
+    else if (k === "f") toggleFs();
+    else if (k === "home") jump(0);
+    else if (k === "end") jump(length());
+    else return;
+    e.preventDefault();
+  });
+
+  /* fetch only the header (duration) once the player is near the screen */
+  new IntersectionObserver((entries, io) => {
+    if (entries[0].isIntersecting) { video.preload = "metadata"; io.disconnect(); }
+  }, { rootMargin: "300px 0px" }).observe(player);
+
+  /* if the file fails to load or play, give the browser's own player back */
+  const fallback = () => {
+    cancelAnimationFrame(raf); raf = 0;
+    player.classList.remove("is-wait");
+    const hadFocus = player.contains(document.activeElement);
+    video.controls = true;
+    video.removeAttribute("tabindex");
+    big.hidden = bar.hidden = true;
+    if (hadFocus) video.focus();
+  };
+  $("source", video).addEventListener("error", fallback);
+  video.addEventListener("error", fallback);
+}
 
 /* ---------- ore sparkle on tier hover ---------- */
 if (FINE && !PRM) {

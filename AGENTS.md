@@ -149,3 +149,10 @@ push. Rebuild and restart the disposable `sp` service, check `/api/health`,
 and verify the shipped lifecycle path there. A website check alone does not
 prove the self-hosted panel works. Publishing releases or changing a public
 deployment still needs explicit approval.
+
+The site's `worker.js` answers byte-range requests for `/media/*`, because
+static assets ignore `Range` and browsers then can't seek the tour video
+(Safari won't play it). `wrangler dev` in `site/` runs it locally. After a
+site deploy, check that `curl -s -o /dev/null -w '%{http_code}' -H 'Range:
+bytes=0-1' https://spawnpoint.vayun.net/media/tour.mp4` prints `206`, then
+scrub the tour on a phone.

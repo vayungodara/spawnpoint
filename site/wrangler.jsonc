@@ -1,9 +1,12 @@
 // The landing page at https://spawnpoint.vayun.net, served as static assets
 // by a Cloudflare Worker. Deploy from this folder: npx wrangler@4 deploy
+// worker.js runs only for /media/*, to answer byte-range requests so the
+// tour video can be scrubbed.
 {
   "name": "spawnpoint-site",
   "compatibility_date": "2026-10-01",
-  "assets": { "directory": "./public" },
+  "main": "worker.js",
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": ["/media/*"] },
   "routes": [{ "pattern": "spawnpoint.vayun.net", "custom_domain": true }],
   "workers_dev": false
 }
