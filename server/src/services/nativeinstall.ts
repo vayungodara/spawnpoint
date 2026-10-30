@@ -93,7 +93,7 @@ export async function finishNativeInstalls(log: (message: string) => void): Prom
       job.warnings.push(...await finalizeServer(job.id, { mc: job.mc, loader: job.loader, memGb: job.memGb, gamePort: job.port }));
       const { provisionAutoModpack } = await import('./automodpack.js');
       job.warnings.push(...await provisionAutoModpack(job.id, job.loader));
-      job.phase = 'done'; job.status = `done — ${job.packName} is ready on port ${job.port}. Press Start.`; job.done = true; save(job);
+      job.phase = 'done'; job.status = `${job.packName} is ready on port ${job.port}.`; job.done = true; save(job);
     } catch (error) {
       job.phase = 'failed'; job.status = 'failed'; job.error = String(error); job.done = true; save(job);
       log(`native installation ${job.id}: ${job.error}`);

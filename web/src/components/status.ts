@@ -22,8 +22,13 @@ export function fmtMem(mem: number | string): string {
 /** Paper-family servers load plugins, everything else here loads mods. */
 export const PLUGIN_LOADERS = ['paper', 'spigot', 'bukkit', 'purpur', 'folia']
 
-/** Friends join at the host this browser reached the panel by, on the server's port. */
-export const joinAddress = (s: ServerInfo) => (s.port === 25565 ? location.hostname : `${location.hostname}:${s.port}`)
+/** Friends join at the host this browser reached the panel by, on the server's
+    port. On localhost that host means nothing to them, so use the LAN address. */
+export function joinAddress(s: ServerInfo): string {
+  const local = /^(localhost|127\.|\[?::1\]?$)/.test(location.hostname)
+  const host = local && s.lan ? s.lan : location.hostname
+  return s.port === 25565 ? host : `${host}:${s.port}`
+}
 
 export const titleOf = (f: StagedFile): string => f.entry?.title ?? f.path ?? f.file
 

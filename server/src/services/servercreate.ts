@@ -347,7 +347,7 @@ export function startCreateServer(opts: {
     job.warnings.push(...(await provisionAutoModpack(serverId, opts.loader)));
     await chownToDirOwner(dir); // panel is root, the server is not — see platform.ts
 
-    job.status = `done — "${name}" is ready with ${mem}GB on port ${port}. Press Start.`;
+    job.status = `"${name}" is ready, with ${mem} GB on port ${port}.`;
     job.done = true;
   })().catch((e) => {
     job.error = e instanceof Error ? e.message : String(e);
@@ -422,7 +422,7 @@ async function buildPackServer(
   job.warnings.push(...(await provisionAutoModpack(serverId, meta.loader)));
   await chownToDirOwner(dir); // panel is root, the server is not — see platform.ts
 
-  job.status = `done — "${name}" is ready with ${mem}GB on port ${port}. Start it from the Dashboard (first boot takes a few minutes).`;
+  job.status = `"${name}" is ready, with ${mem} GB on port ${port}. Its first boot takes a few minutes.`;
   job.done = true;
 }
 

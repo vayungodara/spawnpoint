@@ -475,7 +475,13 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
   const status = (detail: string): void => { c = save(id, { ...candidate(id)!, status: 'testing', detail }); };
   try {
     if (!revisionState(id).managedHosting) {
-      c = save(id, { ...c, consent: [`Install the required ${nativeRecord(id) ? 'Spawnpoint' : 'Crafty'} launch guard and hold AutoModpack hosting off until each boot and exact pack are verified. Permit pack rollback to restore locked configs and pack inputs, retaining altered copies for inspection. If AutoModpack would add default settings on its next boot, let it write them on a copy first and keep them. This changes the launch command, the hosting flag and AutoModpack's own defaults, never Minecraft, the loader, or the world.`] });
+      c = save(id, { ...c, consent: [
+        `This is a one-time setup for this server. Spawnpoint adds its launch guard to the ${nativeRecord(id) ? 'Spawnpoint' : 'Crafty'} start command, so the server only starts a pack that matches what was tested.`,
+        'Friends\' mod sync (AutoModpack hosting) stays off until each boot and the exact pack have been checked.',
+        'Undoing a change restores the tested configs and pack files. Copies of anything that was edited are kept so you can look at them.',
+        'If AutoModpack wants to add its default settings on the next boot, it writes them on a copy first and Spawnpoint keeps them.',
+        'Only the start command, the sync switch and AutoModpack\'s own defaults change. Minecraft, the loader and your world are not touched.',
+      ] });
       return wait(id, {}, 'owner consent is required to manage revision-checked starts and publication', log);
     }
     const { repairCandidate, repairInventory, repairKey } = await import('./repairs.js');

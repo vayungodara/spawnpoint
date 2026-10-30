@@ -20,7 +20,7 @@ export function JoinChip({ s, className = '' }: { s: ServerInfo; className?: str
   const addr = joinAddress(s)
   return (
     <button
-      onClick={() => copyText(addr).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2200) })}
+      onClick={() => copyText(addr).then(() => { setCopied(true); window.dispatchEvent(new Event('sp-invited')); setTimeout(() => setCopied(false), 2200) })}
       className={`btn btn-block px-3.5 py-2 text-left flex items-center gap-3 min-w-0 ${className}`}
       title="Copy the address friends join with"
     >

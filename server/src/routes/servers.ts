@@ -4,6 +4,7 @@ import { rconCommand } from '../clients/rcon.js';
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { networkInterfaces } from 'node:os';
 import { listServers, setActiveUuid, getActiveUuid, serverDir, pinJavaFor } from '../services/servers.js';
 import { readProperties, patchProperties } from '../services/properties.js';
 import { setOverride, detect } from '../services/detect.js';
@@ -82,10 +83,23 @@ function linesSince(lines: string[], seconds: number, newest = new Date()): stri
   return stamped ? lines.slice(first) : lines;
 }
 
+/** This machine's LAN address, for join addresses when the panel is opened
+    on localhost (a friend can't join "localhost"). Skips link-local and
+    Docker's default bridge. */
+function lanAddress(): string | null {
+  for (const list of Object.values(networkInterfaces())) {
+    for (const a of list ?? []) {
+      if (a.family === 'IPv4' && !a.internal && !/^(169\.254|172\.17)\./.test(a.address)) return a.address;
+    }
+  }
+  return null;
+}
+
 export default async function serverRoutes(app: FastifyInstance) {
   app.get('/api/servers', async (_req, reply) => {
     try {
-      return { servers: await listServers(), active: getActiveUuid(), warning: craftyApi.listingError };
+      const lan = lanAddress();
+      return { servers: (await listServers()).map((s) => ({ ...s, lan })), active: getActiveUuid(), warning: craftyApi.listingError };
     } catch (e) {
       // pre-setup there is no Crafty token yet — that's a state, not a 500
       if (String(e).includes('No Crafty API token')) {

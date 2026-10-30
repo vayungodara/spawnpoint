@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  api, fmtWhen, txnDate, useChange, useDecide, useRevisions, useServerAction,
+  api, fmtWhen, txnDate, useChange, useDecide, useRevisions, useServerAction, useStats,
   type Candidate, type ChangeAction, type Pin, type Promotion, type Revision, type StagedFile, type Verdict,
 } from '../api'
 import Sheet from './Sheet'
@@ -276,6 +276,30 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
   const rev = useRevState(id, c)
   const [tag, tagCls] = c.status === 'applied' && !isLive(c, p, rev) ? TAG.activating : TAG[c.status]
   const act = (action: ChangeAction) => decide.mutate({ action, revision: c.revision })
+  // The first managed change installs the launch guard, which the runtime only
+  // accepts while the server is stopped. Offer to stop it instead of failing.
+  const { data: stats } = useStats(id)
+  const [stopping, setStopping] = useState(false)
+  const [stopErr, setStopErr] = useState('')
+  const needsStop = c.detail === FIRST_CONSENT && !!stats?.running
+  // approve only once the server is confirmed stopped; a timeout or failed poll says so instead
+  const stopThenApprove = async () => {
+    setStopping(true); setStopErr('')
+    const deadline = Date.now() + 120_000
+    const left = () => AbortSignal.timeout(Math.max(1, deadline - Date.now()))
+    try {
+      await api(`/api/servers/${id}/action`, { method: 'POST', body: JSON.stringify({ action: 'stop' }), signal: left() })
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const st = await api<{ running: boolean }>(`/api/servers/${id}/stats`, { signal: left() })
+        if (!st.running && Date.now() < deadline) { act('apply'); return }
+      }
+      setStopErr("The server didn't stop within two minutes. Check its console, then try again.")
+    } catch (e) {
+      setStopErr(Date.now() >= deadline ? "The server didn't stop within two minutes. Check its console, then try again."
+        : e instanceof Error ? e.message.replace(/^\d+: /, '') : String(e))
+    } finally { setStopping(false) }
+  }
   const asked = c.files.filter((f) => f.entry?.via !== 'dependency' && !f.path)
   const excerpt = c.client?.excerpt?.length ? c.client.excerpt : c.server?.excerpt ?? []
   const solver = c.solver
@@ -349,7 +373,6 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
         ) : null}
 
         {c.status === 'ready' && p?.action === 'apply' && <RestartChoice id={id} p={p} busy={decide.isPending} onDecide={act} />}
-        {decide.error && <p role="alert" className="text-sm text-redstone font-semibold">{decide.error.message.replace(/^\d+: /, '')}</p>}
       </div>
 
       <div className="sheet-footer max-h-[50%] overflow-y-auto shrink-0 p-5 sm:px-6 border-t-2 border-ink space-y-3" style={{ background: 'var(--color-block)' }}>
@@ -363,15 +386,17 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
                   ? 'I approve the changes listed above.'
                   : 'I approve these changes and accept the test gaps shown above. Hash checks and world-restore consent cannot be waived.'}</span>
             </label>
-            <button onClick={() => act('apply')} disabled={decide.isPending || !consent} className="btn btn-emerald w-full py-2.5 text-sm">
-              {decide.isPending && decide.variables?.action === 'apply' ? 'Approving…' : 'Approve and continue'}
+            {needsStop && <p className="text-xs text-text-dim">This one-time setup needs the server stopped, so anyone on it is disconnected. When the test finishes, press Start to bring it back with the new mod.</p>}
+            <button onClick={() => (needsStop ? stopThenApprove() : act('apply'))} disabled={decide.isPending || stopping || !consent} className="btn btn-emerald w-full py-2.5 text-sm">
+              {stopping ? 'Stopping the server…' : decide.isPending && decide.variables?.action === 'apply' ? 'Approving…' : needsStop ? 'Stop the server and approve' : 'Approve and continue'}
             </button>
             <div className="grid grid-cols-2 gap-3">
-              <button onClick={() => act('retest')} disabled={decide.isPending} className="btn btn-block py-2 text-sm">Test again</button>
-              <button onClick={() => act('discard')} disabled={decide.isPending} className="btn btn-redstone py-2 text-sm">Discard</button>
+              <button onClick={() => act('retest')} disabled={decide.isPending || stopping} className="btn btn-block py-2 text-sm">Test again</button>
+              <button onClick={() => act('discard')} disabled={decide.isPending || stopping} className="btn btn-redstone py-2 text-sm">Discard</button>
             </div>
           </>
         )}
+        {(decide.error || stopErr) && <p role="alert" className="text-sm text-redstone font-semibold pop-in">{stopErr || decide.error!.message.replace(/^\d+: /, '')}</p>}
         <p className="hud !opacity-80 !text-[10px]">LIVE FILES STAY UNCHANGED UNTIL PROMOTION</p>
       </div>
     </div>

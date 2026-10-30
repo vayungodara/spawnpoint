@@ -13,6 +13,8 @@ export interface ServerInfo {
   path: string
   active: boolean
   detection: Detection
+  /** this machine's LAN address, used when the panel is open on localhost */
+  lan?: string | null
 }
 export interface Stats {
   running: boolean

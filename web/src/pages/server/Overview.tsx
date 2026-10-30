@@ -207,7 +207,7 @@ function InviteCard({ s }: { s: ServerInfo }) {
   const [msg, setMsg] = useState<string | null>(null)
   const get = useMutation({
     mutationFn: (format?: 'curseforge') => downloadStarter(s.id, format),
-    onSuccess: () => setMsg('Downloaded. Send that one file to your friends.'),
+    onSuccess: () => { setMsg('Downloaded. Send that one file to your friends.'); window.dispatchEvent(new Event('sp-invited')) },
     onError: (e) => setMsg(`Starter pack failed: ${e instanceof Error ? e.message : String(e)}`),
   })
   return (
@@ -254,6 +254,51 @@ function ConsolePreview({ s, running }: { s: ServerInfo; running: boolean }) {
   )
 }
 
+/** First-run checklist: start → add a mod → invite. Ticks itself off from real
+    state and goes away once all three are done, or when dismissed. */
+function FirstSteps({ s, stats }: { s: ServerInfo; stats: Stats | undefined }) {
+  const key = `sp-first-steps-${s.id}`
+  const [hidden, setHidden] = useState(() => localStorage.getItem(key) === 'done')
+  const modded = MOD_LOADERS.includes(s.detection.loader)
+  const { data: revs } = useRevisions(modded ? s.id : undefined)
+  const [invited, setInvited] = useState(() => localStorage.getItem(`${key}-invite`) === '1')
+  useEffect(() => {
+    const mark = () => { localStorage.setItem(`${key}-invite`, '1'); setInvited(true) }
+    window.addEventListener('sp-invited', mark)
+    return () => window.removeEventListener('sp-invited', mark)
+  }, [key])
+  const running = stats?.phase === 'ready' || (!!stats?.running && !stats?.phase)
+  const steps = [
+    { done: running || !!revs?.revisions.length, label: 'Start the server', hint: stats?.phase === 'starting' ? 'Booting… the first start takes about a minute.' : 'Press Start at the top. Java downloads itself the first time.' },
+    ...(modded ? [{ done: !!revs?.revisions.some((r) => !r.id.endsWith('-baseline')), label: 'Add a mod', hint: 'Pick one in Mods. Spawnpoint tests it on a copy, then asks you before it goes live.', to: `/s/${s.id}/mods` }] : []),
+    { done: invited, label: 'Invite a friend', hint: modded ? 'Copy the address and send the starter pack below.' : 'Copy the address below and send it.' },
+  ]
+  const all = steps.every((x) => x.done)
+  if (hidden || (all && (!modded || revs !== undefined))) return null
+  const next = steps.findIndex((x) => !x.done)
+  return (
+    <section className="block p-4 sm:p-5 rise-in" aria-label="First steps">
+      <div className="flex items-center gap-3 mb-3">
+        <h2 className="hud !opacity-100 text-emerald">FIRST STEPS · {steps.filter((x) => x.done).length}/{steps.length}</h2>
+        <button onClick={() => { localStorage.setItem(key, 'done'); setHidden(true) }} className="ml-auto text-xs text-text-dim hover:text-text underline underline-offset-2">Hide</button>
+      </div>
+      <ol className="grid sm:grid-cols-3 gap-3">
+        {steps.map((x, i) => (
+          <li key={x.label} className={`flex gap-3 p-3 border-2 ${i === next ? 'border-emerald bg-block-2' : 'border-line/60'}`}>
+            <span aria-hidden className={`w-6 h-6 shrink-0 grid place-items-center border-2 border-ink font-px text-[11px] ${x.done ? 'bg-emerald text-ink' : 'bg-bedrock'}`}>{x.done ? '✓' : i + 1}</span>
+            <span className="min-w-0">
+              <b className={`text-sm flex ${x.done ? 'text-text-dim line-through decoration-2' : ''}`}>
+                {'to' in x && x.to && !x.done && i === next ? <Link to={x.to} className="underline underline-offset-2">{x.label}</Link> : x.label}
+              </b>
+              {!x.done && <span className="text-xs text-text-dim flex mt-0.5">{x.hint}</span>}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
 export default function Overview() {
   const s = useCurrentServer()
   const { data: stats } = useStats(s?.id)
@@ -270,6 +315,7 @@ export default function Overview() {
       {changeVisible(c) && <ChangeCard id={s.id} c={c} p={change?.promotion?.action === 'apply' ? change.promotion : null} />}
       {/* a turned-away change leaves the card; say so where the owner was watching */}
       {!changeVisible(c) && <Rejections id={s.id} />}
+      <FirstSteps s={s} stats={stats} />
       {/* a stopped server has no numbers worth a row of dashes; the hero says it is stopped */}
       {stats?.running && <Tiles id={s.id} stats={stats} />}
       <div className="grid lg:grid-cols-2 gap-6">

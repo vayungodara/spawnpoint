@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { totalmem } from 'node:os';
 import * as modrinth from '../clients/modrinth.js';
 import type { ContentType } from '../clients/modrinth.js';
 import { install, installCurseforge, listInstalled, toggleInstalled, deleteInstalled, checkUpdates, updateAll } from '../services/installer.js';
@@ -258,7 +259,8 @@ export default async function contentRoutes(app: FastifyInstance) {
   );
 
   // ---- create a plain server: any loader, any version, no Crafty visit ----
-  app.get('/api/loaders', async () => ({ loaders: listLoaders() }));
+  // hostMemGb lets the create form default the heap to what this box can spare
+  app.get('/api/loaders', async () => ({ loaders: listLoaders(), hostMemGb: Math.round(totalmem() / 1024 ** 3) }));
   app.get<{ Querystring: { loader: string } }>('/api/loaders/versions', async (req, reply) => {
     try {
       return { versions: await listLoaderVersions(String(req.query.loader ?? '')) };

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { api } from '../api'
 import { Pi, loaderIcon } from '../components/PixelIcons'
 import bandSurface from '../assets/band-surface.webp'
 
@@ -24,12 +25,16 @@ function NewServerPanel() {
   const [loader, setLoader] = useState('fabric')
   const [mc, setMc] = useState('')
   const [name, setName] = useState('')
-  const [mem, setMem] = useState(6)
+  const [mem, setMem] = useState<number | null>(null)
   const [jobId, setJobId] = useState<string | null>(null)
   const { data: available } = useQuery({
     queryKey: ['loaders'],
-    queryFn: async () => (await (await fetch('/api/loaders')).json()) as { loaders: string[] },
+    queryFn: async () => (await (await fetch('/api/loaders')).json()) as { loaders: string[]; hostMemGb?: number },
   })
+  // half the machine, 2 to 6 GB: enough for a modded pack, and room left for the mod test's second copy
+  const host = available?.hostMemGb ?? 8
+  const memMax = Math.max(2, Math.min(12, host - 1))
+  const memGb = mem ?? Math.min(6, Math.max(2, Math.floor(host / 2)))
 
   const { data: versions, isFetching: loadingVersions } = useQuery({
     queryKey: ['loader-versions', loader],
@@ -50,7 +55,7 @@ function NewServerPanel() {
       const r = await fetch('/api/servers/create', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, loader, mc, memGb: mem }),
+        body: JSON.stringify({ name, loader, mc, memGb }),
       })
       const j = await r.json()
       if (!r.ok) throw new Error(j.error ?? 'create failed')
@@ -68,6 +73,7 @@ function NewServerPanel() {
     refetchInterval: (q) => (q.state.data?.done ? false : 2000),
   })
 
+  const [startErr, setStartErr] = useState('')
   const busy = create.isPending || (!!jobId && !job?.done)
 
   return (
@@ -120,13 +126,13 @@ function NewServerPanel() {
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="hud">MEMORY · {mem} GB</span>
+          <span className="hud">MEMORY · {memGb} GB</span>
           <input
             type="range"
             min={2}
-            max={12}
+            max={memMax}
             step={1}
-            value={mem}
+            value={memGb}
             onChange={(e) => setMem(Number(e.target.value))}
             disabled={busy}
             aria-label="Server memory in gigabytes"
@@ -155,14 +161,25 @@ function NewServerPanel() {
               </span>
               {job.done && (
                 <button
-                  onClick={async () => { await qc.invalidateQueries({ queryKey: ['servers'] }); navigate(job.serverId ? `/s/${job.serverId}` : '/') }}
+                  onClick={async () => {
+                    // the first thing everyone does next is press Start; do it for them
+                    setStartErr('')
+                    if (job.serverId) {
+                      try { await api(`/api/servers/${job.serverId}/action`, { method: 'POST', body: JSON.stringify({ action: 'start' }) }) }
+                      catch (e) { setStartErr(`Couldn't start it: ${String(e instanceof Error ? e.message : e).replace(/^\d+: /, '')}`); return }
+                    }
+                    await qc.invalidateQueries() // servers and runtime ownership both changed
+                    navigate(job.serverId ? `/s/${job.serverId}` : '/')
+                  }}
+                  autoFocus
                   className="btn btn-emerald px-4 py-1.5 ml-auto"
                 >
-                  Open it
+                  Start it
                 </button>
               )}
             </div>
           )}
+          {startErr && <div role="alert" className="text-redstone mt-1.5">✗ {startErr}</div>}
           {job?.warnings?.length ? (
             <div className="text-text-dim mt-1.5">{job.warnings.join(' · ')}</div>
           ) : null}

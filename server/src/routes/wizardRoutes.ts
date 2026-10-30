@@ -139,6 +139,8 @@ export default async function wizardRoutes(app: FastifyInstance) {
     return {
       active: true,
       runtime: s.runtime,
+      // the installer's own service; without it the wizard leads with Crafty
+      supervisor: await supervisor('health').then(() => true, () => false),
       craftyUrl: s.craftyUrl,
       craftyReachable,
       hasJdk,
