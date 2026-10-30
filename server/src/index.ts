@@ -2,8 +2,9 @@ import { startScheduler } from './services/scheduler.js';
 import { startTpsMonitor } from './services/tpsmonitor.js';
 import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
-import { chmodSync, existsSync, readFileSync } from 'node:fs';
-import { loadSettings, PATHS } from './config.js';
+import { chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadSettings, PATHS, saveSettings } from './config.js';
 import serverRoutes from './routes/servers.js';
 import configRoutes from './routes/configRoutes.js';
 import contentRoutes from './routes/contentRoutes.js';
@@ -28,7 +29,7 @@ import { resumePromotions } from './services/promote.js';
 import { listJobs } from './services/servercreate.js';
 import { isServerId } from './services/servers.js';
 import { craftyApi } from './clients/crafty.js';
-import { giveToSupervisor, nativeRecords, serviceAccount, startNativeWatcher } from './services/native.js';
+import { giveToSupervisor, nativeRecords, serviceAccount, startNativeWatcher, supervisor } from './services/native.js';
 import { thawAbandonedCrafty } from './services/nativeimport.js';
 
 declare module 'fastify' {
@@ -157,6 +158,30 @@ setTimeout(() => {
     ),
   );
 }, 3_000);
+
+// The installer reads the code as soon as /api/health answers, so mint it first.
+// Once a PIN exists the wizard never reopens: drop any stale code.
+if (wizardActive()) setupCode();
+else rmSync(join(PATHS.data, 'setup-code.txt'), { force: true });
+// Repair panels left in Crafty mode with no Crafty connection (the old
+// Settings switch allowed it, and it reopened the wizard): go back to
+// Spawnpoint's service when it answers.
+if (pinConfigured() && settings.runtime === 'crafty' && !existsSync(PATHS.craftyTokenFile)) {
+  // the supervisor may start after the panel at boot, so try for a few minutes
+  const repair = (tries: number): void => {
+    void supervisor('health').then(() => {
+      try {
+        const s = loadSettings();
+        if (s.runtime === 'crafty' && !existsSync(PATHS.craftyTokenFile)) {
+          s.runtime = 'standalone';
+          saveSettings(s);
+          app.log.info('spawnpoint: Crafty was selected but never connected; switched back to the Spawnpoint service');
+        }
+      } catch (e) { app.log.warn(`spawnpoint: could not switch back to the Spawnpoint service: ${String(e)}`); }
+    }, () => { if (tries > 1) setTimeout(() => repair(tries - 1), 20_000); });
+  };
+  repair(10);
+}
 
 await app.listen({ host: '0.0.0.0', port: settings.port });
 adminToken(); // scripts on this machine read it from data/admin-token

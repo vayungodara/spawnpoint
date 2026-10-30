@@ -9,7 +9,7 @@ import { listServers, setActiveUuid, getActiveUuid, serverDir, pinJavaFor } from
 import { readProperties, patchProperties } from '../services/properties.js';
 import { setOverride, detect } from '../services/detect.js';
 import { serverPhase } from '../services/phase.js';
-import { loadSettings, saveSettings } from '../config.js';
+import { PATHS, loadSettings, saveSettings } from '../config.js';
 import { markRunning } from '../services/bootrestore.js';
 import { applyPending, listPending } from '../services/pendingmods.js';
 import { derivedRcon } from '../services/ports.js';
@@ -106,7 +106,7 @@ export default async function serverRoutes(app: FastifyInstance) {
     } catch (e) {
       // pre-setup there is no Crafty token yet — that's a state, not a 500
       if (String(e).includes('No Crafty API token')) {
-        return reply.code(503).send({ error: 'Crafty is not connected yet — finish setup in the browser' });
+        return reply.code(503).send({ error: 'Crafty is not connected. Connect it in Settings, or switch back to Spawnpoint there.' });
       }
       throw e;
     }
@@ -309,6 +309,10 @@ export default async function serverRoutes(app: FastifyInstance) {
   app.post<{ Body: { mode: 'crafty' | 'standalone' } }>('/api/runtime', async (req, reply) => {
     if (!['crafty', 'standalone'].includes(req.body?.mode)) return reply.code(400).send({ error: 'choose crafty or standalone' });
     if (req.body.mode === 'standalone') await supervisor('health');
+    // Crafty mode with no Crafty behind it lists nothing and creates nothing
+    if (req.body.mode === 'crafty' && !existsSync(PATHS.craftyTokenFile)) {
+      return reply.code(409).send({ error: 'connect Crafty first: paste its API key in Settings' });
+    }
     const settings = loadSettings();
     settings.runtime = req.body.mode;
     saveSettings(settings);

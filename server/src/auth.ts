@@ -159,6 +159,7 @@ const NEEDS: Record<string, Scope | 'admin'> = {
   'DELETE /api/tokens/:tokenId': 'admin',
   'PUT /api/settings': 'admin',
   'POST /api/runtime': 'admin',
+  'POST /api/runtime/crafty': 'admin',
   'POST /api/admin/exit': 'admin',
   'DELETE /api/servers/:id': 'admin',
   'POST /api/servers/:id/runtime/import': 'admin',

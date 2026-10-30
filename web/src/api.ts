@@ -54,6 +54,8 @@ export function useServers() {
     queryKey: ['servers'],
     queryFn: () => api<{ servers: ServerInfo[]; active: string | null; warning?: string }>('/api/servers'),
     refetchInterval: 10_000,
+    // "not connected" is a setting, not a blip: show the fix at once
+    retry: (n, e) => n < 3 && !/not connected/.test(String(e)),
   })
 }
 

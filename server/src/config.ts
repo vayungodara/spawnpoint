@@ -78,6 +78,8 @@ export function saveSettings(s: Settings): void {
 }
 
 let tokenCache: string | null = null;
+/** Forget the cached token after Settings connects or replaces Crafty. */
+export function resetCraftyToken(): void { tokenCache = null; }
 
 /** The Crafty API token the setup wizard stored, or null before setup. */
 export function craftyToken(): string | null {

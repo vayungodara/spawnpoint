@@ -3,7 +3,7 @@
 // is verified (against a stub Crafty) and saved, the PIN step logs the
 // browser in, and afterwards the API refuses anyone without a session or
 // the admin token, on loopback too.
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -52,20 +52,31 @@ mkdirSync(data, { recursive: true });
 writeFileSync(join(data, 'settings.json'), JSON.stringify({ port: PORT }));
 
 let done = false;
-const child = spawn(process.execPath, ['server/dist/index.js'], {
-  env: { ...process.env, SPAWNPOINT_ROOT: root },
-  stdio: 'ignore',
-});
+let child;
 const die = (why) => { console.error(why); try { child.kill(); } catch {} crafty.close(); process.exit(1); };
-child.on('exit', (code) => { if (!done) die(`panel exited early (code ${code})`); });
-
 const base = `http://127.0.0.1:${PORT}`;
-const deadline = Date.now() + 90_000;
-for (;;) {
-  if (Date.now() > deadline) die('panel never served /api/health');
-  try { if ((await fetch(`${base}/api/health`)).ok) break; } catch { /* booting */ }
-  await new Promise((r) => setTimeout(r, 1000));
-}
+const boot = async () => {
+  child = spawn(process.execPath, ['server/dist/index.js'], {
+    env: { ...process.env, SPAWNPOINT_ROOT: root },
+    stdio: 'ignore',
+  });
+  child.on('exit', (code) => { if (!done) die(`panel exited early (code ${code})`); });
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    if (Date.now() > deadline) die('panel never served /api/health');
+    try { if ((await fetch(`${base}/api/health`)).ok) break; } catch { /* booting */ }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+};
+const restart = async () => {
+  done = true;
+  const exited = new Promise((r) => child.once('exit', r));
+  child.kill();
+  await exited;
+  done = false;
+  await boot();
+};
+await boot();
 const post = (path, body, headers = {}) => fetch(`${base}${path}`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', ...headers },
@@ -248,6 +259,55 @@ check('a tampered token is refused', await as('read', 'GET', '/api/chatgenie') =
   && (await fetch(`${base}/api/chatgenie`, { headers: { authorization: `Bearer spt_${readId}_${'A'.repeat(32)}` } })).status === 401);
 check('the owner can revoke a token', (await fetch(`${base}/api/tokens/${readId}`, { method: 'DELETE', headers: bearer })).ok);
 check('a revoked token stops working at once', await as('read', 'GET', '/api/chatgenie') === 401);
+
+// ---- runtime-switch round trip -------------------------------------------
+// The owner finishes setup, picks Crafty in Settings without connecting it,
+// and restarts. An older build reopened the wizard here, minted a new code,
+// then refused the PIN step because a PIN already existed: a dead end.
+rmSync(tokenFile);
+const owner = { cookie, origin: base };
+r = await post('/api/runtime', { mode: 'crafty' }, owner);
+check('Crafty mode cannot be chosen before Crafty is connected', r.status === 409);
+writeFileSync(join(data, 'settings.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(data, 'settings.json'), 'utf8')), runtime: 'crafty' }));
+await restart();
+st = await (await fetch(`${base}/api/wizard/status`)).json();
+check('crafty selected but not connected: the wizard stays closed after a restart', st.active === false);
+check('no setup code is minted once a PIN exists', !existsSync(join(data, 'setup-code.txt')));
+r = await post('/api/wizard/crafty-login', { token: MINTED, url: craftyUrl, code: 'DEADBEEFDEADBEEFDEAD' });
+check('the unauthenticated Crafty step stays shut', r.status === 403 && !existsSync(tokenFile));
+check('the panel asks for the PIN instead', (await (await fetch(`${base}/api/auth/check`)).json()).required === true);
+r = await post('/api/auth', { pin: '482915' });
+const back = /sp_auth=[0-9a-z]+\.[a-f0-9]{64}/.exec(r.headers.get('set-cookie') ?? '')?.[0] ?? '';
+check('the existing PIN still signs in', r.ok && !!back);
+const signedIn = { cookie: back, origin: base };
+r = await fetch(`${base}/api/servers`, { headers: signedIn });
+check('the dashboard explains how to connect or switch back', r.status === 503 && /Settings/.test((await r.json()).error ?? ''));
+r = await post('/api/runtime/crafty', { token: MINTED, url: craftyUrl }, { cookie: back, origin: 'https://evil.example' });
+check('connecting Crafty from another site is refused', r.status === 403 && !existsSync(tokenFile));
+r = await post('/api/runtime/crafty', { token: MINTED, url: craftyUrl });
+check('connecting Crafty needs a session', r.status === 401 && !existsSync(tokenFile));
+r = await post('/api/runtime/crafty', { token: 'not-a-real-key', url: `http://localhost:${CRAFTY_PORT}` }, signedIn);
+check('Settings rejects a bad Crafty key and keeps the old address', r.status === 401 && !existsSync(tokenFile)
+  && JSON.parse(readFileSync(join(data, 'settings.json'), 'utf8')).craftyUrl === craftyUrl);
+r = await post('/api/runtime/crafty', { token: MINTED, url: craftyUrl }, signedIn);
+check('Settings connects Crafty for a signed-in owner', r.ok && readFileSync(tokenFile, 'utf8').trim() === MINTED);
+check('the panel now runs on Crafty', (await (await fetch(`${base}/api/runtime`, { headers: signedIn })).json()).mode === 'crafty');
+// a panel already stuck in this state repairs itself once Spawnpoint's own
+// service answers: back to standalone, signed in with the same PIN
+rmSync(tokenFile);
+const sup = createServer((_q, s) => { s.setHeader('content-type', 'application/json'); s.end(JSON.stringify({ result: {} })); });
+await new Promise((res2) => sup.listen(0, '127.0.0.1', res2));
+mkdirSync(join(data, 'runtime'), { recursive: true });
+writeFileSync(join(data, 'runtime', 'endpoint.json'), JSON.stringify({ port: sup.address().port, token: 'stub' }));
+await restart();
+let mode = '';
+for (let i = 0; i < 20 && mode !== 'standalone'; i++) {
+  mode = (await (await fetch(`${base}/api/runtime`, { headers: signedIn })).json()).mode;
+  if (mode !== 'standalone') await new Promise((res2) => setTimeout(res2, 500));
+}
+check('a stuck panel switches back to Spawnpoint on restart', mode === 'standalone');
+check('the session survives the repair', (await (await fetch(`${base}/api/auth/check`, { headers: { cookie: back } })).json()).ok === true);
+sup.close();
 
 done = true;
 child.kill();

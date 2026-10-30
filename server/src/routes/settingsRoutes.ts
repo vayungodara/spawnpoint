@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { PATHS, loadSettings, saveSettings } from '../config.js';
 import { craftyApi } from '../clients/crafty-adapter.js';
@@ -34,6 +35,7 @@ export default async function settingsRoutes(app: FastifyInstance) {
       curseforgeKeySet: !!s.curseforgeApiKey,
       anthropicKeySet: !!s.anthropicApiKey,
       craftyUrl: s.craftyUrl,
+      craftyConnected: existsSync(PATHS.craftyTokenFile),
       craftyOk,
       craftyServers,
       autobackup: loadAutobackup(),

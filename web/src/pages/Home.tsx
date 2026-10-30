@@ -1,5 +1,6 @@
 import { Link, Navigate, useLocation } from 'react-router'
-import { useServers } from '../api'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { api, useServers } from '../api'
 import { Pi } from '../components/PixelIcons'
 import bandSurface from '../assets/band-surface.webp'
 
@@ -19,6 +20,7 @@ export function Home() {
         <span className="vista-tag">Y 63 · SURFACE</span>
       </div>
       {error ? (
+        /Crafty is not connected/.test(String(error)) ? <CraftyMissing /> : (
         <div className="block px-5 py-4 border-redstone! flex items-center gap-3">
           <span className="lamp lamp-crash" aria-hidden />
           <div>
@@ -26,6 +28,7 @@ export function Home() {
             <p className="text-text-dim text-xs mt-0.5">Check Panel settings → Server runtime. The panel reconnects by itself once the service is back.</p>
           </div>
         </div>
+        )
       ) : (
         <>
           <h1 className="text-3xl mb-1">Place your first server</h1>
@@ -55,7 +58,7 @@ export function Home() {
               </li>
             ))}
           </ol>
-          <p className="text-text-dim text-xs mt-8 max-w-[62ch]">Already run servers in Crafty Controller? Choose “Use Crafty + imported servers” in <Link to="/settings" className="underline underline-offset-2 hover:text-text">Panel settings</Link> and they show up here.</p>
+          <p className="text-text-dim text-xs mt-8 max-w-[62ch]">Already run servers in Crafty Controller? Connect it under Server runtime in <Link to="/settings" className="underline underline-offset-2 hover:text-text">Panel settings</Link> and they show up here.</p>
         </>
       )}
     </div>
@@ -70,4 +73,24 @@ export function ToActive({ tab }: { tab: string }) {
   const s = data?.servers.find((x) => x.active) ?? data?.servers[0]
   if (!s) return <Navigate to={search.includes('tab=modpack') ? '/new/modpack' : '/'} replace />
   return <Navigate to={`/s/${s.id}${tab ? `/${tab}` : ''}${search}`} replace />
+}
+
+/** Crafty is selected but not connected: one click back to Spawnpoint, or connect it. */
+function CraftyMissing() {
+  const qc = useQueryClient()
+  const back = useMutation({
+    mutationFn: () => api('/api/runtime', { method: 'POST', body: JSON.stringify({ mode: 'standalone' }) }),
+    onSuccess: () => qc.invalidateQueries(),
+  })
+  return (
+    <div className="block px-5 py-4 border-gold!">
+      <b>Crafty Controller is selected but not connected</b>
+      <p className="text-text-dim text-sm mt-1 max-w-[62ch]">Your servers are fine. Switch back to Spawnpoint's own service, or connect Crafty with an API key in Settings.</p>
+      <div className="flex gap-3 flex-wrap mt-3">
+        <button onClick={() => back.mutate()} disabled={back.isPending} className="btn btn-emerald px-4 py-2 text-sm">{back.isPending ? 'Switching…' : 'Use Spawnpoint'}</button>
+        <Link to="/settings" className="btn btn-block px-4 py-2 text-sm">Connect Crafty</Link>
+      </div>
+      {back.error && <p role="alert" className="text-sm text-redstone font-semibold mt-2">{back.error.message.replace(/^\d+: /, '')}</p>}
+    </div>
+  )
 }

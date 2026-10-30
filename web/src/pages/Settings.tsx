@@ -15,6 +15,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 interface Summary {
   curseforgeKeySet: boolean
+  craftyConnected?: boolean
   craftyUrl: string
   craftyOk: boolean
   craftyServers: number
@@ -154,15 +155,6 @@ export default function Settings() {
     queryKey: ['settings-summary'],
     queryFn: () => api<Summary>('/api/settings/summary'),
   })
-  const { data: runtime } = useQuery({
-    queryKey: ['runtime'],
-    queryFn: () => api<{ mode: 'crafty' | 'standalone'; supervisor: boolean }>('/api/runtime'),
-    refetchInterval: 10_000,
-  })
-  const setRuntime = useMutation({
-    mutationFn: (mode: 'crafty' | 'standalone') => api('/api/runtime', { method: 'POST', body: JSON.stringify({ mode }) }),
-    onSuccess: () => qc.invalidateQueries(),
-  })
 
   const save = useMutation({
     mutationFn: (body: Record<string, unknown>) =>
@@ -192,31 +184,7 @@ export default function Settings() {
 
       {msg && <div className="block border-emerald! px-4 py-2.5 text-sm font-semibold">{msg}</div>}
 
-      <div className="block px-5 py-4">
-        <div className="flex items-center gap-2.5 mb-2 flex-wrap">
-          <Pi i="anvil" className="pi pi-s" />
-          <h2 className="font-extrabold">Server runtime</h2>
-          <span className="hud !opacity-100">{runtime?.supervisor ? 'SUPERVISOR CONNECTED' : 'SUPERVISOR OFFLINE'}</span>
-        </div>
-        <p className="text-text-dim text-sm mb-3 max-w-[70ch]">
-          The independent Spawnpoint service owns Java and its console even while this panel restarts.
-          Install the OS service first; choosing it here does not import or stop any Crafty server.
-          Moving an existing server happens in its Server tab → Runtime.
-        </p>
-        <div className="flex flex-wrap gap-3" role="group" aria-label="Creation and server-list backend">
-          <button className={`btn px-4 py-2 text-sm ${runtime?.mode === 'standalone' ? 'btn-emerald' : 'btn-block'}`}
-            aria-pressed={runtime?.mode === 'standalone'} disabled={!runtime?.supervisor || setRuntime.isPending}
-            onClick={() => setRuntime.mutate('standalone')}>Use Spawnpoint only</button>
-          <button className={`btn px-4 py-2 text-sm ${runtime?.mode === 'crafty' ? 'btn-emerald' : 'btn-block'}`}
-            aria-pressed={runtime?.mode === 'crafty'} disabled={setRuntime.isPending}
-            onClick={() => setRuntime.mutate('crafty')}>Use Crafty + imported servers</button>
-        </div>
-        <p className="text-text-dim text-xs mt-3 max-w-[70ch]">
-          This choice controls new-server creation and whether unimported Crafty servers appear.
-          Imported servers always stay with Spawnpoint, with no fallback to Crafty.
-        </p>
-        {setRuntime.error && <p role="alert" className="text-sm mt-3">{setRuntime.error.message}</p>}
-      </div>
+      <RuntimeCard connected={!!data.craftyConnected} craftyUrl={data.craftyUrl} />
 
       <div className="block px-5 py-4">
         <div className="flex items-center gap-2.5 mb-1">
@@ -272,6 +240,71 @@ export default function Settings() {
           {isFetching ? 'testing…' : 'Test connection'}
         </button>
       </div>
+    </div>
+  )
+}
+
+/** Which runtime lists and builds servers. Crafty needs a working connection,
+    so choosing it without one opens the API-key form instead of failing. */
+function RuntimeCard({ connected, craftyUrl }: { connected: boolean; craftyUrl: string }) {
+  const qc = useQueryClient()
+  const { data: runtime } = useQuery({
+    queryKey: ['runtime'],
+    queryFn: () => api<{ mode: 'crafty' | 'standalone'; supervisor: boolean }>('/api/runtime'),
+    refetchInterval: 10_000,
+  })
+  const [form, setForm] = useState(false)
+  const [url, setUrl] = useState('')
+  const [key, setKey] = useState('')
+  const setRuntime = useMutation({
+    mutationFn: (mode: 'crafty' | 'standalone') => api('/api/runtime', { method: 'POST', body: JSON.stringify({ mode }) }),
+    onSuccess: () => { setForm(false); qc.invalidateQueries() },
+  })
+  const connect = useMutation({
+    mutationFn: () => api<{ servers: number }>('/api/runtime/crafty', { method: 'POST', body: JSON.stringify({ token: key.trim(), url: url.trim() || undefined }) }),
+    onSuccess: () => { setForm(false); setKey(''); qc.invalidateQueries() },
+  })
+  const mode = runtime?.mode
+  const busy = setRuntime.isPending || connect.isPending
+  const err = (setRuntime.error ?? connect.error)?.message.replace(/^\d+: /, '')
+  const tile = (on: boolean) => `btn px-4 py-3 text-left flex flex-col gap-1 ${on ? 'btn-emerald' : 'btn-block'}`
+  return (
+    <div className="block px-5 py-4">
+      <div className="flex items-center gap-2.5 mb-2 flex-wrap">
+        <Pi i="anvil" className="pi pi-s" />
+        <h2 className="font-extrabold">Server runtime</h2>
+        <span className="hud !opacity-100">{runtime?.supervisor ? 'SUPERVISOR CONNECTED' : 'SUPERVISOR OFFLINE'}</span>
+      </div>
+      <p className="text-text-dim text-sm mb-3 max-w-[70ch]">Choose what lists and builds your servers. Switching never stops or moves a server, and you can switch back at any time.</p>
+      <div className="grid sm:grid-cols-2 gap-3" role="group" aria-label="Server runtime">
+        <button className={tile(mode === 'standalone')} aria-pressed={mode === 'standalone'} disabled={busy || !runtime?.supervisor}
+          onClick={() => setRuntime.mutate('standalone')}>
+          <b>Spawnpoint service{mode === 'standalone' ? ' · in use' : ''}</b>
+          <span className="text-xs font-semibold opacity-80">Runs your servers itself and keeps them going while the panel restarts. Recommended.{!runtime?.supervisor ? ' The service is offline right now.' : ''}</span>
+        </button>
+        <button className={tile(mode === 'crafty')} aria-pressed={mode === 'crafty'} disabled={busy}
+          onClick={() => (connected ? setRuntime.mutate('crafty') : setForm(true))}>
+          <b>Crafty Controller{mode === 'crafty' ? (connected ? ' · in use' : ' · not connected') : ''}</b>
+          <span className="text-xs font-semibold opacity-80">Also shows servers that still live in Crafty and builds new ones there. {connected ? 'Connected.' : 'Needs a Crafty API key.'}</span>
+        </button>
+      </div>
+      {connected && !form && (
+        <button onClick={() => setForm(true)} className="text-xs underline underline-offset-2 text-text-dim hover:text-text mt-3">Update Crafty connection</button>
+      )}
+      {form && (
+        <div className="mt-4 space-y-2 max-w-md rise-in">
+          <p className="text-sm text-text-dim">In Crafty, open your user's <b className="text-text">API Keys</b> page, create a key and paste it here. A non-admin account that only sees these servers is safest.</p>
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={craftyUrl} aria-label="Crafty address" className="field w-full px-3 py-2 text-sm" autoComplete="off" />
+          <input value={key} onChange={(e) => setKey(e.target.value)} type="password" placeholder="Crafty API key" aria-label="Crafty API key" className="field w-full px-3 py-2 text-sm font-mono" autoComplete="off" autoFocus
+            onKeyDown={(e) => { if (e.key === 'Enter' && key.trim() && !busy) connect.mutate() }} />
+          <div className="flex gap-3">
+            <button onClick={() => connect.mutate()} disabled={!key.trim() || busy} className="btn btn-emerald px-4 py-2 text-sm">{connect.isPending ? 'Connecting…' : 'Connect and use Crafty'}</button>
+            <button onClick={() => { setForm(false); connect.reset() }} className="btn btn-block px-4 py-2 text-sm">Cancel</button>
+          </div>
+        </div>
+      )}
+      {err && <p role="alert" className="text-sm text-redstone font-semibold mt-3 pop-in">{err}</p>}
+      <p className="text-text-dim text-xs mt-3 max-w-[70ch]">Imported servers always stay with Spawnpoint. Move a Crafty server into Spawnpoint from its Server tab → Runtime.</p>
     </div>
   )
 }

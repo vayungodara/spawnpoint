@@ -19,6 +19,8 @@ type WizardStatus = {
   craftyConnected?: boolean
   pinSet?: boolean
   claude?: { installed: boolean }
+  /** the setup code file on this machine, for the "Lost it?" hint */
+  codeFile?: string
 }
 
 const post = (url: string, body: unknown, method = 'POST') =>
@@ -57,7 +59,9 @@ export default function Setup() {
   const step = picked ?? (wiz?.craftyConnected || wiz?.runtime === 'standalone' ? 1 : 0)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [code, setCode] = useState(() => new URLSearchParams(location.hash.slice(1)).get('code')?.toUpperCase() ?? '')
+  // the installer's link carries the code as #code=…; ?code=… works too
+  const [code, setCode] = useState(() =>
+    (new URLSearchParams(location.hash.slice(1)).get('code') ?? new URLSearchParams(location.search).get('code') ?? '').trim().toUpperCase())
   const [codeBad, setCodeBad] = useState(false)
   const codeFromLink = useRef(!!code).current
   const [crafty, setCrafty] = useState<'off' | 'key' | 'login'>('off')
@@ -82,16 +86,27 @@ export default function Setup() {
     try { await fn() } catch { setErr(OFFLINE) } finally { setBusy(false) }
   }
 
+  const missingCode = () => {
+    if (code) return false
+    setCodeBad(true)
+    setErr('Enter the setup code first. The installer printed it in its last lines.')
+    return true
+  }
+  const codeError = (status: number, e: string) => {
+    if (status === 429) return e.replace(/^too many wrong setup codes, wait (\d+)s$/, 'Too many wrong codes. Wait $1 seconds, then try again.')
+    if (status === 403 && /setup code/i.test(e)) { setCodeBad(true); return "That setup code doesn't match. Check it against the installer's last lines." }
+    return e
+  }
+
   const connect = () => attempt(async () => {
+    if (missingCode()) return
     const r = crafty === 'off'
       ? await post('/api/wizard/standalone', { code })
       : await post('/api/wizard/crafty-login', crafty === 'key'
         ? { token: apiKey.trim(), url: url || undefined, code }
         : { username: user, password: pass, url: url || undefined, code })
     if (!r.ok) {
-      const e = await errorOf(r, `Couldn't connect (${r.status}).`)
-      if (/setup code/i.test(e)) setCodeBad(true)
-      setErr(/setup code/i.test(e) ? "That setup code doesn't match. Copy it again from the installer." : e)
+      setErr(codeError(r.status, await errorOf(r, `Couldn't connect (${r.status}).`)))
       return
     }
     setFound(crafty === 'off' ? null : ((await r.json()).servers ?? 0))
@@ -100,9 +115,10 @@ export default function Setup() {
   })
 
   const savePin = () => attempt(async () => {
+    if (missingCode()) return
     if (pin !== pin2) { setErr("Those PINs don't match. Try the second one again."); setPin2(''); return }
     const r = await post('/api/wizard/finish', { pin, code })
-    if (!r.ok) { const e = await errorOf(r, "Couldn't save the PIN."); if (/setup code/i.test(e)) setCodeBad(true); setErr(e); return }
+    if (!r.ok) { setErr(codeError(r.status, await errorOf(r, "Couldn't save the PIN."))); return }
     setDone(true)
     go(2)
   })
@@ -120,7 +136,7 @@ export default function Setup() {
         placeholder="From the installer's last lines" autoComplete="off" spellCheck={false}
         className="field w-full px-3 py-2.5 text-sm font-mono tracking-[0.15em]" />
       <span className="text-xs text-text-dim mt-1.5">
-        Lost it? On the panel machine run <code className="font-mono">cat ~/minecraft/Spawnpoint/data/setup-code.txt</code>
+        Lost it? On the panel machine run <code className="font-mono break-all">cat {wiz?.codeFile ?? '~/minecraft/Spawnpoint/data/setup-code.txt'}</code>
       </span>
     </label>
   )
@@ -157,7 +173,7 @@ export default function Setup() {
                   <>
                     {codeField}
                     <Err msg={err} />
-                    <button onClick={connect} disabled={busy || !code} autoFocus className="btn btn-emerald w-full py-3 mt-6 text-base">
+                    <button onClick={connect} disabled={busy} autoFocus className="btn btn-emerald w-full py-3 mt-6 text-base">
                       {busy ? 'Connecting…' : 'Get started'}
                     </button>
                     <button onClick={() => { setErr(''); setCrafty('key') }} className="text-xs text-text-dim hover:text-text underline underline-offset-2 mt-4 mx-auto flex">
@@ -181,14 +197,14 @@ export default function Setup() {
                       aria-label="Crafty address" className="field w-full px-3 py-2.5 mb-2 text-sm" autoComplete="off" />
                     {crafty === 'key' ? (
                       <input value={apiKey} onChange={(e) => { setErr(''); setApiKey(e.target.value) }} type="password" autoFocus
-                        onKeyDown={(e) => { if (e.key === 'Enter' && apiKey.trim() && code && !busy) connect() }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && apiKey.trim() && !busy) connect() }}
                         placeholder="Crafty API key" aria-label="Crafty API key" className="field w-full px-3 py-2.5 text-sm font-mono" autoComplete="off" />
                     ) : (
                       <>
                         <input value={user} onChange={(e) => { setErr(''); setUser(e.target.value) }} placeholder="Crafty username" aria-label="Crafty username"
                           className="field w-full px-3 py-2.5 mb-2 text-sm" autoComplete="username" autoFocus />
                         <input value={pass} onChange={(e) => { setErr(''); setPass(e.target.value) }} type="password" placeholder="Crafty password" aria-label="Crafty password"
-                          onKeyDown={(e) => { if (e.key === 'Enter' && user && pass && code && !busy) connect() }}
+                          onKeyDown={(e) => { if (e.key === 'Enter' && user && pass && !busy) connect() }}
                           className="field w-full px-3 py-2.5 text-sm" autoComplete="current-password" />
                       </>
                     )}
@@ -197,7 +213,7 @@ export default function Setup() {
                     </button>
                     {codeField}
                     <Err msg={err} />
-                    <button onClick={connect} disabled={busy || !code || (crafty === 'key' ? !apiKey.trim() : !user || !pass)} className="btn btn-emerald w-full py-3 mt-5 text-base">
+                    <button onClick={connect} disabled={busy || (crafty === 'key' ? !apiKey.trim() : !user || !pass)} className="btn btn-emerald w-full py-3 mt-5 text-base">
                       {busy ? 'Connecting…' : 'Connect Crafty'}
                     </button>
                     {wiz?.supervisor !== false && (
@@ -228,7 +244,7 @@ export default function Setup() {
                   placeholder="Same PIN again" className="field w-full px-4 py-3 mt-2 text-center text-2xl font-mono tracking-[0.4em] placeholder:tracking-normal placeholder:text-base" />
                 {codeField}
                 <Err msg={err} />
-                <button onClick={savePin} disabled={pin.length < 6 || !pin2 || !code || busy} className="btn btn-emerald w-full py-3 mt-6 text-base">
+                <button onClick={savePin} disabled={pin.length < 6 || !pin2 || busy} className="btn btn-emerald w-full py-3 mt-6 text-base">
                   {busy ? 'Saving…' : 'Continue'}
                 </button>
               </>

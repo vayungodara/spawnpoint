@@ -238,7 +238,7 @@ export default function Shell() {
     staleTime: 60_000,
   })
   const { data } = useServers()
-  const { pathname } = useLocation()
+  const { pathname, search, hash } = useLocation()
   const [menu, setMenu] = useState(false)
   // switching servers or panel pages crossfades; workspace tabs animate inside
   const topKey = pathname.split('/').slice(0, 3).join('/')
@@ -246,7 +246,8 @@ export default function Shell() {
   // hold the first paint until we know: otherwise a fresh install flashes the
   // panel (with failing queries) for one round-trip before redirecting
   if (wizLoading) return <div className="min-h-screen" style={{ background: 'var(--color-bedrock)' }} />
-  if (wiz?.active) return <Navigate to="/setup" replace />
+  // keep ?code= or #code= when "/" sends a fresh install to the wizard
+  if (wiz?.active) return <Navigate to={`/setup${search}${hash}`} replace />
 
   if (auth && !auth.ok) {
     return (

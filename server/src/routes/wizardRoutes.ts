@@ -1,21 +1,30 @@
 import type { FastifyInstance } from 'fastify';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { Agent, request } from 'undici';
-import { PATHS, loadSettings, saveSettings } from '../config.js';
+import { PATHS, loadSettings, resetCraftyToken, saveSettings } from '../config.js';
 import { chownToDirOwner } from '../services/platform.js';
 import { hashPin, pinConfigured, sessionCookie, PIN_RULE, PIN_RULE_TEXT } from '../auth.js';
 import { supervisor } from '../services/native.js';
 
-// FIRST-RUN WIZARD: open until the panel has both a Crafty token and a PIN.
+// FIRST-RUN WIZARD: open until the panel has a PIN, and never again after.
 // Step one connects Crafty (a pasted API key, or a one-time login that mints
 // one); step two sets the PIN. Both steps are the only unauthenticated
 // writes the panel accepts, so both demand the setup code the installer
 // printed. No address is trusted: behind a reverse proxy on the same machine
 // every visitor would look local.
+// Switching the runtime later (connecting Crafty or going back to Spawnpoint)
+// happens in signed-in Settings. Reopening the wizard for an owner who already
+// has a PIN locked them out behind a code the setup had deleted.
 export function wizardActive(): boolean {
-  return (loadSettings().runtime !== 'standalone' && !existsSync(PATHS.craftyTokenFile)) || !pinConfigured();
+  return !pinConfigured();
+}
+
+/** The setup code file as the owner would type it, so the wizard's hint works on any layout. */
+function codePathForHint(): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  return home && CODE_FILE.startsWith(home + sep) ? `~${CODE_FILE.slice(home.length)}` : CODE_FILE;
 }
 
 const CODE_FILE = join(PATHS.data, 'setup-code.txt');
@@ -113,71 +122,14 @@ function claudeCliReady(): { installed: boolean } {
   return { installed: dirs.some((d) => d && (existsSync(join(d, 'claude')) || existsSync(join(d, 'claude.cmd')))) };
 }
 
-let probeCache = { at: 0, ok: false };
+type CraftyBody = { username?: string; password?: string; token?: string; url?: string; code?: string; allowInsecure?: boolean };
+type Sent = { status: number; body: Record<string, unknown> };
 
-export default async function wizardRoutes(app: FastifyInstance) {
-  app.get('/api/wizard/status', async () => {
-    if (!wizardActive()) return { active: false };
-    const s = loadSettings();
-    // the probe is cached: this route is unauthenticated during setup, and one
-    // outbound connection per poll is an amplifier a stranger should not have
-    let craftyReachable = probeCache.ok;
-    if (Date.now() - probeCache.at > 5000) {
-      craftyReachable = false;
-      try {
-        const res = await request(`${s.craftyUrl}/api/v2`, {
-          dispatcher: dispatcherFor(s.craftyUrl, true),
-          signal: AbortSignal.timeout(3000),
-        });
-        await res.body.dump();
-        craftyReachable = true;
-      } catch { /* nothing listening — the wizard says so instead of guessing */ }
-      probeCache = { at: Date.now(), ok: craftyReachable };
-    }
-    const tools = join(PATHS.root, 'Tools');
-    const hasJdk = existsSync(tools) && readdirSync(tools).some((d) => d.startsWith('jdk-'));
-    return {
-      active: true,
-      runtime: s.runtime,
-      // the installer's own service; without it the wizard leads with Crafty
-      supervisor: await supervisor('health').then(() => true, () => false),
-      craftyUrl: s.craftyUrl,
-      craftyReachable,
-      hasJdk,
-      craftyConnected: existsSync(PATHS.craftyTokenFile),
-      pinSet: pinConfigured(),
-      claude: claudeCliReady(),
-    };
-  });
-
-  app.post<{ Body: { code?: string } }>('/api/wizard/standalone', async (req, reply) => {
-    if (!wizardActive()) return reply.code(403).send({ error: 'setup is already complete' });
-    const wait = codeThrottled(req.ip);
-    if (wait) return reply.code(429).send({ error: `too many wrong setup codes, wait ${wait}s` });
-    if (!claimOk(String(req.body?.code ?? ''))) {
-      codeFailed(req.ip);
-      return reply.code(403).send({ error: 'setup code required' });
-    }
-    await supervisor('health');
-    const settings = loadSettings();
-    settings.runtime = 'standalone';
-    saveSettings(settings);
-    if (!wizardActive()) rmSync(CODE_FILE, { force: true });
-    return { ok: true, servers: 0 };
-  });
-
-  app.post<{ Body: { username?: string; password?: string; token?: string; url?: string; code?: string; allowInsecure?: boolean } }>(
-    '/api/wizard/crafty-login',
-    async (req, reply) => {
-      if (existsSync(PATHS.craftyTokenFile)) return reply.code(403).send({ error: 'Crafty is already connected' });
-      const wait = codeThrottled(req.ip);
-      if (wait) return reply.code(429).send({ error: `too many wrong setup codes, wait ${wait}s` });
-      if (!claimOk(String(req.body?.code ?? ''))) {
-        codeFailed(req.ip);
-        return reply.code(403).send({
-          error: 'setup code required — it was printed by the installer (or run: cat <layout>/Spawnpoint/data/setup-code.txt on the panel machine)',
-        });
-      }
+/** Log in to (or verify a pasted key for) Crafty and store its token. */
+async function connectCrafty(body: CraftyBody, replace: boolean): Promise<Sent> {
+  let status = 200;
+  const reply = { code(c: number) { status = c; return { send: (b: Record<string, unknown>): Sent => ({ status, body: b }) }; } };
+  const req = { body };
       const allowInsecure = req.body?.allowInsecure === true;
       const username = String(req.body?.username ?? '').trim();
       const password = String(req.body?.password ?? '');
@@ -266,33 +218,129 @@ export default async function wizardRoutes(app: FastifyInstance) {
         return reply.code(502).send({ error: 'minted a token but the Crafty API did not answer with it' });
       }
 
-      // 3. persist — settings FIRST, because the token file is the wizard's
-      //    own off-switch: writing it before the URL could leave a configured
-      //    install pointing at the wrong Crafty with no wizard left to fix it
-      try {
-        const s = loadSettings();
-        if (url !== s.craftyUrl) {
-          s.craftyUrl = url;
-          saveSettings(s);
-        }
-      } catch {
-        return reply.code(500).send({ error: 'could not save settings — check write permissions on the data folder' });
-      }
-      // the awaits above took seconds; a second setup request could have
-      // completed meanwhile. wx makes the token file first-writer-wins so a
-      // late arrival can never repoint a configured install.
-      mkdirSync(dirname(PATHS.craftyTokenFile), { recursive: true });
-      try {
-        writeFileSync(PATHS.craftyTokenFile, `${token}\n`, { mode: 0o600, flag: 'wx' });
-      } catch {
+      // 3. persist. The awaits above took seconds, so recheck: the wizard may
+      //    have closed (PIN set, or another browser connected) meanwhile.
+      //    Everything below is synchronous until the token is committed.
+      if (!replace && (pinConfigured() || existsSync(PATHS.craftyTokenFile))) {
         return reply.code(409).send({ error: 'setup was already completed by another browser' });
       }
+      // Stage the token first, then the address, then swap the token in, so
+      // any failure leaves the old URL and token together as a working pair.
+      const staged = `${PATHS.craftyTokenFile}.${randomBytes(4).toString('hex')}.tmp`;
+      const dropStaged = () => { try { rmSync(staged, { force: true }); } catch { /* best effort */ } };
+      try {
+        mkdirSync(dirname(PATHS.craftyTokenFile), { recursive: true });
+        writeFileSync(staged, `${token}\n`, { mode: 0o600, flag: 'wx' });
+      } catch {
+        dropStaged();
+        return reply.code(500).send({ error: 'could not save the Crafty key. Check write permissions on the Shared folder' });
+      }
+      let oldUrl = url;
+      try {
+        const s = loadSettings();
+        oldUrl = s.craftyUrl;
+        if (url !== oldUrl) { s.craftyUrl = url; saveSettings(s); }
+      } catch {
+        dropStaged();
+        return reply.code(500).send({ error: 'could not save settings. Check write permissions on the data folder' });
+      }
+      try {
+        renameSync(staged, PATHS.craftyTokenFile);
+      } catch {
+        try { if (url !== oldUrl) { const back = loadSettings(); back.craftyUrl = oldUrl; saveSettings(back); } } catch { /* reported below */ }
+        dropStaged();
+        return reply.code(500).send({ error: 'could not save the Crafty key. Check write permissions on the Shared folder' });
+      }
+      resetCraftyToken();
       await chownToDirOwner(dirname(PATHS.craftyTokenFile));
-      // the setup code stays valid for the PIN step
-      if (!wizardActive()) rmSync(CODE_FILE, { force: true });
-      return { ok: true, servers };
+      return { status: 200, body: { ok: true, servers } };
+}
+
+let probeCache = { at: 0, ok: false };
+
+export default async function wizardRoutes(app: FastifyInstance) {
+  app.get('/api/wizard/status', async () => {
+    if (!wizardActive()) return { active: false };
+    const s = loadSettings();
+    // the probe is cached: this route is unauthenticated during setup, and one
+    // outbound connection per poll is an amplifier a stranger should not have
+    let craftyReachable = probeCache.ok;
+    if (Date.now() - probeCache.at > 5000) {
+      craftyReachable = false;
+      try {
+        const res = await request(`${s.craftyUrl}/api/v2`, {
+          dispatcher: dispatcherFor(s.craftyUrl, true),
+          signal: AbortSignal.timeout(3000),
+        });
+        await res.body.dump();
+        craftyReachable = true;
+      } catch { /* nothing listening — the wizard says so instead of guessing */ }
+      probeCache = { at: Date.now(), ok: craftyReachable };
+    }
+    const tools = join(PATHS.root, 'Tools');
+    const hasJdk = existsSync(tools) && readdirSync(tools).some((d) => d.startsWith('jdk-'));
+    return {
+      active: true,
+      runtime: s.runtime,
+      // the installer's own service; without it the wizard leads with Crafty
+      supervisor: await supervisor('health').then(() => true, () => false),
+      craftyUrl: s.craftyUrl,
+      craftyReachable,
+      hasJdk,
+      craftyConnected: existsSync(PATHS.craftyTokenFile),
+      codeFile: codePathForHint(),
+      pinSet: pinConfigured(),
+      claude: claudeCliReady(),
+    };
+  });
+
+  app.post<{ Body: { code?: string } }>('/api/wizard/standalone', async (req, reply) => {
+    if (!wizardActive()) return reply.code(403).send({ error: 'setup is already complete' });
+    const wait = codeThrottled(req.ip);
+    if (wait) return reply.code(429).send({ error: `too many wrong setup codes, wait ${wait}s` });
+    if (!claimOk(String(req.body?.code ?? ''))) {
+      codeFailed(req.ip);
+      return reply.code(403).send({ error: 'setup code required' });
+    }
+    await supervisor('health');
+    // a PIN may have been set while the health check ran
+    if (!wizardActive()) return reply.code(409).send({ error: 'setup was already completed by another browser' });
+    const settings = loadSettings();
+    settings.runtime = 'standalone';
+    saveSettings(settings);
+    if (!wizardActive()) rmSync(CODE_FILE, { force: true });
+    return { ok: true, servers: 0 };
+  });
+
+  app.post<{ Body: { username?: string; password?: string; token?: string; url?: string; code?: string; allowInsecure?: boolean } }>(
+    '/api/wizard/crafty-login',
+    async (req, reply) => {
+      if (pinConfigured()) return reply.code(403).send({ error: 'setup is already complete; sign in with your PIN and connect Crafty in Settings' });
+      if (existsSync(PATHS.craftyTokenFile)) return reply.code(403).send({ error: 'Crafty is already connected' });
+      const wait = codeThrottled(req.ip);
+      if (wait) return reply.code(429).send({ error: `too many wrong setup codes, wait ${wait}s` });
+      if (!claimOk(String(req.body?.code ?? ''))) {
+        codeFailed(req.ip);
+        return reply.code(403).send({
+          error: `setup code required. The installer printed it, or run cat ${codePathForHint()} on the panel machine`,
+        });
+      }
+      const r = await connectCrafty(req.body ?? {}, false);
+      if (r.status !== 200) return reply.code(r.status).send(r.body);
+      return r.body;
     },
   );
+
+  // Signed-in Settings: connect (or reconnect) Crafty and make it the runtime.
+  // Not under /api/wizard/, so the global hook requires the owner.
+  app.post<{ Body: CraftyBody }>('/api/runtime/crafty', async (req, reply) => {
+    const r = await connectCrafty(req.body ?? {}, true);
+    if (r.status !== 200) return reply.code(r.status).send(r.body);
+    const s = loadSettings();
+    s.runtime = 'crafty';
+    saveSettings(s);
+    return r.body;
+  });
 
   // FINISH: sets the PIN (and optional keys). The setup code stands in for
   // the session the browser cannot have yet. Accepted only while no PIN
@@ -309,6 +357,10 @@ export default async function wizardRoutes(app: FastifyInstance) {
       }
       const pin = String(req.body?.pin ?? '').trim();
       if (!PIN_RULE.test(pin)) return reply.code(400).send({ error: PIN_RULE_TEXT });
+      // the PIN closes the wizard for good, so a runtime must be connected first
+      if (loadSettings().runtime !== 'standalone' && !existsSync(PATHS.craftyTokenFile)) {
+        return reply.code(409).send({ error: 'connect Spawnpoint or Crafty first' });
+      }
       const s = loadSettings();
       s.pin = null;
       s.pinHash = hashPin(pin);
