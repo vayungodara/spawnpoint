@@ -126,10 +126,15 @@ More detail, including memory needs and what happens when a test can't run:
 
 | Loader | Create in Spawnpoint | Tested mod changes |
 | --- | --- | --- |
-| Fabric | 1.21.1, loader 0.20.1 | Yes (client test on 1.20+) |
-| Forge | 1.20.1, Forge 47.4.28 | 1.20.1 with 47.4.28 |
-| NeoForge | 1.21.1, NeoForge 21.1.219 | 1.21.1 with 21.1.219 |
-| Other server types | Through Crafty Controller | No |
+| Fabric | Every release from 1.14 | Yes (client test on 1.20+) |
+| Forge | Every release from 1.5.2 | 1.20.1 with 47.4.28 only |
+| NeoForge | Every release from 1.20.1 | 1.21.1 with 21.1.219 |
+| Quilt | Every release from 1.14.4 | No |
+| Paper, Purpur | Every release Paper or Purpur builds | No (plugins) |
+| Vanilla | Every release from 1.2.5 | No |
+
+New servers default to the newest release. Versions Spawnpoint hasn't
+create-and-boot tested are labelled untested in the version picker.
 
 Launch recipes and AutoModpack requirements: [docs/recipes.md](docs/recipes.md).
 

@@ -3,7 +3,8 @@ import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { PATHS, loadSettings } from '../config.js';
 import { craftyApi } from '../clients/crafty.js';
-import { nativeInstallJob, nativeInstallJobs, NATIVE_RECIPES, queueNativeInstall } from './nativeinstall.js';
+import { nativeInstallJob, nativeInstallJobs, queueNativeInstall } from './nativeinstall.js';
+import { listVersions } from './recipes.js';
 import * as modrinth from '../clients/modrinth.js';
 import * as curseforge from '../clients/curseforge.js';
 import {
@@ -50,100 +51,17 @@ const CRAFTY_TYPE: Record<string, string> = {
   vanilla: 'vanilla',
 };
 
-// ---------------------------------------------------------------------------
-// Version catalogues, straight from each project's own API. (Crafty has no
-// public jars endpoint on this build — GET /api/v2/jars is 404 — so we never
-// depend on its internal cache.)
-// ---------------------------------------------------------------------------
-
-const catalogCache = new Map<string, { at: number; versions: string[] }>();
-
-async function fetchVersions(loader: string): Promise<string[]> {
-  const j = async (url: string) => (await (await fetch(url, { headers: { 'user-agent': 'spawnpoint/1.0' } })).json()) as unknown;
-
-  switch (loader) {
-    case 'vanilla': {
-      const m = (await j('https://launchermeta.mojang.com/mc/game/version_manifest_v2.json')) as {
-        versions: { id: string; type: string }[];
-      };
-      return m.versions.filter((v) => v.type === 'release').map((v) => v.id);
-    }
-    case 'fabric': {
-      const g = (await j('https://meta.fabricmc.net/v2/versions/game')) as { version: string; stable: boolean }[];
-      return g.filter((v) => v.stable).map((v) => v.version);
-    }
-    case 'quilt': {
-      const g = (await j('https://meta.quiltmc.org/v3/versions/game')) as { version: string; stable: boolean }[];
-      return g.filter((v) => v.stable).map((v) => v.version);
-    }
-    case 'forge': {
-      // promos keys look like "1.20.1-latest" / "1.20.1-recommended"
-      const p = (await j('https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json')) as {
-        promos: Record<string, string>;
-      };
-      const mcs = new Set(Object.keys(p.promos).map((k) => k.split('-')[0]));
-      return [...mcs].sort(cmpMcDesc);
-    }
-    case 'neoforge': {
-      // neoforge version = <mcMajor>.<mcMinor>.<build>. Under the OLD numbering
-      // 21.1.x means MC 1.21.1; from MC 26 on the majors align (26.2.x = 26.2).
-      // Getting this wrong produced "1.26.2", a version that does not exist.
-      const r = (await j('https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge')) as {
-        versions: string[];
-      };
-      const mcs = new Set<string>();
-      for (const v of r.versions) {
-        const m = /^(\d+)\.(\d+)\./.exec(v);
-        if (!m) continue;
-        const major = Number(m[1]);
-        const minor = Number(m[2]);
-        mcs.add(major >= 26 ? `${major}${minor ? `.${minor}` : ''}` : `1.${major}${minor ? `.${minor}` : ''}`);
-      }
-      return [...mcs].sort(cmpMcDesc);
-    }
-    case 'paper': {
-      // v2 was sunset — v3 returns { versions: { "1.21": ["1.21.11", …], … } }
-      const r = (await j('https://fill.papermc.io/v3/projects/paper')) as {
-        versions: Record<string, string[]>;
-      };
-      const all = Object.values(r.versions).flat().filter((v) => /^\d+(\.\d+)*$/.test(v));
-      return [...new Set(all)].sort(cmpMcDesc);
-    }
-    case 'purpur': {
-      const r = (await j('https://api.purpurmc.org/v2/purpur')) as { versions: string[] };
-      return [...r.versions].reverse();
-    }
-    default:
-      return [];
-  }
-}
-
-/** newest first: 26.2 > 1.21.11 > 1.21.9 */
-function cmpMcDesc(a: string, b: string): number {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pb[i] ?? 0) - (pa[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
+// Version catalogues come straight from each project's own API (recipes.ts).
+// Crafty has no public jars endpoint on this build — GET /api/v2/jars is 404 —
+// so neither runtime depends on its internal cache.
 
 export async function listLoaderVersions(loader: string): Promise<string[]> {
-  if (loadSettings().runtime === 'standalone') {
-    const recipe = NATIVE_RECIPES[loader as keyof typeof NATIVE_RECIPES];
-    return recipe ? [recipe.mc] : [];
-  }
   if (!CRAFTY_TYPE[loader]) throw new Error(`unknown loader "${loader}"`);
-  const hit = catalogCache.get(loader);
-  if (hit && Date.now() - hit.at < 60 * 60_000) return hit.versions;
-  const versions = await fetchVersions(loader);
-  catalogCache.set(loader, { at: Date.now(), versions });
-  return versions;
+  return listVersions(loader);
 }
 
 export function listLoaders(): string[] {
-  return Object.keys(loadSettings().runtime === 'standalone' ? NATIVE_RECIPES : CRAFTY_TYPE);
+  return Object.keys(CRAFTY_TYPE);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,12 +199,12 @@ function loaderReady(dir: string, loader: string): boolean {
 }
 
 /** Create a plain server of any loader/version — no Crafty visit required. */
-export function startCreateServer(opts: {
+export async function startCreateServer(opts: {
   name: string;
   loader: string;
   mc: string;
   memGb?: number;
-}): { jobId: string } {
+}): Promise<{ jobId: string }> {
   if (loadSettings().runtime === 'standalone') return queueNativeInstall(opts);
   const id = randomUUID().slice(0, 8);
   const job: CreateJob = {
@@ -445,7 +363,7 @@ export function startCreateFromModpack(opts: {
     const meta = await resolvePack(opts.source, opts.projectId, opts.versionId);
     job.packName = meta.title;
     if (native) {
-      queueNativeInstall({ id, name: opts.name ?? meta.title, loader: meta.loader, mc: meta.mc, memGb: opts.memGb,
+      await queueNativeInstall({ id, name: opts.name ?? meta.title, loader: meta.loader, mc: meta.mc, memGb: opts.memGb,
         pack: { source: opts.source === 'curseforge' ? 'curseforge' : 'modrinth', projectId: opts.projectId, versionId: meta.fileId } });
       return;
     }
@@ -489,7 +407,7 @@ export function startCreateFromPackFile(opts: {
 
   (async () => {
     if (native) {
-      queueNativeInstall({ id, name: opts.name ?? info.name, loader: info.loader!, mc: info.mc!, memGb: opts.memGb,
+      await queueNativeInstall({ id, name: opts.name ?? info.name, loader: info.loader!, mc: info.mc!, memGb: opts.memGb,
         pack: { source: 'file', kind: info.kind, path: opts.path, sha512: (await hashes(opts.path)).sha512 } });
       return;
     }

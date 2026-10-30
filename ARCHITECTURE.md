@@ -90,8 +90,20 @@ block automatic starts. `nativeprepare.ts` reuses active revision checks and
 pauses hosting before all native boots. The panel reconciles publication only
 after a new attempt has passed its launch guard, never while the old boot stops.
 
-`nativeinstall.ts` queues hash-pinned Fabric, Forge and NeoForge recipes in
-`data/runtime/installs/`. An independent worker installs a loader into disposable
+`recipes.ts` resolves one exact recipe per loader and Minecraft release from
+each project's own metadata: Mojang, Fabric and Quilt Meta, Forge and NeoForge
+Maven, PaperMC Fill and Purpur. It lists every release the loader builds and
+never snapshots. Forge and NeoForge prefer a certified solver profile, then the
+recommended or newest stable build. The one downloaded artifact must match an
+upstream checksum: Mojang's SHA-1, Paper's SHA-256, Purpur's MD5 or a Maven
+sidecar. Fabric Meta's generated launcher has none, so Spawnpoint builds it
+from the checksummed installer. A missing checksum refuses the install. Fabric
+and Quilt fetch libraries without checking them; every file they fetched must
+match Meta, Maven, Mojang or bundler checksums before staging is sealed. Temurin 8,
+17, 21 or 25 comes from Adoptium with its published SHA-256.
+
+`nativeinstall.ts` stores that recipe in the queued job in
+`data/runtime/installs/`, so every retry installs the same bytes. An independent worker installs a loader into disposable
 staging, seals its entire inventory, then renames and registers it. Recovery
 checks prepared bytes before registering an interrupted rename. A dead helper
 forces full-owner containment cleanup before another installer can use staging.

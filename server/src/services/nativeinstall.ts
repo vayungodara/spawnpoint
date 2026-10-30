@@ -1,31 +1,25 @@
-import { randomBytes, randomUUID, createHash } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { nativeRoot, nativeRecord, nativeServers, supervisor } from './native.js';
 import { writeFileAtomic } from './platform.js';
-import { javaFor } from './servers.js';
+import { toolsJava } from './servers.js';
 import { ensureJdk } from './temurin.js';
+import { fetchRecipe, resolveRecipe, verifyInstalled, type Recipe, type RecipeLoader } from './recipes.js';
 import { suggestGamePort, derivedRcon, portAudit, PANEL_PORT } from './ports.js';
 import { packFiles, hashes } from './revisions.js';
 import { setOverride } from './detect.js';
 import type { CreateJob } from './servercreate.js';
 
-// This MVP declares its supported recipes rather than silently taking latest.
-export const NATIVE_RECIPES = {
-  fabric: { mc: '1.21.1', loader: '0.20.1', url: 'https://meta.fabricmc.net/v2/versions/loader/1.21.1/0.20.1/1.1.1/server/jar',
-    sha512: 'd0056f4ce05f4911f5bfd1a94248a9dbcf7147a3e697bc156195824ffe02bb27c1abb3bef42e079d68ff9efde388ad4186def37e03aba01a87b764717e164dee' },
-  forge: { mc: '1.20.1', loader: '47.4.28', url: 'https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.4.28/forge-1.20.1-47.4.28-installer.jar',
-    sha512: '8fd435b269ea75a97340127ab9f745410595ce70e52c39fe1aa70ad00419ae8c4580049d6538c3a24adf9bfc6bc2b42026f2a4cca33015f9f3c5bb8152c1fd35' },
-  neoforge: { mc: '1.21.1', loader: '21.1.219', url: 'https://maven.neoforged.net/releases/net/neoforged/neoforge/21.1.219/neoforge-21.1.219-installer.jar',
-    sha512: '62b047d95ced148e6b1df0dbb21d16803d1c87090ac4f7e8c8f2be3f46a1b9f74a71db6b1e519aa0c7a0991bb97d5a1f3a8f2df81c06505808b00c7b12bbccc3' },
-} as const;
 export type NativePack = { source: 'file'; path: string; sha512: string; kind: 'mrpack' | 'curseforge' }
   | { source: 'modrinth' | 'curseforge'; projectId: string; versionId: string };
 interface Install extends CreateJob {
-  loader: keyof typeof NATIVE_RECIPES;
+  loader: RecipeLoader;
   mc: string;
+  /** Resolved once at queue time, so every retry installs the same bytes. */
+  recipe?: Recipe;
   memGb: number;
   port?: number;
   attempts: number;
@@ -46,9 +40,8 @@ export function nativeInstallJob(id: string): Install | undefined {
 export function nativeInstallJobs(): Install[] {
   return existsSync(jobDir) ? readdirSync(jobDir).filter((f) => /^[0-9a-f-]{36}\.json$/.test(f)).map((f) => nativeInstallJob(f.slice(0, -5))!) : [];
 }
-export function queueNativeInstall(opts: { id?: string; name: string; loader: string; mc: string; memGb?: number; port?: number; pack?: NativePack }): { jobId: string } {
-  const recipe = NATIVE_RECIPES[opts.loader as keyof typeof NATIVE_RECIPES];
-  if (!recipe || opts.mc !== recipe.mc) throw new Error('Standalone supports Fabric 1.21.1 / 0.20.1, Forge 1.20.1 / 47.4.28, and NeoForge 1.21.1 / 21.1.219');
+export async function queueNativeInstall(opts: { id?: string; name: string; loader: string; mc: string; memGb?: number; port?: number; pack?: NativePack }): Promise<{ jobId: string }> {
+  const recipe = await resolveRecipe(opts.loader, opts.mc);
   const id = opts.id ?? randomUUID();
   if (nativeInstallJob(id)) throw new Error('installation is already queued');
   let pack = opts.pack;
@@ -59,7 +52,7 @@ export function queueNativeInstall(opts: { id?: string; name: string; loader: st
     pack = { ...pack, path };
   }
   save({ id, serverId: id, status: 'queued for the independent installer', done: false, error: null,
-    packName: opts.name.trim().slice(0, 40) || `${opts.loader} ${opts.mc}`, warnings: [], loader: opts.loader as Install['loader'], mc: opts.mc,
+    packName: opts.name.trim().slice(0, 40) || `${opts.loader} ${opts.mc}`, warnings: [...recipe.notes], loader: recipe.loader, mc: opts.mc, recipe,
     memGb: Math.max(2, Math.min(12, Math.round(opts.memGb ?? 2))), port: opts.port, attempts: 0, phase: 'queued', pack });
   return { jobId: id };
 }
@@ -123,7 +116,11 @@ async function install(id: string): Promise<void> {
       // Only the owner service calls this after its previous installer tree
       // has exited. A retry never overlays a registered directory or world.
       job.phase = 'installing';
-      job.status = 'installing the pinned loader in disposable staging';
+      // Jobs queued before per-version recipes named no exact bytes; today's
+      // upstream build would be a different install, so they must be requeued.
+      const recipe = job.recipe;
+      if (!recipe) throw new Error('this installation was queued before exact recipes; delete it and create the server again');
+      job.status = `installing ${job.loader} ${recipe.build} for Minecraft ${job.mc} in disposable staging`;
       job.port ??= await suggestGamePort();
       if (!Number.isInteger(job.port) || job.port < 1024 || derivedRcon(job.port) > 65535) throw new Error('invalid game/RCON port pair');
       const audit = await portAudit();
@@ -131,26 +128,14 @@ async function install(id: string): Promise<void> {
       save(job);
       rmSync(staging, { recursive: true, force: true });
       mkdirSync(staging, { recursive: true });
-      if (!await ensureJdk(job.loader === 'fabric' ? 25 : 21, () => {})) throw new Error('could not install the pinned Java major');
-      const java = javaFor(job.mc, job.loader);
-      if (!java) throw new Error('Tools Java is unavailable');
-      const recipe = NATIVE_RECIPES[job.loader];
-      const response = await fetch(recipe.url, { signal: AbortSignal.timeout(120_000) });
-      if (!response.ok) throw new Error(`installer download failed: ${response.status}`);
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      for await (const chunk of response.body!) {
-        if ((size += chunk.length) > 32 * 1024 * 1024) throw new Error('installer exceeds 32 MB limit');
-        chunks.push(chunk);
-      }
-      const bytes = Buffer.concat(chunks);
-      if (createHash('sha512').update(bytes).digest('hex') !== recipe.sha512) throw new Error('pinned installer hash mismatch');
-      const jar = job.loader === 'fabric' ? 'fabric.jar' : 'installer.jar';
-      writeFileSync(join(staging, jar), bytes);
+      if (!await ensureJdk(recipe.java, () => {})) throw new Error(`could not install Java ${recipe.java}`);
+      const java = toolsJava(recipe.java);
+      if (!java) throw new Error(`Tools Java ${recipe.java} is unavailable`);
+      const file = recipe.download.file;
+      writeFileSync(join(staging, file), await fetchRecipe(recipe));
       writeFileSync(join(staging, 'eula.txt'), 'eula=false');
-      const args = job.loader === 'fabric' ? ['-Xmx768M', '-jar', jar, 'nogui'] : ['-Xmx1G', '-jar', jar, '--installServer'];
       const log = join(jobDir, `${id}.log`);
-      await new Promise<void>((resolve, reject) => {
+      const run = (args: string[], completed: (output: string, code: number | null) => boolean) => new Promise<void>((resolve, reject) => {
         const child = spawn(java, args, { cwd: staging, stdio: ['ignore', 'pipe', 'pipe'] });
         let output = '';
         const data = (b: Buffer): void => { output = (output + b.toString()).slice(-2 * 1024 * 1024); };
@@ -158,28 +143,37 @@ async function install(id: string): Promise<void> {
         child.once('error', reject);
         child.once('close', (code) => {
           writeFileAtomic(log, output);
-          const completed = job.loader === 'fabric' ? /You need to agree to the EULA/.test(output) : code === 0;
-          if (completed) resolve();
+          if (completed(output, code)) resolve();
           else reject(new Error(`loader install failed with exit ${code}; inspect ${log}`));
         });
       });
-      const argfile = job.loader === 'forge' ? `libraries/net/minecraftforge/forge/${job.mc}-${recipe.loader}/${process.platform === 'win32' ? 'win' : 'unix'}_args.txt`
-        : `libraries/net/neoforged/neoforge/${recipe.loader}/${process.platform === 'win32' ? 'win' : 'unix'}_args.txt`;
-      if (!existsSync(join(staging, job.loader === 'fabric' ? 'fabric.jar' : argfile))) throw new Error('installer did not produce the pinned recipe');
+      // Fabric's launcher fetches its libraries and the Mojang jar before the
+      // EULA check. Paper, Purpur and Vanilla jars are the server already.
+      if (job.loader === 'fabric') await run(['-Xmx768M', '-jar', file, 'nogui'], (output) => /You need to agree to the EULA/.test(output));
+      else if (job.loader === 'quilt') await run(['-Xmx768M', '-jar', file, 'install', 'server', job.mc, recipe.build, '--download-server', `--install-dir=${staging}`], (_, code) => code === 0);
+      else if (job.loader === 'forge' || job.loader === 'neoforge') await run(['-Xmx1G', '-jar', file, '--installServer'], (_, code) => code === 0);
+      await verifyInstalled(staging, recipe);
       const quotedJava = JSON.stringify(java.replaceAll('\\', '/'));
-      let command: string;
-      if (job.loader === 'fabric') command = `${quotedJava} -Xms1G -Xmx${job.memGb}G -jar fabric.jar nogui`;
-      else {
+      let executable: string, command: string;
+      if ('argDir' in recipe.launch) {
+        executable = `${recipe.launch.argDir}/${process.platform === 'win32' ? 'win' : 'unix'}_args.txt`;
+        if (!existsSync(join(staging, executable))) throw new Error(`installer did not produce ${executable}`);
         writeFileSync(join(staging, 'user_jvm_args.txt'), `-Xms1G\n-Xmx${job.memGb}G\n`);
-        command = `${quotedJava} @user_jvm_args.txt @${argfile} nogui`;
-        rmSync(join(staging, jar));
+        command = `${quotedJava} @user_jvm_args.txt @${executable} nogui`;
+      } else {
+        // Legacy Forge installers name their launch jar after the build.
+        const produced = 'forgeJar' in recipe.launch ? readdirSync(staging).filter((f) => /forge.*\.jar$/i.test(f) && f !== file) : [recipe.launch.jar];
+        if (produced.length !== 1 || !existsSync(join(staging, produced[0]))) throw new Error('installer did not produce exactly one launch jar');
+        executable = produced[0];
+        command = `${quotedJava} -Xms1G -Xmx${job.memGb}G -jar ${executable} nogui`;
       }
+      if (file !== executable) rmSync(join(staging, file));
       writeFileSync(join(staging, 'eula.txt'), 'eula=true');
       writeFileSync(join(staging, 'server.properties'), `server-port=${job.port}\nenable-rcon=true\nrcon.port=${derivedRcon(job.port!)}\nrcon.password=${randomBytes(24).toString('hex')}\nbroadcast-rcon-to-ops=false\n`);
       // Persist the recipe before its visibility commit. If rename succeeded
       // before owner death, recover only this exact unregistered UUID directory.
       const server = { server_id: id, server_name: job.packName, type: 'minecraft_java', server_ip: '127.0.0.1',
-        server_port: job.port, path: dest, executable: job.loader === 'fabric' ? 'fabric.jar' : argfile, execution_command: command, auto_start: false };
+        server_port: job.port, path: dest, executable, execution_command: command, auto_start: false };
       writeFileAtomic(prepared, JSON.stringify({ server, files: await inventory(staging) }));
       if (existsSync(dest)) throw new Error('unregistered destination exists; inspect it before retrying installation');
       mkdirSync(nativeServers, { recursive: true });

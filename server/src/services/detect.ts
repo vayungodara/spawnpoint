@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import AdmZip from 'adm-zip';
 import { PATHS } from '../config.js';
 
-export type Loader = 'forge' | 'neoforge' | 'fabric' | 'paper' | 'purpur' | 'vanilla' | 'unknown';
+export type Loader = 'forge' | 'neoforge' | 'fabric' | 'quilt' | 'paper' | 'purpur' | 'vanilla' | 'unknown';
 
 export interface Detection {
   loader: Loader;

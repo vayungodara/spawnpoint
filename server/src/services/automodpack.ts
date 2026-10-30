@@ -122,6 +122,8 @@ export function autoModpackActive(serverId: string): boolean {
     create job; they never fail the create. */
 export async function provisionAutoModpack(serverId: string, loader: string): Promise<string[]> {
   const warnings: string[] = [];
+  // Plugin and vanilla servers take vanilla clients: there is no pack to sync.
+  if (['paper', 'purpur', 'vanilla'].includes(loader)) return warnings;
   try {
     const { install } = await import('./installer.js');
     const r = await install(serverId, { projectId: 'automodpack', type: 'mod', direct: true });

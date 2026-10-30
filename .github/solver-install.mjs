@@ -610,7 +610,13 @@ try {
       bytes = readFileSync(file);
     }
     const os = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'mac' : 'linux';
-    artifacts.set(`https://api.adoptium.net/v3/binary/latest/${feature}/ga/${os}/${process.arch === 'arm64' ? 'aarch64' : 'x64'}/jdk/hotspot/normal/eclipse`, bytes);
+    const link = `https://fixture.invalid/jdk-${feature}`;
+    artifacts.set(`https://api.adoptium.net/v3/assets/latest/${feature}/hotspot?architecture=${process.arch === 'arm64' ? 'aarch64' : 'x64'}&image_type=jdk&os=${os}&vendor=eclipse`,
+      JSON.stringify([{ binary: { package: { link, checksum: sha(bytes, 'sha256'), size: bytes.length } } }]));
+    // Adoptium's published SHA-256 gates extraction: altered bytes never land in Tools/
+    artifacts.set(link, Buffer.concat([bytes, Buffer.from('tampered')]));
+    check(`JDK ${feature} archive that differs from Adoptium's SHA-256 is refused`, !await ensureJdk(feature, () => {}) && !existsSync(join(root, 'Tools', name)));
+    artifacts.set(link, bytes);
     check(`JDK ${feature} ${bundle ? 'macOS bundle' : 'flat archive'} becomes the shared Tools Java recipe`, await ensureJdk(feature, () => {})
       && javaFor(feature === 21 ? '1.20.1' : '1.21.1', feature === 21 ? 'forge' : 'fabric') === join(root, 'Tools', name, 'bin', java));
   }

@@ -59,6 +59,10 @@ jobs:
       # real jars/files. Catalog and CDN responses are controlled fixtures.
       - run: node .github/solver-test.mjs
       - run: node .github/solver-install.mjs
+      # Standalone server recipes for every loader: release-only version
+      # lists, exact builds, Java majors and refusal of unchecksummed or
+      # altered downloads, against controlled upstream metadata.
+      - run: node .github/recipe-test.mjs
 
   # the repo is public — every push gets a full-history secret scan
   gitleaks:

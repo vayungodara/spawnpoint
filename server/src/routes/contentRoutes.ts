@@ -13,6 +13,7 @@ import {
   getJob,
 } from '../services/servercreate.js';
 import { detect } from '../services/detect.js';
+import { BOOT_VERIFIED, testedChanges, type RecipeLoader } from '../services/recipes.js';
 import { serverDir } from '../services/servers.js';
 import { publishPack, stageClientAsset, buildStarterPack, buildStarterPackCF } from '../services/automodpack.js';
 import { candidate, approve, createFirstVersion, testNow, discard, retest, liveChanged, lastChange, undoLast, recentRejections, clearRejections, assertCanStage } from '../services/packtxn.js';
@@ -271,7 +272,12 @@ export default async function contentRoutes(app: FastifyInstance) {
   app.get('/api/loaders', async () => ({ loaders: listLoaders(), hostMemGb: Math.round(totalmem() / 1024 ** 3) }));
   app.get<{ Querystring: { loader: string } }>('/api/loaders/versions', async (req, reply) => {
     try {
-      return { versions: await listLoaderVersions(String(req.query.loader ?? '')) };
+      const loader = String(req.query.loader ?? '');
+      const versions = await listLoaderVersions(loader);
+      // Standalone installs its own recipes: say which versions were really
+      // booted and which run tested mod changes. Crafty builds its own.
+      if (loadSettings().runtime !== 'standalone') return { versions };
+      return { versions, verified: BOOT_VERIFIED[loader as RecipeLoader].filter((v) => versions.includes(v)), testedChanges: testedChanges(loader) };
     } catch (e) {
       return reply.code(400).send({ error: String((e as Error).message ?? e) });
     }
@@ -282,12 +288,13 @@ export default async function contentRoutes(app: FastifyInstance) {
       const loader = String(req.body.loader ?? '');
       const mc = String(req.body.mc ?? '');
       if (!loader || !mc) return reply.code(400).send({ error: 'loader and mc are required' });
-      return startCreateServer({
+      // an unknown version or a recipe without upstream checksums fails the click
+      return await startCreateServer({
         name: String(req.body.name ?? '').slice(0, 40),
         loader,
         mc,
         memGb: req.body.memGb,
-      });
+      }).catch((e: Error) => reply.code(400).send({ error: e.message }));
     },
   );
 

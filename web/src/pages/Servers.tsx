@@ -36,16 +36,20 @@ function NewServerPanel() {
   const memMax = Math.max(2, Math.min(12, host - 1))
   const memGb = mem ?? Math.min(6, Math.max(2, Math.floor(host / 2)))
 
-  const { data: versions, isFetching: loadingVersions } = useQuery({
+  const { data: catalog, isFetching: loadingVersions } = useQuery({
     queryKey: ['loader-versions', loader],
     queryFn: async () => {
       const r = await fetch(`/api/loaders/versions?loader=${loader}`)
       const j = await r.json()
       if (!r.ok) throw new Error(j.error ?? 'could not load versions')
-      return j.versions as string[]
+      // verified/testedChanges are present only when Spawnpoint installs the server itself
+      return j as { versions: string[]; verified?: string[]; testedChanges?: 'all' | string[] }
     },
     staleTime: 60 * 60_000,
   })
+  const versions = catalog?.versions
+  const tested = catalog?.testedChanges
+  const testedHere = tested === 'all' || !!tested?.includes(mc)
   useEffect(() => {
     if (versions?.length && !versions.includes(mc)) setMc(versions[0])
   }, [versions, mc])
@@ -109,7 +113,9 @@ function NewServerPanel() {
             className="field px-3 py-2 text-sm font-mono min-w-32"
           >
             {loadingVersions && <option>loading…</option>}
-            {(versions ?? []).map((v) => <option key={v} value={v}>{v}</option>)}
+            {(versions ?? []).map((v) => (
+              <option key={v} value={v}>{catalog?.verified ? `${v}${catalog.verified.includes(v) ? '' : ' · untested'}` : v}</option>
+            ))}
           </select>
         </label>
 
@@ -148,6 +154,14 @@ function NewServerPanel() {
           {busy ? 'Building…' : 'Create server'}
         </button>
       </div>
+
+      {tested && mc && !testedHere && (
+        <p className="text-text-dim text-xs mt-3 max-w-[68ch]">
+          {tested.length
+            ? `Panel mod changes on ${LOADERS.find((l) => l.key === loader)?.label} need its tested profile (${tested.join(', ')}). On ${mc} the panel refuses them; start from a modpack to bring mods.`
+            : `${LOADERS.find((l) => l.key === loader)?.label} servers don't get tested changes: ${loader === 'quilt' ? 'mods' : loader === 'vanilla' ? 'datapacks' : 'plugins'} install after a restart without a boot or join test.`}
+        </p>
+      )}
 
       {(create.error || job) && (
         <div className="mt-4 pt-3 border-t-2 border-line/40 text-xs font-semibold">

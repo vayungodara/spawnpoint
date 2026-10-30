@@ -4,6 +4,7 @@ import { PATHS } from '../config.js';
 import { craftyApi, type CraftyServer } from '../clients/crafty.js';
 import { detect, type Detection } from './detect.js';
 import { nativeRecord, transferRecord } from './native.js';
+import { jdkFeatureFor, jdkPrefix, type JdkFeature } from './temurin.js';
 
 export interface ServerInfo {
   id: string;
@@ -56,47 +57,43 @@ export function clientShelfDir(uuid: string): string {
 }
 
 /** The JDK a server should launch with, or null if none is installed.
-    The MC version sets the minimum Java and the loader the maximum: Forge
-    and NeoForge stay on 21 (their coremods break on newer JDKs), while
-    everything else takes the newest JDK, because modern plugins often
-    require Java 25. JDKs live under Tools/ in space-free paths: Crafty does
-    not quote the launch command, so a space splits the java path. */
+    jdkFeatureFor() owns the major. Java 21 and 25 stand in for each other
+    as before; a Java 8 or 17 recipe has no safe substitute. JDKs live under
+    Tools/ in space-free paths: Crafty does not quote the launch command, so
+    a space splits the java path. */
 export function javaFor(mc: string | null, loader?: string | null): string | null {
-  const major = mc ? parseInt(mc.split('.')[0], 10) : NaN;
+  const feature = jdkFeatureFor(mc, loader);
+  return toolsJava(feature) ?? (feature === 25 ? toolsJava(21) : feature === 21 ? toolsJava(25) : null);
+}
+
+/** The Tools JDK of exactly this feature version, or null. */
+export function toolsJava(feature: JdkFeature): string | null {
   const toolsDir = join(PATHS.root, 'Tools');
-  if (!existsSync(toolsDir)) return null;
-  const jdks = readdirSync(toolsDir).filter((d) => d.startsWith('jdk-'));
-  const pick = (prefix: string) => {
-    const d = jdks.find((x) => x.startsWith(prefix));
-    const p = d ? join(toolsDir, d, 'bin', process.platform === 'win32' ? 'java.exe' : 'java') : null;
-    return p && existsSync(p) ? p : null;
-  };
-  const java25 = pick('jdk-25');
-  const java21 = pick('jdk-21');
+  const d = existsSync(toolsDir) ? readdirSync(toolsDir).find((x) => x.startsWith(jdkPrefix(feature))) : undefined;
+  const p = d ? join(toolsDir, d, 'bin', process.platform === 'win32' ? 'java.exe' : 'java') : null;
+  return p && existsSync(p) ? p : null;
+}
 
-  // MC 26+ needs Java 25 regardless of loader
-  if (!isNaN(major) && major >= 26) return java25 ?? java21;
-
-  // 1.x: Forge/NeoForge must stay on 21; everything else takes the newest.
-  const fragile = loader === 'forge' || loader === 'neoforge';
-  if (fragile) return java21 ?? java25;
-
-  // 1.20.4 and older predate Java 21 support in some loaders — keep those on 21
-  // too; 1.20.5+ and 1.21+ are happy on 25 and their plugins often demand it.
-  const [, min = 0, pat = 0] = (mc ?? '').split('.').map((n) => parseInt(n, 10) || 0);
-  const modernEnough = major === 1 && (min > 20 || (min === 20 && pat >= 5));
-  return modernEnough ? java25 ?? java21 : java21 ?? java25;
+/** Whether a Java major can run this server at all: at least the major
+    Mojang declares, and FML coremods break past 21 before Minecraft 26. */
+function javaRuns(java: number, mc: string | null, loader?: string | null): boolean {
+  const [major, minor = 0, patch = 0] = (mc ?? '').split('.').map((n) => parseInt(n, 10));
+  const modern = major >= 26;
+  const minimum = modern ? 25 : major !== 1 ? 8 : minor < 17 ? 8 : minor < 18 ? 16 : minor < 20 || (minor === 20 && patch < 5) ? 17 : 21;
+  return java >= minimum && !((loader === 'forge' || loader === 'neoforge') && java > (modern ? 25 : 21));
 }
 
 /** Rewrite a launch command's java to `exe`. Handles a bare `java` and a
-    previously-written absolute jdk path that is now the wrong major. Returns
-    null when the command already runs the right java (no change needed). */
-function rewriteJava(cur: string, exe: string): string | null {
+    Tools JDK that cannot run this version. A working pin is left alone even
+    when a new server would default to another major. Returns null when no
+    change is needed. */
+export function rewriteJava(cur: string, exe: string, mc: string | null, loader?: string | null): string | null {
   // a bare `java` may not resolve under Crafty's service account
   const bare = /^"?java(\.exe)?"?\s/.test(cur);
   // a Tools/ JDK the panel wrote earlier that is now the wrong major
   const currentPath = /^"([^"]*[\\/]bin[\\/]java(?:\.exe)?)"/.exec(cur)?.[1];
-  const wrongMajor = !!currentPath && currentPath.toLowerCase() !== exe.toLowerCase() && /[\\/]Tools[\\/]jdk-/i.test(currentPath);
+  const pinned = Number(/[\\/]Tools[\\/]jdk-(\d+)/i.exec(currentPath ?? '')?.[1]);
+  const wrongMajor = !!currentPath && currentPath.toLowerCase() !== exe.toLowerCase() && pinned > 0 && !javaRuns(pinned, mc, loader);
   if (!bare && !wrongMajor) return null;
   return bare
     ? cur.replace(/^"?java(\.exe)?"?/, `"${exe}"`)
@@ -111,7 +108,7 @@ export async function pinJavaFor(id: string, mc: string | null, loader?: string 
   const exe = javaFor(mc, loader);
   if (!exe || craftyApi.reportedPath(id) !== serverDir(id)) return false;
   const s = await craftyApi.getServer(id).catch(() => null);
-  const cmd = s && rewriteJava(s.execution_command, exe);
+  const cmd = s && rewriteJava(s.execution_command, exe, mc, loader);
   if (!cmd) return false;
   await craftyApi.patchServer(id, { execution_command: cmd });
   return true;

@@ -20,6 +20,7 @@ node .github/revision-guard.mjs
 node .github/publication-guard.mjs
 node .github/solver-test.mjs
 node .github/solver-install.mjs
+node .github/recipe-test.mjs
 npx oxlint server/src
 npm run lint -w web
 ```
