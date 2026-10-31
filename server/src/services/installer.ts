@@ -320,8 +320,11 @@ export function solveCandidate(
         const projectId = request.projectId.startsWith('cf:') ? request.projectId : (await modrinth.getProject(request.projectId)).id;
         requests.set(projectId, { ...request, projectId, requested: requests.get(projectId)?.requested === true || request.requested !== false });
       }
+      // Fabric Loader ships MixinExtras inside its own jar; mods may require it without another project
+      const loaderJar = det.loader === 'fabric' ? join(serverDir(id), 'libraries', 'net', 'fabricmc', 'fabric-loader', loader, `fabric-loader-${loader}.jar`) : '';
+      const loaderNested = loaderJar && existsSync(loaderJar) ? readFabricJar(readFileSync(loaderJar)).nested : [];
       const solved = await solve({ mc: det.mc, loader: det.loader, loaderVersion: loader, java: javaVersion, languageVersions: profile?.languages,
-        installed, add: [...requests.values()], remove, exclude: removed.map((row) => idsByPath.get(row.path)![0]), side: 'both' }, catalog, { maxMs: 60_000 });
+        installed, add: [...requests.values()], remove, exclude: removed.map((row) => idsByPath.get(row.path)![0]), side: 'both', loaderNested }, catalog, { maxMs: 60_000 });
       result.solver = solved;
       const selection = solved.status === 'ok' ? solved : solved.status === 'inconclusive' ? solved.tentative : undefined;
       if (!selection) return { ...result, error: `Nothing was installed. Solver ${solved.status}: ${solved.status === 'conflict' ? solved.explanation.join(' ') : solved.status === 'inconclusive' ? solved.reason : ''}`,

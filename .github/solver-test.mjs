@@ -630,5 +630,14 @@ for (const [group, artifact, module] of [['io.github.llamalad7', 'mixinextras-ne
 result = await nsolve([nlib], {}, { maxNodes: 1 });
 check('NeoForge exhausted search returns inconclusive without an untested plan', result.status === 'inconclusive' && !result.tentative);
 
+// Fabric Loader bundles MixinExtras in its own jar. A mod that requires it
+// needs no other project, but an older bundled copy cannot satisfy a newer range.
+const mixinUser = model('mixin-user', 'mixinUser1', '1.0.0', { depends: { mixinextras: '>=0.5.5' } });
+const bundled = (v) => [readFabricJar(zipRecord({ fabric: { schemaVersion: 1, id: 'mixinextras', version: v }, nested: {} }))];
+result = await solve({ ...input([], [exact(mixinUser)]), loaderNested: bundled('0.5.5') }, catalog([...real, mixinUser]));
+check('Fabric Loader\'s bundled MixinExtras satisfies a requirement without another project', result.status === 'ok' && result.plan.length === 1);
+result = await solve({ ...input([], [exact(mixinUser)]), loaderNested: bundled('0.5.0') }, catalog([...real, mixinUser]));
+check('an older bundled MixinExtras does not satisfy a newer requirement', result.status === 'conflict');
+
 console.log(`\n${checks - fails.length}/${checks} checks passed`);
 if (fails.length) process.exit(1);

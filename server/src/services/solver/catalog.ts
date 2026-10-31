@@ -150,7 +150,8 @@ export class NetworkCatalog implements Catalog {
   async providers(id: string): Promise<{ projects: string[]; complete: boolean }> {
     if (!this.index.has(id)) {
       const candidates = new Set<string>();
-      for (const slug of id === 'fabric' ? ['fabric-api'] : [id, id.replace(/_/g, '-')]) {
+      // Fabric API ships its modules ("fabric-lifecycle-events-v1") nested, with no projects of their own
+      for (const slug of id === 'fabric' || /^fabric(-[a-z0-9]+)+-v\d+$/.test(id) ? ['fabric-api'] : [id, id.replace(/_/g, '-')]) {
         try { candidates.add((await modrinth.getProject(slug)).id); }
         catch (error) { if (!(error instanceof Error) || !error.message.endsWith('-> 404')) throw error; }
       }

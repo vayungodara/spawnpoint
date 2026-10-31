@@ -26,6 +26,9 @@ export interface SolveInput {
   exclude?: string[];
   /** Friend packs must satisfy server and client constraints together. */
   side?: 'server' | 'both';
+  /** Jars Fabric Loader itself bundles (MixinExtras). Like any nested jar,
+      they supply their ids unless a selected mod bundles a newer copy. */
+  loaderNested?: JarMeta[];
 }
 export interface Catalog {
   /** Complete compatible domain, including installed and explicitly pinned versions. */
@@ -291,6 +294,7 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
       }
     };
     for (const root of active) collect(root, []);
+    collect({ meta: { ids: [], version: input.loaderVersion, depends: {}, breaks: {}, nested: input.loaderNested ?? [] }, owner: 'fabricloader', side: 3 }, []);
     nested.sort((a, b) => compareFabricVersions(b.unit.meta.version, a.unit.meta.version) ?? 0);
 
     const complete = async (loaded: Unit[]): Promise<Solution | null> => {
