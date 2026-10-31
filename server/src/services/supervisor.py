@@ -616,6 +616,11 @@ def main():
     owner.mkdir(exist_ok=True)
     fence = launchguard.lock_runtime(owner)
     job = contain_windows()
+    if os.name != "nt" and os.getpgrp() != os.getpid():
+        # systemd and launchd already make the owner a group leader. Started
+        # from a shell or a test, the caller's group holds processes that are
+        # not ours, and the orphan audit below must only see our descendants.
+        os.setpgid(0, 0)
     RECORDS.mkdir(exist_ok=True)
     for path in RECORDS.glob("*.json"):
         value = record(path.stem)
