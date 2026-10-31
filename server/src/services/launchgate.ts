@@ -303,7 +303,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
     return { result: 'unverified', detail: `could not prepare the test client: ${String(e).slice(0, 140)}` };
   }
   const testJar = await runtimeTestJar(det.mc, det.loader);
-  if (!testJar) return { result: 'unverified', detail: `mc-runtime-test has no build for ${det.mc}` };
+  if (!testJar) return { result: 'unverified', detail: `the test client does not support Minecraft ${det.mc} yet` };
 
   const skipped = (name: string): boolean => leaveOut.includes(name);
   // AutoModpack's handshake needs the client to hold the exact pack, so it

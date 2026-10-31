@@ -51,7 +51,7 @@ export async function queueNativeInstall(opts: { id?: string; name: string; load
     copyFileSync(pack.path, path);
     pack = { ...pack, path };
   }
-  save({ id, serverId: id, status: 'queued for the independent installer', done: false, error: null,
+  save({ id, serverId: id, status: 'waiting for the installer', done: false, error: null,
     packName: opts.name.trim().slice(0, 40) || `${opts.loader} ${opts.mc}`, warnings: [...recipe.notes], loader: recipe.loader, mc: opts.mc, recipe,
     memGb: Math.max(2, Math.min(12, Math.round(opts.memGb ?? 2))), port: opts.port, attempts: 0, phase: 'queued', pack });
   return { jobId: id };
@@ -180,7 +180,7 @@ async function install(id: string): Promise<void> {
       renameSync(staging, dest);
       await supervisor('register', { server });
     }
-    job.phase = 'installed'; job.status = 'loader installed; waiting for panel configuration'; save(job);
+    job.phase = 'installed'; job.status = 'loader installed; finishing setup'; save(job);
   } catch (error) {
     job.phase = 'failed'; job.status = 'failed'; job.error = String(error); job.done = true; save(job);
     process.exitCode = 1;

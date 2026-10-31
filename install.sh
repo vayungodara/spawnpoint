@@ -192,7 +192,7 @@ if [ "$OS" = Linux ] && [ "$RUNTIME" = standalone ] && [ "$USER_SYSTEMD" = 0 ]; 
   note "Can't reach your systemd user session"
   say "Spawnpoint keeps your servers running as a user service. Turn that on once:"
   fix "sudo loginctl enable-linger $(id -un)"
-  say "Then log out, log back in (a fresh SSH login, not su), and run this again."
+  say "Then run this again. You don't need to log out first."
   BLOCKED=1
 fi
 

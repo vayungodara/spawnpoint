@@ -6,10 +6,14 @@ import { ChangeCard, Rejections, TestChips, UndoWaitingBanner } from '../../comp
 import { changeVisible } from '../../components/status'
 import { ConfirmButton } from './Workspace'
 
+const WAITING = 'The undo waits for the server to restart; see above.'
+
 function History({ id, live }: { id: string; live: boolean }) {
   const qc = useQueryClient()
   const q = useRevisions(id, live)
   const [msg, setMsg] = useState<string | null>(null)
+  const [msgAt, setMsgAt] = useState(0)
+  const { data: change, dataUpdatedAt } = useChange(id)
   const last = useQuery({
     queryKey: ['last-change', id],
     queryFn: () => api<{ change: { txn: string; added: { file: string }[] } | null }>(`/api/servers/${id}/last-change`),
@@ -17,7 +21,8 @@ function History({ id, live }: { id: string; live: boolean }) {
   const undo = useMutation({
     mutationFn: () => api<{ waiting: boolean }>(`/api/servers/${id}/last-change/undo`, { method: 'POST', body: '{}' }),
     onSuccess: (r) => {
-      setMsg(r.waiting ? 'The undo waits for the server to restart; see above.' : 'Undone: the files from before that change are back. They load when the server starts.')
+      setMsgAt(Date.now())
+      setMsg(r.waiting ? WAITING : 'Undone: the files from before that change are back. They load when the server starts.')
       for (const key of ['candidate', 'installed', 'last-change', 'revisions']) qc.invalidateQueries({ queryKey: [key, id] })
     },
     onError: (e) => setMsg(`✗ ${String(e).replace(/^Error: \d+: /, '')}`),
@@ -28,7 +33,7 @@ function History({ id, live }: { id: string; live: boolean }) {
       <div className="flex items-end gap-4 flex-wrap">
         <div className="min-w-0 flex-1">
           <h2 className="text-xl">History</h2>
-          <p className="text-sm text-text-dim mt-0.5 max-w-[68ch]">Friends get the published revision. Undo puts back the files the last change replaced; it does not restore the world.</p>
+          <p className="text-sm text-text-dim mt-0.5 max-w-[68ch]">Each tested pack is kept here. Undo puts back the files the last change replaced; it does not restore the world.</p>
         </div>
         {last.data?.change && (
           <ConfirmButton
@@ -41,7 +46,8 @@ function History({ id, live }: { id: string; live: boolean }) {
           </ConfirmButton>
         )}
       </div>
-      {msg && <p role="status" className="text-sm font-semibold pop-in">{msg}</p>}
+      {/* once the waiting undo leaves, its outcome shows in the history and status, not here */}
+      {msg && !(msg === WAITING && change && !change.promotion && dataUpdatedAt > msgAt) && <p role="status" className="text-sm font-semibold pop-in">{msg}</p>}
       {q.isError && <p role="alert" className="text-sm text-gold">History could not be loaded: {q.error.message}</p>}
       {!q.isLoading && !revisions.length && (
         <p className="block px-4 py-3 text-sm text-text-dim">No revisions yet. The first tested change seals one, together with the pack that was running before it.</p>

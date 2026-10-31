@@ -384,7 +384,7 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
                 ? 'I approve the items above. The mod change itself is tested on a copy next and goes live only if it passes.'
                 : c.server?.result === 'passed' && (c.client?.result ?? 'passed') === 'passed'
                   ? 'I approve the changes listed above.'
-                  : 'I approve these changes and accept the test gaps shown above. Hash checks and world-restore consent cannot be waived.'}</span>
+                  : 'I approve these changes and accept the test gaps shown above. File checks still run, and restoring a world always asks separately.'}</span>
             </label>
             {needsStop && <p className="text-xs text-text-dim">This one-time setup needs the server stopped, so anyone on it is disconnected. When the test finishes, press Start to bring it back with the new mod.</p>}
             <button onClick={() => (needsStop ? stopThenApprove() : act('apply'))} disabled={decide.isPending || stopping || !consent} className="btn btn-emerald w-full py-2.5 text-sm">
@@ -397,7 +397,7 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
           </>
         )}
         {(decide.error || stopErr) && <p role="alert" className="text-sm text-redstone font-semibold pop-in">{stopErr || decide.error!.message.replace(/^\d+: /, '')}</p>}
-        <p className="hud !opacity-80 !text-[10px]">LIVE FILES STAY UNCHANGED UNTIL PROMOTION</p>
+        <p className="hud !opacity-80 !text-[10px]">YOUR SERVER STAYS AS IT IS UNTIL THIS GOES LIVE</p>
       </div>
     </div>
   )
@@ -469,7 +469,8 @@ export function Rejections({ id }: { id: string }) {
     queryKey: ['installed', id],
     queryFn: () => api<{ rejections?: Rejection[] }>(`/api/servers/${id}/installed`),
   })
-  const list = data?.rejections ?? []
+  // generated config proposals ride along under hashed names; the mods are what the owner asked for
+  const list = (data?.rejections ?? []).map((r) => ({ ...r, jars: r.jars.filter((j) => !/^config-[0-9a-f]{64}$/.test(j)) }))
   if (!list.length) return null
   return (
     <section className="block border-gold! px-4 py-3 text-sm">
@@ -478,7 +479,7 @@ export function Rejections({ id }: { id: string }) {
           <span className="hud !opacity-100 text-gold">TURNED AWAY · LAST 48 H</span>
           <p className="mt-1.5"><b>The tests turned away {plural(list.reduce((n, r) => n + r.jars.length, 0), 'mod file')}.</b> Nothing on the server changed.</p>
           {list.map((r) => (
-            <p key={r.at} className="mt-1 font-mono text-xs break-words">{fmtWhen(new Date(r.at))} · {r.jars.join(', ')}: {r.reason[0] ?? 'see the panel log'}</p>
+            <p key={r.at} className="mt-1 font-mono text-xs break-words">{fmtWhen(new Date(r.at))} · {r.jars.join(', ')}: {r.reason[0]?.replace(/(^|: )Error: /g, '$1') ?? 'see the panel log'}</p>
           ))}
         </div>
         <button

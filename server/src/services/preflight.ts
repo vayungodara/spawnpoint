@@ -197,12 +197,12 @@ export async function dryBootInner(serverId: string, jars: string[], dir: string
     // Reap the JVM before capturing outputs. Forge's EULA line alone says
     // nothing about mod construction and can never pass this check.
     const poll = setInterval(() => {
-      if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mods${fullBoot ? ' into a disposable world' : ''}` });
+      if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mod${jars.length === 1 ? '' : 's'}${fullBoot ? ' into a disposable world' : ''}` });
       else if (FAIL_RE.test(out)) finish({ result: 'failed', detail: 'the loader rejected this mod set', excerpt: excerptOf(out) });
     }, 1000);
     child.on('exit', (code) => {
       setTimeout(() => {
-        if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mods${fullBoot ? ' into a disposable world' : ''}` });
+        if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mod${jars.length === 1 ? '' : 's'}${fullBoot ? ' into a disposable world' : ''}` });
         else finish({ result: 'failed', detail: `the server exited (code ${code}) before it finished loading mods`, excerpt: excerptOf(out) });
       }, 300);
     });

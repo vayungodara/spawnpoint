@@ -118,9 +118,13 @@ interface CreateJobInfo { id: string; status: string; done: boolean; error: stri
 
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { data } = useServers()
-  const { data: runtime } = useRuntime()
+  const { data: runtime, refetch: refetchRuntime } = useRuntime()
   const servers = data?.servers ?? []
   const native = new Set(runtime?.native.map((n) => n.id))
+  // a server that just appeared is not in a runtime answer fetched before it
+  // existed; ask again rather than label a new Spawnpoint server CRAFTY
+  const ids = servers.map((s) => s.id).join()
+  useEffect(() => { if (ids) void refetchRuntime() }, [ids, refetchRuntime])
   // one light stats poll per server keeps every lamp honest; the workspace
   // shares the same query for the open server
   const stats = useQueries({

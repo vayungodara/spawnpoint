@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { NavLink, Outlet, useLocation, useParams } from 'react-router'
+import { NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { changeNeedsOwner, useChange, useRuntime, useServerAction, useServers, useSetActive, useStats, type ServerInfo, type Stats } from '../../api'
 import { Pi } from '../../components/PixelIcons'
@@ -106,6 +106,15 @@ function Hero({ s }: { s: ServerInfo }) {
   const { data: stats } = useStats(s.id)
   const { data: runtime } = useRuntime()
   const power = usePower(s.id, stats)
+  // "Start it" on the new-server page lands here and presses Start once
+  const location = useLocation()
+  const navigate = useNavigate()
+  useEffect(() => {
+    if (!(location.state as { start?: boolean } | null)?.start) return
+    navigate(location.pathname + location.search, { replace: true, state: null })
+    power.act('start')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state])
   const status = statusOf(stats, power.transition)
   const native = runtime?.native.some((n) => n.id === s.id)
   const loader = s.detection.loader === 'unknown' ? 'Unknown loader' : s.detection.loader[0].toUpperCase() + s.detection.loader.slice(1)

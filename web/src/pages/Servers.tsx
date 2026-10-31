@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '../api'
 import { Pi, loaderIcon } from '../components/PixelIcons'
 import bandSurface from '../assets/band-surface.webp'
 
@@ -77,7 +76,11 @@ function NewServerPanel() {
     refetchInterval: (q) => (q.state.data?.done ? false : 2000),
   })
 
-  const [startErr, setStartErr] = useState('')
+  // the new server belongs in the sidebar, under its real runtime, before anyone presses Start
+  useEffect(() => {
+    if (job?.done) void qc.invalidateQueries()
+  }, [job?.done, qc])
+
   const busy = create.isPending || (!!jobId && !job?.done)
 
   return (
@@ -176,14 +179,10 @@ function NewServerPanel() {
               {job.done && (
                 <button
                   onClick={async () => {
-                    // the first thing everyone does next is press Start; do it for them
-                    setStartErr('')
-                    if (job.serverId) {
-                      try { await api(`/api/servers/${job.serverId}/action`, { method: 'POST', body: JSON.stringify({ action: 'start' }) }) }
-                      catch (e) { setStartErr(`Couldn't start it: ${String(e instanceof Error ? e.message : e).replace(/^\d+: /, '')}`); return }
-                    }
+                    // the first thing everyone does next is press Start: the
+                    // server page presses it, so its button shows Starting…
                     await qc.invalidateQueries() // servers and runtime ownership both changed
-                    navigate(job.serverId ? `/s/${job.serverId}` : '/')
+                    navigate(job.serverId ? `/s/${job.serverId}` : '/', { state: { start: !!job.serverId } })
                   }}
                   autoFocus
                   className="btn btn-emerald px-4 py-1.5 ml-auto"
@@ -193,7 +192,6 @@ function NewServerPanel() {
               )}
             </div>
           )}
-          {startErr && <div role="alert" className="text-redstone mt-1.5">✗ {startErr}</div>}
           {job?.warnings?.length ? (
             <div className="text-text-dim mt-1.5">{job.warnings.join(' · ')}</div>
           ) : null}
