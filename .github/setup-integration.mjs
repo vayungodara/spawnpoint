@@ -37,7 +37,7 @@ for (let attempt = 0; ; attempt++) {
   await new Promise((r) => setTimeout(r, 1000));
 }
 const { startCreateServer, getJob } = await import('../server/dist/services/servercreate.js');
-const { jobId } = startCreateServer({ name: 'B1 Fabric proof', loader: 'fabric', mc: '1.21.1', memGb: 2 });
+const { jobId } = await startCreateServer({ name: 'B1 Fabric proof', loader: 'fabric', mc: '1.21.1', memGb: 2 });
 let id;
 for (;;) {
   const job = getJob(jobId);

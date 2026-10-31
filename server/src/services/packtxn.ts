@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, basename, dirname } from 'node:path';
@@ -37,7 +37,7 @@ export interface StagedFile {
   remove?: boolean;
   /** Dependency-only removal proposed by the solver, not an owner exclusion. */
   automatic?: boolean;
-  /** Byte-identical duplicate removal; retain this other top-level mod. */
+  /** Duplicate removal (byte-identical, or keep-newest); retain this other top-level mod. */
   duplicateOf?: string;
   /** a live file this one supersedes (an older version of the same mod) */
   replaces?: string;
@@ -153,7 +153,9 @@ export function stage(id: string, files: StagedFile[], log: (m: string) => void,
   const c: Candidate = isOpen(prev) ? prev : { txn: new Date().toISOString().replace(/[:.]/g, '-'), status: 'collecting', detail: '', files: [], updatedAt: '' };
   const obsolete = new Set<string>();
   for (const f of files) {
-    const superseded = c.files.filter((x) => x.file === f.file || (!f.remove && x.file === f.replaces) || (f.entry && x.entry?.projectId === f.entry.projectId));
+    // A keep-newest removal of one side of a same-name pair survives a change to the other side.
+    const superseded = c.files.filter((x) => !(x.remove && x.duplicateOf && x.to !== f.to)
+      && (x.file === f.file || (!f.remove && x.file === f.replaces) || (f.entry && x.entry?.projectId === f.entry.projectId)));
     // Reconcile the whole batch, independent of its order: both the upload
     // and an already-staged compatible build can carry a live predecessor.
     const predecessors = new Set(superseded.flatMap((old) => !old.remove && old.replaces && (old.replaces === old.file || !superseded.some((x) => x.file === old.replaces)) ? [old.replaces] : []));
@@ -361,22 +363,34 @@ export async function resumeCandidates(log: (m: string) => void): Promise<void> 
 }
 
 /** The jars the server would run and the files a client would receive with this candidate applied. */
-export function candidateSet(id: string, c: Pick<Candidate, 'files'>): { serverJars: string[]; client: ClientSet['files'] } {
+export function candidateSet(id: string, c: Pick<Candidate, 'files'>): { serverJars: string[]; client: ClientSet['files']; shelfCopies: string[]; pairs: string[] } {
   const modsDir = join(serverDir(id), 'mods');
   const shelfDir = clientShelfDir(id);
   const list = (dir: string): Map<string, string> =>
     new Map(existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.jar')).map((f) => [f, join(dir, f)]) : []);
   const server = list(modsDir);
   const shelf = list(shelfDir);
-  for (const name of shelf.keys()) if (server.has(name)) throw new Error(`ambiguous pack: ${name} exists in both server mods and the client shelf`);
+  // One name in both places is one file when the bytes match. With
+  // different bytes the server runs its copy and friends get the shelf's,
+  // because AutoModpack serves the extras mirror over a same-path server
+  // file. Keep newest offers the pair; a removal names the side it drops.
+  const same = (a: string, b: string): boolean => statSync(a).size === statSync(b).size && readFileSync(a).equals(readFileSync(b));
+  const pairs = [...shelf].filter(([name, path]) => server.has(name) && !same(server.get(name)!, path)).map(([name]) => name);
   for (const f of c.files) {
     if (f.path) continue;
-    for (const gone of [f.replaces, f.file]) if (gone) { server.delete(gone); shelf.delete(gone); }
+    for (const gone of [f.replaces, f.file]) {
+      if (!gone) continue;
+      if (pairs.includes(gone)) (f.to === 'mods' ? server : shelf).delete(gone);
+      else { server.delete(gone); shelf.delete(gone); }
+    }
     if (!f.remove && f.file.endsWith('.jar')) (f.to === 'mods' ? server : shelf).set(f.file, join(filesDir(id), f.file));
   }
+  const shelfCopies: string[] = [];
+  for (const [name, path] of shelf) if (server.has(name) && same(server.get(name)!, path) && !isServerOnly(path)) shelfCopies.push(path);
   const client: ClientSet['files'] = [];
   for (const [name, path] of [...server, ...shelf]) {
-    if (server.has(name) && isServerOnly(path)) continue;
+    if (server.get(name) === path && (isServerOnly(path) || (shelf.has(name) && !shelfCopies.includes(shelf.get(name)!)))) continue;
+    if (shelfCopies.includes(path)) continue;
     client.push({ src: path, rel: `mods/${name}` });
   }
   // hand-placed extras (configs, resource packs) ship too; bridged shelf copies are replaced by the shelf above
@@ -409,7 +423,7 @@ export function candidateSet(id: string, c: Pick<Candidate, 'files'>): { serverJ
       else client[index] = { rel: f.path!, src: join(filesDir(id), f.file) };
     }
   }
-  return { serverJars: [...server.values()], client };
+  return { serverJars: [...server.values()], client, shelfCopies, pairs };
 }
 
 /** Full inventories, not overlays which would silently reread mutable inputs
@@ -418,12 +432,16 @@ function inputsFor(id: string, c: Pick<Candidate, 'files'>): RevisionInput[] {
   const set = candidateSet(id, c);
   const ledger = ledgerEntries(id);
   const entry = (src: string): LedgerEntry | undefined => {
-    const staged = c.files.find((f) => f.file === basename(src));
-    return staged ? staged.entry : ledger.find((e) => e.file === basename(src));
+    const staged = c.files.find((f) => !f.remove && f.file === basename(src));
+    if (staged) return staged.entry;
+    // A same-name pair has two byte versions; a ledger record belongs to one.
+    if (!set.pairs.includes(basename(src))) return ledger.find((e) => e.file === basename(src));
+    const sha1 = createHash('sha1').update(readFileSync(src)).digest('hex');
+    return ledger.find((e) => e.file === basename(src) && e.sha1.toLowerCase() === sha1);
   };
   const inputs = revisionInputs(id).filter((f) => !c.files.some((s) => s.path === f.path) && (!f.path.startsWith('mods/') || (!f.path.endsWith('.jar') && !c.files.some((s) => [s.file, s.replaces].includes(basename(f.path))))));
   for (const f of c.files.filter((f) => !f.remove && !f.file.endsWith('.jar'))) inputs.push({ src: join(filesDir(id), f.file), path: f.path ?? `mods/${f.file}`, side: 'server', location: f.to === 'mods' ? 'server' : 'shelf', entry: f.entry });
-  for (const src of set.serverJars) inputs.push({ src, path: `mods/${basename(src)}`, side: isServerOnly(src) ? 'server' : 'both', location: 'server', entry: entry(src) });
+  for (const src of set.serverJars) inputs.push({ src, path: `mods/${basename(src)}`, side: set.client.some((f) => f.src === src) ? 'both' : 'server', location: 'server', entry: entry(src) });
   for (const f of set.client) {
     if (set.serverJars.includes(f.src)) continue;
     const serverInput = inputs.find((input) => input.location === 'server' && input.src === f.src);
@@ -435,6 +453,8 @@ function inputsFor(id: string, c: Pick<Candidate, 'files'>): RevisionInput[] {
     const shelf = f.rel.startsWith('mods/') && (f.src.startsWith(clientShelfDir(id)) || c.files.some((s) => s.to === 'shelf' && s.file === basename(f.src)));
     inputs.push({ src: f.src, path: f.rel, side: 'client', location: shelf ? 'shelf' : 'extra', entry: entry(f.src) });
   }
+  // The server copy is what clients receive; the lock still inventories the shelf file.
+  for (const src of set.shelfCopies) inputs.push({ src, path: `mods/${basename(src)}`, side: 'client', location: 'shelf', entry: entry(src) });
   return inputs;
 }
 
@@ -485,7 +505,8 @@ function sealedSet(id: string, revision: string) {
   for (const f of lock.files) {
     const src = lockedPath(id, revision, f);
     if (f.location === 'server' && f.path.startsWith('mods/') && f.path.endsWith('.jar')) serverJars.push(src);
-    if (f.side !== 'server') client.push({ src, rel: f.path });
+    // A shelf file byte-identical to its server jar is one client file.
+    if (f.side !== 'server' && !client.some((item) => item.rel === f.path)) client.push({ src, rel: f.path });
   }
   return { serverJars, client, sourceDir: join(dir, 'files', 'server'), lock };
 }
@@ -511,7 +532,6 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
     for (let round = 0; round < 12; round++) {
       const gen = generation.get(id) ?? 0;
       status('checking declared dependencies');
-      let set = candidateSet(id, c);
       const solvedLoader = ['fabric', 'forge', 'neoforge'].includes(detect(serverDir(id), id).loader);
       if (solvedLoader) {
         if (await repairCandidate(id, log)) continue;
@@ -552,7 +572,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       await sealRevision(id, revision, inputsFor(id, c), c.java);
       c = save(id, { ...candidate(id)!, revision, baseline });
       const sealed = sealedSet(id, revision);
-      set = sealed;
+      const set = sealed;
       const witness = c.solver?.status === 'ok' ? c.solver : c.solver?.status === 'inconclusive' ? c.solver.tentative : undefined;
       if (solvedLoader) {
         const paths = [...new Set([...set.serverJars, ...set.client.filter((f) => f.rel.startsWith('mods/') && f.rel.endsWith('.jar')).map((f) => f.src)])];
@@ -652,10 +672,14 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
   }
 }
 
+/** The staged bytes already live on that side (mods/ or the shelf). */
+function liveCopy(id: string, f: StagedFile, to: StagedFile['to']): boolean {
+  try { return readFileSync(join(to === 'mods' ? join(serverDir(id), 'mods') : clientShelfDir(id), f.file)).equals(readFileSync(join(filesDir(id), f.file))); } catch { return false; }
+}
+const other = (to: StagedFile['to']): StagedFile['to'] => to === 'mods' ? 'shelf' : 'mods';
 function sameBytes(id: string, f: StagedFile): boolean {
-  if (f.replaces !== f.file) return false;
-  const live = join(f.to === 'mods' ? join(serverDir(id), 'mods') : clientShelfDir(id), f.file);
-  try { return readFileSync(live).equals(readFileSync(join(filesDir(id), f.file))); } catch { return false; }
+  // Moving a jar between mods/ and the shelf is a removal to consent to.
+  return f.replaces === f.file && liveCopy(id, f, f.to) && !existsSync(join(other(f.to) === 'mods' ? join(serverDir(id), 'mods') : clientShelfDir(id), f.file));
 }
 
 /** Park a candidate for the owner: apply anyway, test again or discard. */
@@ -663,7 +687,9 @@ function wait(id: string, verdicts: Pick<Candidate, 'server' | 'client'>, why: s
   const c = candidate(id)!;
   const consent = revisionState(id).managedHosting ? [
     // A reconciled source record for byte-identical live bytes is not a change to consent to.
-    ...c.files.filter((f) => f.path || f.remove || (f.replaces && !sameBytes(id, f))).map((f) => f.path ? `${f.remove ? 'Remove config' : 'Write config'} ${f.path}` : f.remove ? `Remove ${f.file}` : `${f.replaces} → ${f.file}`),
+    ...c.files.filter((f) => f.path || f.remove || (f.replaces && !sameBytes(id, f))).map((f) => f.path ? `${f.remove ? 'Remove config' : 'Write config'} ${f.path}` : f.remove ? `Remove ${f.file}${f.duplicateOf === f.file ? (f.to === 'shelf' ? ' from the client shelf; the server copy stays' : ' from server mods/; the client-shelf copy stays') : ''}`
+      : f.replaces === f.file && liveCopy(id, f, f.to) && liveCopy(id, f, other(f.to)) ? (f.to === 'shelf' ? `Remove the redundant server copy mods/${f.file}; friends keep the identical client-shelf copy` : `Remove the redundant client-shelf copy of ${f.file}; the identical server copy stays`)
+      : `${f.replaces} → ${f.file}`),
     ...c.repairs?.map((r) => `${r.kind}: ${r.detail}`) ?? [],
   ] : c.consent;
   save(id, { ...c, ...verdicts, consent, status: 'needs-approval', detail: why });
@@ -785,17 +811,21 @@ function activate(id: string, c: Candidate, log: (m: string) => void, approved =
     try {
       runMoves(journal, (j) => save(id, { ...c, status: 'activating', journal: j }));
       const added = new Set(c.files.map((f) => f.file));
+      // A record stays with its bytes: the kept side of a same-name pair is not replaced.
+      const fresh = new Set(c.files.filter((f) => !f.remove && f.entry).map((f) => f.file));
+      const survives = (e: LedgerEntry): boolean => lock.files.some((f) => f.path === `mods/${e.file}` && f.sha1 === e.sha1.toLowerCase());
       // what undo needs: the files this change added and the ledger rows of what it replaced
       const manifest: RevisionManifest = {
         txn: c.txn, at: new Date().toISOString(),
         added: c.files.filter((f) => !f.path && !f.remove).map((f) => ({ file: f.file, to: f.to })),
         replaced: [...replaced].map((file) => ({ file, to: existsSync(join(rev, 'before', 'server', 'mods', file)) ? 'mods' : 'shelf' })),
-        ledger: ledgerEntries(id).filter((e) => replaced.has(e.file)),
+        // Undo drops the records of re-added files, so it must restore those too.
+        ledger: ledgerEntries(id).filter((e) => replaced.has(e.file) && (!survives(e) || c.files.some((f) => !f.path && !f.remove && f.file === e.file))),
         revision: c.revision, baseline: c.baseline,
       };
       writeManifest(rev, manifest);
       updateLedger(id, (entries) => entries
-        .filter((e) => !replaced.has(e.file) && !added.has(e.file))
+        .filter((e) => !fresh.has(e.file) && (survives(e) || (!replaced.has(e.file) && !added.has(e.file))))
         .concat(c.files.flatMap((f) => (!f.remove && f.entry ? [{ ...f.entry, clientOnly: f.to === 'shelf' || undefined }] : []))));
       await craftyApi.useRevisionCommand(id, c.revision);
       await verifyRevision(id, c.revision, true);

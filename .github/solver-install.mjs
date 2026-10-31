@@ -22,12 +22,12 @@ const { install, solveCandidate, deleteInstalled } = await tsImport('../server/s
 const { candidate, candidateSet, discard, stage, stageConfig, stagingPath, approve, applyReady } = await tsImport('../server/src/services/packtxn.ts', import.meta.url);
 const { updateLedger, ledgerEntries } = await tsImport('../server/src/services/ledger.ts', import.meta.url);
 const { NetworkCatalog } = await tsImport('../server/src/services/solver/catalog.ts', import.meta.url);
-const { repairCandidate } = await tsImport('../server/src/services/repairs.ts', import.meta.url);
+const { repairCandidate, duplicateMods, keepNewest } = await tsImport('../server/src/services/repairs.ts', import.meta.url);
 const { setOverride } = await tsImport('../server/src/services/detect.ts', import.meta.url);
-const { revisionDir, setRevisionState } = await tsImport('../server/src/services/revisions.ts', import.meta.url);
+const { revisionDir, setRevisionState, packPath: lockPath } = await tsImport('../server/src/services/revisions.ts', import.meta.url);
 const { installMrpackFile, installCurseforgeZipFile } = await tsImport('../server/src/services/modpack.ts', import.meta.url);
 const { ensureJdk } = await tsImport('../server/src/services/temurin.ts', import.meta.url);
-const { javaFor } = await tsImport('../server/src/services/servers.ts', import.meta.url);
+const { javaFor, clientShelfDir } = await tsImport('../server/src/services/servers.ts', import.meta.url);
 const { PATHS } = await tsImport('../server/src/config.ts', import.meta.url);
 mkdirSync(join(root, 'Tools'), { recursive: true });
 symlinkSync(javaHome, join(root, 'Tools', 'jdk-25-fixture'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -593,6 +593,73 @@ try {
       ? !result.error && result.installed === 1 && sha(readFileSync(join(pack.dir, 'mods/cf-required.jar')), 'sha1') === artifact.hashes.sha1
       : required ? !!result.error : !result.error && result.installed === 0 && result.warnings.some(w => w.includes('701')));
   }
+
+  // Crafty layouts seen on real servers: a root options.txt in AutoModpack's
+  // extras, the same jar byte-identical in mods/ and on the client shelf, and
+  // a same-name jar whose bytes differ. None may break the pack inventory.
+  check('extras accept exact client root files and still refuse other root, control and traversal paths',
+    lockPath('options.txt', 'extra') === 'options.txt'
+    && ['server.properties', '.spawnpoint-revision.json', 'automodpack-content.json', 'mods/../options.txt', './options.txt', 'sub/options.txt'].every((p) => { try { lockPath(p, 'extra'); return false; } catch { return true; } })
+    && [['options.txt', 'server'], ['options.txt', 'shelf']].every(([p, l]) => { try { lockPath(p, l); return false; } catch { return true; } }));
+  const shared = record('sharedmod', 'sharedmod1', '1.0.0');
+  const dupOld = record('dupmod', 'dupmod-old', '1.0.0');
+  const dupNew = record('dupmod', 'dupmod-new', '2.0.0');
+  const crafty = fixture([[shared], [dupOld]]);
+  const shelf = clientShelfDir(crafty.id);
+  mkdirSync(shelf, { recursive: true });
+  const sharedName = shared.files[0].filename, dupName = dupOld.files[0].filename;
+  writeFileSync(join(shelf, sharedName), artifacts.get(shared.files[0].url));
+  writeFileSync(join(shelf, dupName), artifacts.get(dupNew.files[0].url)); // same file name, newer bytes
+  const main = join(crafty.dir, 'automodpack', 'host-modpack', 'main');
+  mkdirSync(join(main, 'mods'), { recursive: true });
+  writeFileSync(join(main, 'options.txt'), 'enableVsync:false\nmaxFps:260\nentityDistanceScaling:0.75\n');
+  const live = crafty.bytes();
+  const set = candidateSet(crafty.id, { files: [] });
+  const rels = set.client.map((f) => f.rel);
+  check('a root options.txt in the extras ships to clients', rels.includes('options.txt'));
+  check('a byte-identical jar in mods/ and on the shelf is one client file, served from mods/', rels.filter((r) => r === `mods/${sharedName}`).length === 1
+    && set.client.find((f) => f.rel === `mods/${sharedName}`).src === join(crafty.dir, 'mods', sharedName) && set.shelfCopies.length === 1 && set.shelfCopies[0] === join(shelf, sharedName));
+  check('a same-name jar with different bytes is one pair: the server runs its copy, friends get only the shelf bytes', JSON.stringify(set.pairs) === JSON.stringify([dupName])
+    && set.serverJars.includes(join(crafty.dir, 'mods', dupName)) && set.client.filter((f) => f.rel === `mods/${dupName}`).length === 1
+    && set.client.find((f) => f.rel === `mods/${dupName}`).src === join(shelf, dupName));
+  const dupes = duplicateMods(crafty.id);
+  check('duplicate detection reads the layout and offers only the differing pair', dupes.length === 1 && dupes[0].id === 'dupmod'
+    && dupes[0].keep.to === 'shelf' && dupes[0].keep.version === '2.0.0' && dupes[0].drop.length === 1 && dupes[0].drop[0].to === 'mods');
+  assert.equal(keepNewest(crafty.id, () => {}), 1);
+  const cleaned = candidateSet(crafty.id, candidate(crafty.id));
+  check('Keep newest drops only the older side of a same-name pair and keeps the shared jar once',
+    !cleaned.serverJars.includes(join(crafty.dir, 'mods', dupName)) && cleaned.client.some((f) => f.src === join(shelf, dupName))
+    && cleaned.client.filter((f) => f.rel === `mods/${dupName}`).length === 1 && cleaned.client.filter((f) => f.rel === `mods/${sharedName}`).length === 1);
+  check('staging the cleanup changes no live file', crafty.bytes() === live && existsSync(join(shelf, dupName)) && existsSync(join(main, 'options.txt')));
+  const solvedPair = await solveCandidate(crafty.id);
+  const afterPair = candidateSet(crafty.id, candidate(crafty.id));
+  check('the solver accepts the cleanup: the ledger record stays with its own bytes and the newer shelf copy is not excluded', !solvedPair.error
+    && candidate(crafty.id).files.some((f) => f.file === dupName && f.to === 'mods' && f.remove)
+    && !candidate(crafty.id).files.some((f) => f.file === dupName && f.to === 'shelf' && f.remove)
+    && !afterPair.serverJars.includes(join(crafty.dir, 'mods', dupName)) && afterPair.client.find((f) => f.rel === `mods/${dupName}`)?.src === join(shelf, dupName));
+  discard(crafty.id);
+  stage(crafty.id, [{ file: dupName, to: 'shelf', remove: true, duplicateOf: dupName }], () => {});
+  const solvedServer = await solveCandidate(crafty.id);
+  const serverWins = candidateSet(crafty.id, candidate(crafty.id));
+  const staged = JSON.stringify(candidate(crafty.id).files);
+  const again = await solveCandidate(crafty.id);
+  check('removing the shelf side instead keeps the server copy for server and friends, stably across solves', !solvedServer.error && !again.error
+    && candidate(crafty.id).files.some((f) => f.file === dupName && f.to === 'shelf' && f.remove) && JSON.stringify(candidate(crafty.id).files) === staged
+    && serverWins.serverJars.includes(join(crafty.dir, 'mods', dupName)) && serverWins.client.filter((f) => f.rel === `mods/${dupName}`).length === 1
+    && serverWins.client.find((f) => f.rel === `mods/${dupName}`)?.src === join(crafty.dir, 'mods', dupName));
+  const dupNext = record('dupmod', 'dupmod-next', '3.0.0');
+  writeFileSync(stagingPath(crafty.id, dupNext.files[0].filename), artifacts.get(dupNext.files[0].url));
+  stage(crafty.id, [{ file: dupNext.files[0].filename, to: 'mods', replaces: dupName }], () => {});
+  const updated = candidateSet(crafty.id, candidate(crafty.id));
+  check('updating the kept server copy keeps the shelf-side removal', candidate(crafty.id).files.some((f) => f.file === dupName && f.to === 'shelf' && f.remove)
+    && !updated.client.some((f) => f.rel === `mods/${dupName}`) && updated.serverJars.some((p) => p.endsWith(dupNext.files[0].filename)));
+  discard(crafty.id);
+  const unshared = candidateSet(crafty.id, { files: [{ file: sharedName, to: 'mods', remove: true }] });
+  check('removing a byte-identical shared jar removes it for the server and friends', !unshared.serverJars.some((p) => p.endsWith(sharedName))
+    && !unshared.client.some((f) => f.rel === `mods/${sharedName}`) && !unshared.shelfCopies.length);
+  writeFileSync(join(main, 'servers.dat'), 'not a pack file');
+  check('an unrecognised extras root file is a readable error, not a guess', (() => { try { candidateSet(crafty.id, { files: [] }); return false; } catch (e) { return /not a pack-owned path: extra\/servers\.dat/.test(String(e)); } })());
+  rmSync(join(main, 'servers.dat'));
 
   // Real extraction, controlled archives: normalize a macOS bundle and retain
   // the ordinary flat layout. No fake Java process is presented as a boot.

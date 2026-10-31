@@ -96,8 +96,13 @@ function knownProjects(serverUuid: string): Map<string, LedgerEntry> {
   for (const e of ledgerEntries(serverUuid)) {
     if (dirs.some((d) => existsSync(join(d, e.file)))) known.set(e.projectId, e);
   }
+  const sha1 = (path: string): string | undefined => existsSync(path) ? createHash('sha1').update(readFileSync(path)).digest('hex') : undefined;
   for (const f of stagedFiles(serverUuid)) {
-    for (const [id, entry] of known) if (entry.file === f.file || entry.file === f.replaces) known.delete(id);
+    // A change to one side of a same-name pair leaves the other side's record.
+    const other = join(f.to === 'shelf' ? jarDir(serverUuid) : clientShelfDir(serverUuid), f.file);
+    const kept = (entry: LedgerEntry): boolean => entry.sha1.toLowerCase() === sha1(other)
+      && sha1(join(f.to === 'shelf' ? clientShelfDir(serverUuid) : jarDir(serverUuid), f.file)) !== sha1(other);
+    for (const [id, entry] of known) if ((entry.file === f.file || entry.file === f.replaces) && !kept(entry)) known.delete(id);
     if (f.entry && !f.remove) known.set(f.entry.projectId, f.entry);
   }
   return known;
@@ -232,22 +237,31 @@ export function solveCandidate(
           const set = candidateSet(id, { files });
           const paths = [...new Set([...set.serverJars, ...set.client.filter((f) => f.rel.startsWith('mods/') && f.rel.endsWith('.jar')).map((f) => f.src)])].sort();
           const rows = [];
-          for (const path of paths) rows.push({ path, clientOnly: !set.serverJars.includes(path),
-            entry: entries.find((e) => e.file === basename(path)), ...await hashes(path) });
-          return rows;
+          for (const path of paths) {
+            const sum = await hashes(path);
+            // A same-name pair has two byte versions; a source record belongs to one.
+            const named = entries.filter((e) => e.file === basename(path));
+            rows.push({ path, clientOnly: !set.serverJars.includes(path),
+              entry: set.pairs.includes(basename(path)) ? named.find((e) => e.sha1.toLowerCase() === sum.sha1) : named[0], ...sum });
+          }
+          return { rows, pairs: set.pairs };
         };
-        const rows = await inventory(changes, [...knownProjects(id).values()]);
-        const live = await inventory([], ledgerEntries(id));
+        const { rows, pairs } = await inventory(changes, [...knownProjects(id).values()]);
+        const { rows: live } = await inventory([], ledgerEntries(id));
         const requests = changes.length ? candidate(id)?.requests : undefined;
         const runtime = { detection: detect(serverDir(id), id), loader: loaderVersion(serverDir(id), det),
           java: candidateJava(id), hash: await hashes(java) };
-        return { rows, live, requests, changes, key: JSON.stringify({ rows, live, requests, changes, runtime }) };
+        return { rows, live, pairs, requests, changes, key: JSON.stringify({ rows, live, requests, changes, runtime }) };
       };
       const before = await snapshot();
       const primary = (path: string): string | undefined => modIds(det.loader === 'fabric' ? readFabricJar(readFileSync(path))
         : readForgeJar(readFileSync(path), basename(path), { mc: det.mc!, forge: loader, loader: det.loader as 'forge' | 'neoforge' }))[0];
+      // A change to one side of a same-name pair in mods/ and on the shelf
+      // targets only the side it names.
+      const targets = (f: StagedFile, row: typeof before.rows[number], name = f.file): boolean => name === basename(row.path)
+        && (!before.pairs.includes(name) || (f.to === 'shelf') === row.clientOnly);
       // An owner's "keep newest" removes another version of the same native mod.
-      const duplicate = (row: typeof before.rows[number]): boolean => before.changes.some((f) => f.remove && f.file === basename(row.path)
+      const duplicate = (row: typeof before.rows[number]): boolean => before.changes.some((f) => f.remove && targets(f, row)
         && f.duplicateOf && before.rows.some((keep) => basename(keep.path) === f.duplicateOf
           && (keep.sha512 === row.sha512 || (!!primary(row.path) && primary(keep.path) === primary(row.path)))));
       const output = await promisify(execFile)(java, ['-version'], { timeout: 5_000 });
@@ -282,11 +296,11 @@ export function solveCandidate(
       catalog = new NetworkCatalog({ mc: det.mc, loader: det.loader, loaderVersion: loader }, local);
       // Removal/disable proposals stay removed; the solver may not silently
       // reinstall a library that the owner has explicitly taken out.
-      const removedNames = new Set(before.changes.filter((f) => (f.remove && !f.automatic) || f.file.endsWith('.disabled')).map((f) => f.replaces ?? f.file));
-      const removed = before.live.filter((row) => removedNames.has(basename(row.path)) && !duplicate(row));
+      const exclusions = before.changes.filter((f) => (f.remove && !f.automatic) || f.file.endsWith('.disabled'));
+      const removed = before.live.filter((row) => exclusions.some((f) => targets(f, row, f.replaces ?? f.file)) && !duplicate(row));
       const remove = removed.map((row) => pinsByPath.get(row.path)!.projectId);
       for (const upload of before.changes.filter((f) => !f.entry && !f.remove && f.replaces && f.file.endsWith('.jar'))) {
-        const previous = before.live.find((row) => basename(row.path) === upload.replaces);
+        const previous = before.live.find((row) => targets(upload, row, upload.replaces));
         if (!previous) continue;
         const path = stagingPath(id, upload.file);
         const old = pinsByPath.get(previous.path)!;

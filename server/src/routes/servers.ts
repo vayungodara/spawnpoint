@@ -325,6 +325,11 @@ export default async function serverRoutes(app: FastifyInstance) {
     // Everything the import review needs in one poll: the tested version,
     // its test, duplicate mods, and how this server can leave Crafty.
     const state = revisionState(id), c = candidate(id), single = singleServerMove();
+    // An unreadable pack is a state the owner must see, not a failed poll.
+    let duplicates: ReturnType<typeof duplicateMods> = [], packError: string | null = null;
+    if (!c || !['collecting', 'testing', 'needs-approval', 'ready'].includes(c.status)) {
+      try { duplicates = duplicateMods(id); } catch (e) { packError = e instanceof Error ? e.message : String(e); }
+    }
     return {
       owner: owned ? 'standalone' : 'crafty', transfer: plan ? { phase: plan.phase, revision: plan.revision } : null,
       active: state.active ?? null, managedHosting: state.managedHosting === true,
@@ -333,7 +338,7 @@ export default async function serverRoutes(app: FastifyInstance) {
       tested: !!state.active && (!state.active.endsWith('-baseline') || c?.status === 'ready' || c?.status === 'applied'),
       candidate: c && { status: c.status, detail: c.detail, revision: c.revision, files: c.files.map((f) => ({ file: f.file, to: f.to, remove: f.remove, duplicateOf: f.duplicateOf })),
         consent: c.consent, server: c.server && { result: c.server.result, detail: c.server.detail }, client: c.client && { result: c.client.result, detail: c.client.detail, checks: c.client.checks } },
-      duplicates: c && ['collecting', 'testing', 'needs-approval', 'ready'].includes(c.status) ? [] : duplicateMods(id),
+      duplicates, packError,
       move: single ? 'single' : 'all-crafty',
       crafty: plan && !single ? await craftyOffline() : undefined,
     };

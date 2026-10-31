@@ -76,6 +76,7 @@ interface RuntimeView {
     server?: { result: string; detail: string }; client?: { result: string; detail: string; checks?: Record<string, Check> }
   } | null
   duplicates?: { id: string; name: string; keep: { file: string; to: string; version: string }; drop: { file: string; to: string; version: string }[] }[]
+  packError?: string | null
   move?: 'single' | 'all-crafty'
   crafty?: { port: 'closed' | 'open' | 'unknown'; processes: string[] | null }
 }
@@ -115,6 +116,8 @@ function RuntimeSection({ id }: { id: string }) {
     queryKey: ['server-runtime', id],
     queryFn: () => api<RuntimeView>(`/api/servers/${id}/runtime`),
     refetchInterval: 3000,
+    // it polls anyway; retries would hide a failing route behind the loading text
+    retry: false,
   })
   const post = useMutation({
     mutationFn: ({ path, body }: { path: string; body: unknown }) => api<{ account?: string; crafty?: string }>(path, { method: 'POST', body: JSON.stringify(body) }),
@@ -134,7 +137,16 @@ function RuntimeSection({ id }: { id: string }) {
     post.mutate({ path: `/api/servers/${id}/runtime/import`, body: { action, approve: true, ...extra } })
   const errorText = (post.error ?? autoStart.error)?.message.replace(/^\d+: /, '').replace(/^\{"error":"(.*)"\}$/, '$1')
 
-  if (!runtime) return <div className="block px-5 py-4"><p className="text-sm">{error ? error.message : 'Checking ownership…'}</p></div>
+  if (!runtime) {
+    return (
+      <div className="block px-5 py-4">
+        <h2 className="font-extrabold mb-1">Server runtime</h2>
+        {error
+          ? <p role="alert" className="text-sm text-gold break-words">Spawnpoint could not check who runs this server: {error.message.replace(/^\d+: /, '')}</p>
+          : <p role="status" className="text-sm">Checking ownership…</p>}
+      </div>
+    )
+  }
   if (runtime.owner === 'standalone' && !runtime.transfer) {
     return (
       <div className="block px-5 py-4">
@@ -156,6 +168,7 @@ function RuntimeSection({ id }: { id: string }) {
   const testing = !!c && ['collecting', 'testing', 'activating'].includes(c.status)
   const tested = !!runtime.tested
   const dupes = runtime.duplicates ?? []
+  const where = (to: string): string => to === 'shelf' ? ', client shelf' : ', server mods'
   const running = !!stats?.running || !!stats?.waiting_start
   const t = runtime.transfer
   const offline = runtime.crafty
@@ -202,17 +215,18 @@ function RuntimeSection({ id }: { id: string }) {
           ) : (
             <div className="mt-1 space-y-2">
               {c?.status === 'needs-approval' && <p className="text-gold">Last test: {c.detail}</p>}
+              {runtime.packError && <p role="alert" className="text-gold break-words">Spawnpoint cannot read this server’s pack yet: {runtime.packError}. Fix or remove that file, then reload.</p>}
               {dupes.length > 0 && (
                 <div>
-                  <p>Two versions of the same mod would both reach your friends:</p>
+                  <p>This pack has two versions of the same mod:</p>
                   <ul className="mt-1 space-y-1">
                     {dupes.map((d) => (
-                      <li key={d.id} className="text-text-dim"><b className="text-text">{d.name}</b>: keep {d.keep.version} ({d.keep.file}), remove {d.drop.map((x) => `${x.version} (${x.file})`).join(', ')}</li>
+                      <li key={d.id} className="text-text-dim"><b className="text-text">{d.name}</b>: keep {d.keep.version} ({d.keep.file}{where(d.keep.to)}), remove {d.drop.map((x) => `${x.version} (${x.file}${where(x.to)})`).join(', ')}</li>
                     ))}
                   </ul>
                 </div>
               )}
-              <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy}
+              <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy || !!runtime.packError}
                 onClick={() => post.mutate({ path: `/api/servers/${id}/revision/first`, body: { consent: true, keepNewest: dupes.length > 0 } })}>
                 {busy ? 'Starting…' : dupes.length ? 'Keep newest and test' : 'Create first tested version'}
               </button>

@@ -59,6 +59,9 @@ export interface RevisionInput {
 }
 const run = promisify(execFile);
 export const PACK_ROOTS = ['mods', 'config', 'defaultconfigs', 'kubejs', 'emotes', 'libraries', 'versions', '.fabric/server'];
+/** Game-directory client settings AutoModpack may sync from the extras root.
+    Exact names only: the root also borders control and credential files. */
+export const CLIENT_ROOT_FILES = ['options.txt', 'optionsof.txt', 'optionsshaders.txt'];
 const root = (id: string): string => { serverDir(id); return join(PATHS.data, 'locked-revisions', id); };
 export const revisionDir = (id: string, revision: string): string => {
   if (!/^[a-zA-Z0-9_-]+$/.test(revision)) throw new Error('invalid revision');
@@ -76,7 +79,8 @@ export function packPath(path: string, location: LockedFile['location']): string
   safePath(path);
   if (!['server', 'shelf', 'extra'].includes(location)) throw new Error('invalid pack location');
   const roots = location === 'server' ? PACK_ROOTS : location === 'shelf' ? ['mods'] : ['mods', 'config', 'kubejs', 'emotes', 'resourcepacks', 'shaderpacks'];
-  const special = location === 'server' && ['fabric.jar', 'user_jvm_args.txt', '.spawnpoint-launch.py', 'automodpack/automodpack-server.json'].includes(path);
+  const special = location === 'server' ? ['fabric.jar', 'user_jvm_args.txt', '.spawnpoint-launch.py', 'automodpack/automodpack-server.json'].includes(path)
+    : location === 'extra' && CLIENT_ROOT_FILES.includes(path);
   if (!special && !roots.some((root) => path.startsWith(`${root}/`))) throw new Error(`not a pack-owned path: ${location}/${path}`);
   if (location === 'shelf' && path !== `mods/${basename(path)}`) throw new Error('shelf files must be direct mods/ children');
   return path;
