@@ -3,9 +3,10 @@
 [Back to the README](../README.md)
 
 Spawnpoint's independent supervisor owns Java and the console, so your
-Minecraft servers keep running when the panel exits. The installer sets it
-up as a user service on Linux and macOS. The panel itself is a normal
-process; the installer prints the command to start it again.
+Minecraft servers keep running when the panel exits. The installers set it
+up as a user service on Linux and macOS and as a Windows service. They run
+the panel itself as your login service: a systemd user unit, a LaunchAgent,
+or the `Spawnpoint Panel` scheduled task on Windows.
 
 Use absolute paths and a layout path without spaces. Run the panel as the
 layout's owner, or as root while Crafty's own account still owns server
@@ -43,16 +44,19 @@ launchctl print gui/$(id -u)/com.spawnpoint.supervisor
 
 ## Windows
 
-Install Python 3 and Node 22 machine-wide, build the checkout (see
-[manual install](install.md#manual-install)), then run this in an elevated
-PowerShell:
+The [one-line installer](install.md#one-line-install-windows) does this for
+you. By hand: install Python 3 and Node 22 machine-wide, build the checkout
+(see [manual install](install.md#manual-install)), then run this in an
+elevated PowerShell:
 
 ```powershell
 python server/dist/services/nativeservice.py install --root C:/MinecraftServers --node "C:/Program Files/nodejs/node.exe"
 ```
 
 Run the panel as the layout's installing user with `SPAWNPOINT_ROOT` set to
-the same directory. SCM runs `SpawnpointSupervisor` at boot as its own
+the same directory. When a standard user elevates with another
+administrator's password, pass `--owner-sid` with the standard user's SID
+so the layout stays theirs. SCM runs `SpawnpointSupervisor` at boot as its own
 virtual service account, with access limited to the layout. Inspect it with
 `sc.exe queryex SpawnpointSupervisor`. An existing service is not replaced;
 stop it and use `sc.exe config` to update executable paths.

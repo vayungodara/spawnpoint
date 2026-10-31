@@ -41,6 +41,14 @@ On Linux or macOS, run this as the normal user that will own your servers
 curl -fsSL https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install.sh | bash
 ```
 
+On Windows 10 or 11, paste this into a normal PowerShell window (not "Run as
+administrator"). Windows asks for permission once, to install the service
+that runs your servers:
+
+```powershell
+irm https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install.ps1 | iex
+```
+
 When it finishes, it prints a setup link with a one-time code:
 
 ```text
@@ -52,7 +60,8 @@ another device and enter the code. Pick a PIN and create your first server.
 Java downloads itself the first time a server needs it.
 
 You need Node.js 22+, Python 3 and git, plus `zip` and `unzip` on Linux.
-Windows, manual installs and updating are in [docs/install.md](docs/install.md).
+Both installers check and tell you the exact command for anything missing.
+Manual installs and updating are in [docs/install.md](docs/install.md).
 
 > [!WARNING]
 > Spawnpoint is alpha. Expect rough edges, and keep backups of worlds you
@@ -198,7 +207,7 @@ Details, including the admin token and the chat genie's limits:
 
 | Page | What's in it |
 | --- | --- |
-| [Install and update](docs/install.md) | The installer, first-run setup, manual and Windows installs |
+| [Install and update](docs/install.md) | The installers, first-run setup, manual installs |
 | [How mod changes are tested](docs/testing.md) | Tests, approvals, going live, rollback, memory and display |
 | [Supported servers](docs/recipes.md) | Loader versions, launch recipes, the launch guard, AutoModpack |
 | [The supervisor](docs/supervisor.md) | The OS service on Linux, macOS and Windows |

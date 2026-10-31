@@ -64,6 +64,25 @@ jobs:
       # altered downloads, against controlled upstream metadata.
       - run: node .github/recipe-test.mjs
 
+  # install.ps1 end to end on a real Windows machine: the pasted one-liner,
+  # unelevated, against this checkout. It installs the service, the sign-in
+  # task and a firewall rule, creates and starts a real Fabric server, reruns
+  # as an update from PowerShell 7, then removes everything again.
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      # Node 22 in Program Files and Python in the tool cache are installed for
+      # all users, as the installer requires.
+      - run: node .github/windows-install.mjs
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-install-screens
+          path: .amp/in/windows-install
+          if-no-files-found: ignore
+
   # the repo is public — every push gets a full-history secret scan
   gitleaks:
     runs-on: ubuntu-latest

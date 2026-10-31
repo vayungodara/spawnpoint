@@ -77,7 +77,8 @@ fi
 # ---- this machine ----------------------------------------------------------
 head_ "Checking this machine"
 [ "$OS" = Linux ] || [ "$OS" = Darwin ] || die "This installer is for Linux and macOS." \
-  "On Windows, follow the manual install in the README."
+  "On Windows, run this in PowerShell instead:" \
+  "  irm https://raw.githubusercontent.com/vayungodara/spawnpoint/main/install.ps1 | iex"
 
 if [ "$(id -u)" = 0 ] && [ "${SPAWNPOINT_RUNTIME:-}" != crafty ]; then
   if [ "$OS" = Darwin ]; then

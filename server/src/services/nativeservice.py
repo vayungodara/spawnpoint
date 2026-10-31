@@ -73,7 +73,7 @@ def windows_service(root, node):
         raise c.WinError(c.get_last_error())
 
 
-def install(root, node, system, user):
+def install(root, node, system, user, owner_sid=None):
     script = Path(__file__).resolve()
     owner = script.with_name("supervisor.py")
     runtime = root / "Spawnpoint/data/runtime"
@@ -101,6 +101,12 @@ def install(root, node, system, user):
     if sys.platform == "win32":
         if system or user:
             raise ValueError("Windows uses its dedicated virtual service account")
+        # The panel's account owns the layout. A standard user elevates as a
+        # different administrator, so the installer passes the SID it ran as;
+        # otherwise resolve the current one without passwords or credential files.
+        sid = owner_sid or subprocess.check_output(["powershell", "-NoProfile", "-Command", "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"], text=True).strip()
+        if not re.fullmatch(r"S-1-(5-21|12-1)(-\d+)+", sid):
+            raise ValueError("the layout owner must be a local or domain user SID")
         # list2cmdline encodes the SCM command without a shell/interpolation.
         command = subprocess.list2cmdline([sys.executable, str(script), "run", "--root", str(root), "--node", str(node)])
         existing = subprocess.run(["sc.exe", "query", NAME], capture_output=True).returncode == 0
@@ -108,8 +114,6 @@ def install(root, node, system, user):
             raise ValueError("service already exists; stop it and use sc.exe config to update its pinned executable paths")
         run("sc.exe", "create", NAME, "binPath=", command, "start=", "auto", "obj=", "NT SERVICE\\" + NAME)
         run("sc.exe", "sidtype", NAME, "unrestricted")
-        # Resolve the installing user's SID without passwords or credential files.
-        sid = subprocess.check_output(["powershell", "-NoProfile", "-Command", "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"], text=True).strip()
         principals = ["*" + sid + ":(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "NT SERVICE\\" + NAME + ":(OI)(CI)M"]
         run("icacls", str(root), "/grant:r", *principals)
         data = root / "Spawnpoint/data"
@@ -276,6 +280,7 @@ if __name__ == "__main__":
     parser.add_argument("--node", type=Path, default=Path(shutil.which("node") or "node"))
     parser.add_argument("--system", action="store_true")
     parser.add_argument("--user")
+    parser.add_argument("--owner-sid", help="Windows: the panel user's SID, when elevating as another administrator")
     args = parser.parse_args()
     if args.action == "run":
         if os.name != "nt":
@@ -286,4 +291,4 @@ if __name__ == "__main__":
             raise ValueError("--user names the account the panel will run as")
         install_panel(args.root.resolve(), args.node.resolve(), args.user, args.keep_crafty_servers)
     else:
-        install(args.root.resolve(), args.node.resolve(), args.system, args.user)
+        install(args.root.resolve(), args.node.resolve(), args.system, args.user, args.owner_sid)
