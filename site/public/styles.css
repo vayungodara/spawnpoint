@@ -786,7 +786,9 @@ body:not(.deep) #yhud { opacity: 0; visibility: hidden; }
   .lever { width: 64px; height: 56px; }
   .slot { width: 40px; height: 40px; }
   .slot .pi { width: 22px; height: 22px; }
-  #yhud { top: 76px; right: 8px; font-size: 10px; padding: 5px 8px; }
+  /* phone text spans the width, so a floating readout always covers some of
+     it; each band's own depth tag already says where you are */
+  #yhud.on { display: none; }
   .foot-grid { grid-template-columns: repeat(2, 1fr); }
   .foot-brand { grid-column: span 2; }
   .foot-legal { padding-bottom: 130px; }
