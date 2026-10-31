@@ -685,7 +685,7 @@ try {
     check(`JDK ${feature} archive that differs from Adoptium's SHA-256 is refused`, !await ensureJdk(feature, () => {}) && !existsSync(join(root, 'Tools', name)));
     artifacts.set(link, bytes);
     check(`JDK ${feature} ${bundle ? 'macOS bundle' : 'flat archive'} becomes the shared Tools Java recipe`, await ensureJdk(feature, () => {})
-      && javaFor(feature === 21 ? '1.20.1' : '1.21.1', feature === 21 ? 'forge' : 'fabric') === join(root, 'Tools', name, 'bin', java));
+      && javaFor(feature === 21 ? '1.20.1' : '26.1', feature === 21 ? 'forge' : 'fabric') === join(root, 'Tools', name, 'bin', java));
   }
   console.log(`\n${checks}/${checks} installer checks passed`);
 } finally {

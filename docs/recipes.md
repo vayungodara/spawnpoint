@@ -64,12 +64,13 @@ Java comes from Adoptium Temurin, checked against Adoptium's SHA-256:
 | Before 1.17 | 21 | 8 | 8 |
 | 1.17 to 1.19.4 | 21 | 17 | 17 |
 | 1.20 to 1.20.4 | 21 | 21 | 17 |
-| 1.20.5 to 1.21.x | 25 | 21 | 21 |
+| 1.20.5 to 1.21.x | 21 | 21 | 21 |
 | 26 and newer | 25 | 25 | 25 |
 
 Paper, Purpur and Vanilla follow the Java major Mojang declares: Paper 1.17
 refuses anything newer than 17, and older Paper and Purpur builds bundle a
-profiler that crashes on Java 25.
+profiler that crashes on Java 25. Fabric and Quilt stay on 21 before 26:
+AutoModpack, Lithium and ModernFix for 1.21.1 fail to load on Java 25.
 
 Temurin 8 has no Apple silicon build, so Macs with Apple silicon run the x64
 build under Rosetta.

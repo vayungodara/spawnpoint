@@ -40,14 +40,14 @@ export type JdkFeature = 8 | 17 | 21 | 25;
     newer than 17, and older plugin builds bundle native profilers that
     crash on Java 25. Forge and NeoForge keep 21 for all of 1.20, the
     certified recipe; their coremods break on newer JDKs. Fabric and Quilt
-    run every version on 21, or 25 from 1.20.5, the majors locked revisions
-    accept. */
+    run every version before 26 on 21: AutoModpack, Lithium and ModernFix
+    for 1.21.1 fail to load on 25. A mod built for 25 gets a Java repair. */
 export function jdkFeatureFor(mc: string | null, loader?: string | null): JdkFeature {
   const [major, minor = 0, patch = 0] = (mc ?? '').split('.').map((n) => parseInt(n, 10));
   if (major >= 26) return 25;
   if (major !== 1) return 21; // an unknown version keeps the long-standing default
   const modern = (minor > 20 || (minor === 20 && patch >= 5));
-  if (loader === 'fabric' || loader === 'quilt') return modern ? 25 : 21;
+  if (loader === 'fabric' || loader === 'quilt') return 21;
   if (minor < 17) return 8;
   if (loader === 'forge' || loader === 'neoforge') return minor < 20 ? 17 : 21;
   return modern ? 21 : 17;

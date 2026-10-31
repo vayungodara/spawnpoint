@@ -121,7 +121,7 @@ check('tested changes: all Fabric, Forge 1.20.1 and NeoForge 1.21.1 only, never 
 
 // Java majors follow each loader's real limits
 const table = [['26.3', 'forge', 25], ['1.21.1', 'neoforge', 21], ['1.20.1', 'forge', 21], ['1.18.2', 'forge', 17], ['1.16.5', 'forge', 8], ['1.12.2', 'vanilla', 8],
-  ['1.16.5', 'fabric', 21], ['1.16.5', 'quilt', 21], ['1.20.4', 'paper', 17], ['1.17.1', 'vanilla', 17], ['1.20.6', 'paper', 21], ['1.21.11', 'purpur', 21], ['1.21.11', 'fabric', 25], ['1.17.1', 'purpur', 17], ['26.3', 'vanilla', 25], [null, 'paper', 21], [null, 'forge', 21]];
+  ['1.16.5', 'fabric', 21], ['1.16.5', 'quilt', 21], ['1.20.4', 'paper', 17], ['1.17.1', 'vanilla', 17], ['1.20.6', 'paper', 21], ['1.21.11', 'purpur', 21], ['1.21.11', 'fabric', 21], ['1.21.1', 'quilt', 21], ['1.17.1', 'purpur', 17], ['26.3', 'vanilla', 25], [null, 'paper', 21], [null, 'forge', 21]];
 check('Java majors match every loader and era', table.every(([mc, loader, want]) => jdkFeatureFor(mc, loader) === want));
 
 // Existing servers keep a working Java pin; only a pin that cannot run is replaced
