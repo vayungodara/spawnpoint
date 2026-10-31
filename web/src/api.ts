@@ -146,7 +146,7 @@ export function useRuntime() {
 
 // ---- tested mod changes ----------------------------------------------------
 
-export interface Verdict { result: 'passed' | 'failed' | 'unverified'; detail: string; excerpt?: string[]; seconds?: number }
+export interface Verdict { result: 'passed' | 'failed' | 'unverified'; detail: string; excerpt?: string[]; seconds?: number; skipped?: string }
 export interface Pin { projectId: string; versionId: string; file: string; requested: boolean }
 export interface SolvedPlan { plan: Pin[]; changes: { added: Pin[]; removed: Pin[]; changed: { from: Pin; to: Pin }[] }; warnings: string[] }
 export type SolveResult =

@@ -654,7 +654,7 @@ function changeText(c, p, ctx, details, report) {
   const asked = c.files.filter((x) => x.entry?.via !== 'dependency' && !x.path);
   const count = { add: 0, replace: 0, remove: 0, config: 0 };
   for (const x of c.files) count[x.path ? 'config' : x.remove ? 'remove' : x.replaces ? 'replace' : 'add']++;
-  const v = (k, x) => (x ? `${k} ${x.result}${x.seconds ? ` ${x.seconds}s` : ''}${x.result === 'passed' ? '' : `: ${clip(x.detail, 100)}`}` : `${k} ${c.status === 'testing' ? 'running' : c.detail === FIRST_CONSENT ? 'runs after approval' : 'not run'}`);
+  const v = (k, x) => (x ? `${k} ${x.result}${x.seconds ? ` ${x.seconds}s` : ''}${x.skipped ? ' (join skipped: Linux with xvfb only)' : x.result === 'passed' ? '' : `: ${clip(x.detail, 100)}`}` : `${k} ${c.status === 'testing' ? 'running' : c.detail === FIRST_CONSENT ? 'runs after approval' : 'not run'}`);
   const lines = [
     `status   ${c.status}: ${clip(c.detail, 140)}`,
     c.revision && `revision ${c.revision}`,

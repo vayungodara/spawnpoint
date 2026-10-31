@@ -22,6 +22,9 @@ export interface Verdict {
   /** Complete class-version diagnostic; display excerpts may truncate it. */
   javaFailure?: string;
   seconds?: number;
+  /** A step this platform cannot run, in the owner's words. Passed results
+      with a skipped step still wait for approval. */
+  skipped?: string;
   renderer?: 'xvfb' | 'window' | 'headless' | 'none';
   checks?: Record<string, import('./revisions.js').TestResult>;
   /** Disposable boot outputs, proposed for a new test, never live edits. */

@@ -19,6 +19,7 @@ const ICON: Record<StepState, string> = { done: '✓', current: '', you: '!', wa
 
 function verdictStep(label: string, v: Verdict | undefined, running: boolean): Step {
   if (!v) return { label, s: running ? 'current' : 'wait', d: running ? 'testing…' : '' }
+  if (v.result === 'passed' && v.skipped) return { label, s: 'skipped', d: 'boot only' }
   if (v.result === 'passed') return { label, s: 'done', d: v.seconds ? `${v.seconds} s` : 'passed' }
   if (v.result === 'failed') return { label, s: 'failed', d: 'failed' }
   return { label, s: 'warn', d: 'not tested' }
@@ -349,7 +350,8 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
                 <tr key={label}>
                   <th scope="row" className="!font-sans !text-[12.5px] !text-text font-bold w-28">{label}</th>
                   <td>
-                    {v ? <><b className={RESULT[v.result][1]}>{RESULT[v.result][0]}{v.seconds ? ` in ${v.seconds} s` : ''}</b><span className="text-text-dim"> · {v.detail}</span></>
+                    {v ? <><b className={RESULT[v.result][1]}>{v.skipped ? '✓ booted' : RESULT[v.result][0]}{v.seconds ? ` in ${v.seconds} s` : ''}</b><span className="text-text-dim"> · {v.detail}</span>
+                      {v.skipped && <span className="block text-gold text-xs mt-1">{v.skipped}</span>}</>
                       : <span className="text-text-dim">{c.status === 'testing' ? 'running…' : c.detail === FIRST_CONSENT ? 'runs after you approve' : 'not run'}</span>}
                   </td>
                 </tr>

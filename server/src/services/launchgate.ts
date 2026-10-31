@@ -49,6 +49,7 @@ const LAUNCHER = join(HMC, `headlessmc-launcher-${HMC_VERSION}.jar`);
 const LAUNCHER_SHA256 = '52bd5006f478377b3893011d458562977d38c65ead6d2b31089beb4d614f13cd';
 const RUNTIME_TEST_VERSION = '4.5.1';
 const RUN_TIMEOUT_MS = 15 * 60_000;
+export const JOIN_SKIPPED = 'The join test runs only on Linux with xvfb installed, so it was skipped here.';
 
 /** The newest JDK under Tools/ runs the launcher (numeric sort: jdk-8 < jdk-25). */
 function gateJava(): string | null {
@@ -415,6 +416,14 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
         : { result: seen.result, detail: seen.detail, renderer: gateMode() },
   };
   if (sp.result !== 'passed') return { ...sp, checks };
+  // Offline HeadlessMC stubs graphics without xvfb, so a window-mode client
+  // never connects; waiting out the join only ended "unverified" every time.
+  // Not the real-window retry after an xvfb crash: that host has xvfb.
+  if (gateMode() === 'window' && !modeOverride) {
+    return { ...sp, detail: `${sp.detail}, without graphics`, skipped: JOIN_SKIPPED, checks: { ...checks,
+      join: { result: 'skipped', detail: JOIN_SKIPPED, renderer: 'window' },
+      handshake: { result: 'skipped', detail: tested ? 'AutoModpack handshake was not run: the join test was skipped' : 'AutoModpack handshake was not run', renderer: 'window' } } };
+  }
 
   await waitForQuiet(onStatus);
   // the join runs a client and a copy of the server at once

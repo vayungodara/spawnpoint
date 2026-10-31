@@ -247,7 +247,7 @@ export async function approve(id: string, log: (m: string) => void, consent = fa
   }
   if (!c.revision) throw new Error('no locked test attempt exists; test this change again');
   if (expectedRevision !== c.revision) throw new Error('the candidate changed since you reviewed it; reload and review the new revision');
-  reportRevision(id, c.revision, { approved: { at: new Date().toISOString(), reasons: [...c.consent ?? [], c.detail], ...(by ? { by } : {}) } });
+  reportRevision(id, c.revision, { approved: { at: new Date().toISOString(), reasons: [...c.consent ?? [], c.detail, ...(c.client?.skipped && c.client.skipped !== c.detail ? [c.client.skipped] : [])], ...(by ? { by } : {}) } });
   return activate(id, c, log, true);
 }
 
@@ -659,6 +659,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
       if (candidate(id)!.java || candidate(id)!.repairs?.length || candidate(id)!.files.some((f) => f.path || f.replaces || f.remove)) {
         return wait(id, { server, client }, 'approve the listed replacements, removals and config edits before promotion', log);
       }
+      if (client?.skipped) return wait(id, { server, client }, client.skipped, log);
       await activate(id, { ...candidate(id)!, server, client }, log);
       return;
     }
