@@ -118,7 +118,7 @@ export function reportRevision(id: string, revision: string, patch: Partial<Revi
   const before = revisionReport(id, revision);
   writeFileAtomic(join(revisionDir(id, revision), 'report.json'), JSON.stringify({ ...before, ...patch, tests: { ...before.tests, ...patch.tests } }, null, 2));
 }
-export function revisionState(id: string): { active?: string; published?: string; managedHosting?: boolean } {
+export function revisionState(id: string): { active?: string; published?: string; publishedAttempt?: string; managedHosting?: boolean } {
   const file = join(root(id), 'state.json');
   // A corrupt pointer must block starts, not silently drop back to legacy mode.
   return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};

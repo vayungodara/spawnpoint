@@ -94,7 +94,7 @@ export function startNativeWatcher(log: (message: string) => void): void {
         const stats = await supervisor<{ running: boolean; waiting_start: boolean; stopping: boolean }>('stats', { id: record.server_id });
         if (!stats.running || stats.waiting_start || stats.stopping) continue;
         const { watchStart } = await import('./promote.js');
-        watchStart(record.server_id, record.attempt.at);
+        watchStart(record.server_id, record.attempt.at, record.attempt.id);
         seen.add(record.attempt.id);
       }
     } catch (error) { log(`native owner reconciliation: ${String(error)}`); }

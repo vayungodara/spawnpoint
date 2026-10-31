@@ -12,6 +12,7 @@ import { autoModpackActive, holdHosting, releaseHosting, recoverHosting, extrasD
 import { hashes, lockedPath, readLock, reportRevision, revisionState, setRevisionState, verifyActiveRevision, withStoppedRevision } from './revisions.js';
 import { candidate, candidateSet, applyReady, undoLast, lastChange, changeState, liveBootFailed, noteLive, assertModsWritable, afterCommit } from './packtxn.js';
 import { listPending } from './pendingmods.js';
+import { nativeRecord } from './native.js';
 
 // PROMOTION. A tested change to the server's own mods goes live only while
 // the server is stopped: the running JVM keeps its old jars, and AutoModpack
@@ -102,9 +103,13 @@ export function requestPromotion(id: string, action: Promotion['action'], txn: s
 
 /** All panel-owned starts (including maintenance and crash recovery) pass
     through Crafty's client hook. Their verification survives panel restarts. */
-export function watchStart(id: string, startedAt = Date.now()): void {
-  const { active } = revisionState(id);
+export function watchStart(id: string, startedAt = Date.now(), attempt?: string): void {
+  const { active, published, publishedAttempt } = revisionState(id);
   if (!active || promotion(id)) return;
+  // A panel restart rediscovers the running boot. If the previous panel
+  // published this exact native attempt, checking it again only fences
+  // Start and Stop for a minute.
+  if (attempt && published === active && publishedAttempt === attempt) return;
   save(id, { action: 'start', txn: active, stage: 'applied', since: new Date().toISOString(), startedAt });
   schedule(panelLog);
 }
@@ -427,9 +432,9 @@ async function bootAndVerify(id: string, p: Promotion, log: (m: string) => void)
   await releaseHosting(id, verify);
   if (active) {
     reportRevision(id, active, { tests: { publication: { result: autoModpackActive(id) ? 'passed' : 'skipped', detail: autoModpackActive(id) ? 'Fresh manifest and published bytes match the revision; hosting acknowledged' : 'AutoModpack is not configured', renderer: 'none' } } });
-    setRevisionState(id, { published: active });
+    setRevisionState(id, { published: active, publishedAttempt: nativeRecord(id)?.attempt?.id });
   }
-  if (p.action === 'apply') noteLive(id, p.txn, 'applied', `${c?.approved ? 'applied with owner consent' : 'tested and applied'}; the live boot and friends' exact pack were verified`);
+  if (p.action === 'apply') noteLive(id, p.txn, 'applied', `${c?.approved ? 'applied with owner consent' : 'tested and applied'}; ${autoModpackActive(id) ? 'the live boot and friends\' exact pack were verified' : 'the live boot was verified'}`);
   log(`promote: ${p.action} ${p.txn} is live on ${id}`);
   release(id, p);
   } catch (e) {
