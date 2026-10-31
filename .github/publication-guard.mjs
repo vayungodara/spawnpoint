@@ -16,7 +16,8 @@ const data = join(root, 'Spawnpoint', 'data');
 const config = join(dir, 'automodpack', 'automodpack-server.json');
 const log = join(dir, 'logs', 'latest.log');
 const mutex = join(dir, '.spawnpoint-publication');
-for (const path of [join(dir, 'automodpack'), join(dir, 'logs'), data, join(root, 'Shared')]) mkdirSync(path, { recursive: true });
+for (const path of [join(dir, 'automodpack'), join(dir, 'mods'), join(dir, 'logs'), data, join(root, 'Shared')]) mkdirSync(path, { recursive: true });
+writeFileSync(join(dir, 'mods', 'automodpack-mc1.21.1-fabric-4.0.7.jar'), '');
 const original = JSON.stringify({ modpackHost: true, generateModpackOnStart: true, selfUpdater: false });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const waitFor = async predicate => {

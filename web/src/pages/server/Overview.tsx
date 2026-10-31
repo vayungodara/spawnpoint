@@ -122,24 +122,26 @@ function PackCard({ s }: { s: ServerInfo }) {
   const modded = MOD_LOADERS.includes(s.detection.loader)
   const { data } = useRevisions(modded ? s.id : undefined)
   const live = data?.revisions.find((r) => r.id === (data.published ?? data.active))
+  const { data: am } = useAutoModpack(s.id, modded)
+  const what = s.detection.loader === 'quilt' ? 'mods' : s.detection.loader === 'vanilla' ? 'datapacks' : 'plugins and datapacks'
   return (
     <section className="block p-4 sm:p-5 flex flex-col gap-3">
       <h2 className="hud">THE PACK</h2>
       {!modded ? (
         <p className="text-sm text-text-dim">
-          {s.detection.loader === 'unknown' ? 'Spawnpoint could not tell which loader this server runs.' : `This ${s.detection.loader} server takes plugins and datapacks directly. Tested pack revisions cover Fabric, Forge and NeoForge.`}
+          {s.detection.loader === 'unknown' ? 'Spawnpoint could not tell which loader this server runs.' : `New ${what} go in after a restart, without a test on a copy first. Tested changes cover Fabric, Forge and NeoForge.`}
         </p>
       ) : live?.id.endsWith('-baseline') ? (
         <div>
           <div className="text-lg font-extrabold">Starting pack recorded</div>
           <p className="text-sm text-text-dim mt-0.5 max-w-[60ch]">
-            Spawnpoint sealed the {live.requested === 1 ? 'mod' : `${live.requested} mods`} this server had before its first change, so Undo can return to it. Changes from here on are tested before they go live.
+            {live.requested ? `Spawnpoint saved the ${live.requested === 1 ? 'mod' : `${live.requested} mods`} this server had before its first change` : 'Spawnpoint saved this server as it was before its first change'}, so Undo can return to it. Changes from here on are tested before they go live.
           </p>
         </div>
       ) : live ? (
         <>
           <div>
-            <div className="text-lg font-extrabold">{data?.published === live.id ? 'Friends have the tested pack' : 'Tested pack active, not synced to friends yet'}</div>
+            <div className="text-lg font-extrabold">{am?.hosted === false ? 'The tested pack is live' : data?.published === live.id ? 'Friends have the tested pack' : 'Tested pack active, not synced to friends yet'}</div>
             <div className="text-sm text-text-dim mt-0.5">
               Sealed {fmtWhen(txnDate(live.id))} · {live.requested} {live.requested === 1 ? 'mod' : 'mods'} you picked · {live.dependencies} {live.dependencies === 1 ? 'dependency' : 'dependencies'}
             </div>
@@ -174,18 +176,20 @@ async function downloadStarter(id: string, format?: 'curseforge') {
   URL.revokeObjectURL(a.href)
 }
 
-/** The one-time code a friend's AutoModpack asks for on their first join. */
-function Fingerprint({ id }: { id: string }) {
-  const { data } = useQuery({
+/** AutoModpack state: whether the server runs it, and the one-time code a
+    friend's AutoModpack asks for on their first join (the first boot prints it). */
+function useAutoModpack(id: string, enabled: boolean) {
+  return useQuery({
     queryKey: ['fingerprint', id],
-    queryFn: () => api<{ fingerprint: string | null }>(`/api/servers/${id}/automodpack/fingerprint`),
+    queryFn: () => api<{ fingerprint: string | null; hosted: boolean }>(`/api/servers/${id}/automodpack/fingerprint`),
+    enabled,
     staleTime: 60_000,
-    // the first boot prints it; keep asking until it has
-    refetchInterval: (q) => (q.state.data?.fingerprint ? false : 15_000),
+    refetchInterval: (q) => (q.state.data?.fingerprint || q.state.data?.hosted === false ? false : 15_000),
   })
+}
+
+function Fingerprint({ fp }: { fp: string | null }) {
   const [copied, setCopied] = useState(false)
-  const fp = data?.fingerprint
-  if (!data) return null
   if (!fp) return <p className="text-xs text-text-dim">Start the server once: friends will need the fingerprint it prints.</p>
   return (
     <div className="flex items-center gap-3 flex-wrap">
@@ -203,7 +207,9 @@ function Fingerprint({ id }: { id: string }) {
 }
 
 function InviteCard({ s }: { s: ServerInfo }) {
-  const synced = [...MOD_LOADERS, 'quilt'].includes(s.detection.loader)
+  const modded = [...MOD_LOADERS, 'quilt'].includes(s.detection.loader)
+  const { data: am } = useAutoModpack(s.id, modded)
+  const synced = modded && am?.hosted !== false
   const [msg, setMsg] = useState<string | null>(null)
   const get = useMutation({
     mutationFn: (format?: 'curseforge') => downloadStarter(s.id, format),
@@ -220,10 +226,12 @@ function InviteCard({ s }: { s: ServerInfo }) {
           <li className="flex gap-2.5"><b className="font-px text-[11px] text-emerald mt-0.5">2</b><span>They import it in Modrinth App, Prism or the CurseForge app and press Play.</span></li>
           <li className="flex gap-2.5"><b className="font-px text-[11px] text-emerald mt-0.5">3</b><span>They join <span className="font-mono">{joinAddress(s)}</span>. AutoModpack syncs the tested pack on join, now and after every change.</span></li>
         </ol>
+      ) : modded ? (
+        <p className="text-sm text-text-dim">AutoModpack isn't out for Minecraft {s.detection.mc ?? 'this version'} yet, so there is no starter pack. Friends need the same mods as the server, installed by hand, then join at this address.</p>
       ) : (
         <p className="text-sm text-text-dim">Friends join with a normal Minecraft {s.detection.mc ?? ''} client at this address. Nothing to install.</p>
       )}
-      {synced && <Fingerprint id={s.id} />}
+      {synced && am && <Fingerprint fp={am.fingerprint} />}
       {synced && (
         <div className="flex gap-3 flex-wrap mt-auto pt-1">
           <button onClick={() => get.mutate(undefined)} disabled={get.isPending} className="btn btn-emerald px-4 py-2 text-sm">{get.isPending ? 'Building…' : 'Download starter pack'}</button>
@@ -262,6 +270,7 @@ function FirstSteps({ s, stats }: { s: ServerInfo; stats: Stats | undefined }) {
   const [hidden, setHidden] = useState(() => localStorage.getItem(key) === 'done')
   const modded = MOD_LOADERS.includes(s.detection.loader)
   const { data: revs } = useRevisions(modded ? s.id : undefined)
+  const { data: am } = useAutoModpack(s.id, modded)
   const [invited, setInvited] = useState(() => localStorage.getItem(`${key}-invite`) === '1')
   useEffect(() => {
     const mark = () => { localStorage.setItem(`${key}-invite`, '1'); setInvited(true) }
@@ -272,7 +281,7 @@ function FirstSteps({ s, stats }: { s: ServerInfo; stats: Stats | undefined }) {
   const steps = [
     { done: running || !!revs?.revisions.length, label: 'Start the server', hint: stats?.phase === 'starting' ? 'Booting… the first start takes about a minute.' : 'Press Start at the top. Java downloads itself the first time.' },
     ...(modded ? [{ done: !!revs?.revisions.some((r) => !r.id.endsWith('-baseline')), label: 'Add a mod', hint: 'Pick one in Mods. Spawnpoint tests it on a copy, then asks you before it goes live.', to: `/s/${s.id}/mods` }] : []),
-    { done: invited, label: 'Invite a friend', hint: modded ? 'Copy the address and send the starter pack below.' : 'Copy the address below and send it.' },
+    { done: invited, label: 'Invite a friend', hint: modded && am?.hosted !== false ? 'Copy the address and send the starter pack below.' : 'Copy the address below and send it.' },
   ]
   const all = steps.every((x) => x.done)
   if (hidden || (all && (!modded || revs !== undefined))) return null

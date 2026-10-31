@@ -15,7 +15,7 @@ import {
 import { detect } from '../services/detect.js';
 import { BOOT_VERIFIED, testedChanges, type RecipeLoader } from '../services/recipes.js';
 import { serverDir } from '../services/servers.js';
-import { publishPack, stageClientAsset, buildStarterPack, buildStarterPackCF } from '../services/automodpack.js';
+import { autoModpackActive, publishPack, stageClientAsset, buildStarterPack, buildStarterPackCF } from '../services/automodpack.js';
 import { candidate, approve, createFirstVersion, testNow, discard, retest, liveChanged, lastChange, undoLast, recentRejections, clearRejections, assertCanStage } from '../services/packtxn.js';
 import { promotion, lastSeen, choose, cancelUndo } from '../services/promote.js';
 import { craftyApi } from '../clients/crafty.js';
@@ -257,7 +257,8 @@ export default async function contentRoutes(app: FastifyInstance) {
     // regex would also break on U+2028/U+2029, which chat may carry.
     const record = /^\[[^[\]\r\n]+\] \[[^[\]\r\n]+\/(?:INFO|WARN)\](?: \[[^[\]\r\n]*\])?: Certificate fingerprint: ([a-f0-9]{64})$/;
     const all = text.split(/\r?\n/).flatMap((line) => record.exec(line)?.[1] ?? []);
-    return { fingerprint: all.at(-1) ?? null };
+    // hosted: false when the server has no AutoModpack, so there is no starter pack to send
+    return { fingerprint: all.at(-1) ?? null, hosted: autoModpackActive(req.params.id) };
   });
 
   // one-click new server from a modpack (background job; poll /api/create-jobs/:id)

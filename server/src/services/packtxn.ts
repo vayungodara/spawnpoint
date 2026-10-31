@@ -519,12 +519,15 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
   const status = (detail: string): void => { c = save(id, { ...candidate(id)!, status: 'testing', detail }); };
   try {
     if (!revisionState(id).managedHosting) {
+      const synced = autoModpackActive(id);
       c = save(id, { ...c, consent: [
-        `This is a one-time setup for this server. Spawnpoint adds its launch guard to the ${nativeRecord(id) ? 'Spawnpoint' : 'Crafty'} start command, so the server only starts a pack that matches what was tested.`,
-        'Friends\' mod sync (AutoModpack hosting) stays off until each boot and the exact pack have been checked.',
-        'Undoing a change restores the tested configs and pack files. Copies of anything that was edited are kept so you can look at them.',
-        'If AutoModpack wants to add its default settings on the next boot, it writes them on a copy first and Spawnpoint keeps them.',
-        'Only the start command, the sync switch and AutoModpack\'s own defaults change. Minecraft, the loader and your world are not touched.',
+        `This is a one-time setup for this server. Spawnpoint adds a check to the ${nativeRecord(id) ? 'Spawnpoint' : 'Crafty'} start command, so the server only starts with the exact files that were tested.`,
+        ...(synced ? ['Friends\' mod sync (AutoModpack) stays off after each start until Spawnpoint has checked that boot and the exact pack.'] : []),
+        'Undo puts back the tested configs and pack files, and keeps a copy of anything that was edited.',
+        ...(synced ? ['If AutoModpack adds its default settings on the next boot, it does that on a copy first and Spawnpoint keeps them.'] : []),
+        synced
+          ? 'Only the start command, the sync switch and AutoModpack\'s defaults change. Minecraft, the loader and your world stay as they are.'
+          : 'Only the start command changes. Minecraft, the loader and your world stay as they are.',
       ] });
       return wait(id, {}, 'owner consent is required to manage revision-checked starts and publication', log);
     }

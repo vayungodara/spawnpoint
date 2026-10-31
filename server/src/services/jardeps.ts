@@ -147,6 +147,18 @@ function flushCache(): void {
   } catch { /* the cache is an optimization, never an error */ }
 }
 
+const idsSeen = new Map<string, string[] | null>();
+/** Mod ids a jar declares, nested jars included; null when it cannot be read.
+    Keyed by this exact file, not the shared name-and-size cache. */
+export function jarModIds(path: string): string[] | null {
+  let key: string;
+  try { const s = statSync(path); key = `${path}:${s.size}:${s.mtimeMs}:${s.ino}`; } catch { return null; }
+  if (!idsSeen.has(key)) {
+    try { idsSeen.set(key, scanJarBuffer(readFileSync(path), 0).ids); } catch { idsSeen.set(key, null); }
+  }
+  return idsSeen.get(key)!;
+}
+
 /** True for jars that declare themselves server-only (AutoModpack never ships those). */
 export function isServerOnly(path: string): boolean {
   const m = metaOf(path).serverOnly === true;

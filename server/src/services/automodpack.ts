@@ -11,6 +11,8 @@ import * as modrinth from '../clients/modrinth.js';
 import { PATHS } from '../config.js';
 import { assertUnsealed, revisionState, verifyActiveRevision, withStoppedRevision, writeLaunchGate } from './revisions.js';
 import { stopAndWait } from './maintenance.js';
+import { ledgerEntries } from './ledger.js';
+import { jarModIds } from './jardeps.js';
 
 // AutoModpack syncs a server's mods to every client that joins. It reads two
 // folders: the server's mods/ and automodpack/host-modpack/main/ (client-only
@@ -45,7 +47,7 @@ export function holdHosting(id: string): void {
     completion and does not log feedback with broadcast-rcon-to-ops=false. */
 export async function releaseHosting(id: string, verify: () => Promise<void>): Promise<void> {
   const hold = hostingHold(id);
-  if (!hold) return;
+  if (!hold || !autoModpackActive(id)) return;
   const path = join(amDir(id), 'automodpack-server.json');
   const logPath = join(serverDir(id), 'logs', 'latest.log');
   const mutex = join(serverDir(id), '.spawnpoint-publication');
@@ -112,9 +114,23 @@ export function extrasDir(serverId: string): string {
   return join(amDir(serverId), 'host-modpack', 'main');
 }
 
-/** True when this server runs AutoModpack (its config dir exists). */
+/** True when this server runs AutoModpack: its config dir exists and its
+    mods include AutoModpack, by ledger entry, file name or declared mod id.
+    A config dir alone is what an older panel left on Minecraft versions
+    AutoModpack has no build for; nothing there can ever build a pack. */
 export function autoModpackActive(serverId: string): boolean {
-  return existsSync(amDir(serverId));
+  return existsSync(amDir(serverId)) && hasAutoModpackJar(serverId);
+}
+/** An unreadable jar counts as AutoModpack: publication checks fail closed. */
+function hasAutoModpackJar(serverId: string): boolean {
+  if (ledgerEntries(serverId).some((e) => !e.clientOnly && /automodpack/i.test(`${e.projectId} ${e.title} ${e.file}`))) return true;
+  const mods = join(serverDir(serverId), 'mods');
+  const jars = existsSync(mods) ? readdirSync(mods).filter((f) => f.toLowerCase().endsWith('.jar')) : [];
+  return jars.some((f) => {
+    if (/automodpack/i.test(f)) return true;
+    const ids = jarModIds(join(mods, f));
+    return ids === null || ids.some((id) => id.startsWith('automodpack'));
+  });
 }
 
 /** New servers get AutoModpack and a ready config, so friends install one
@@ -127,8 +143,12 @@ export async function provisionAutoModpack(serverId: string, loader: string): Pr
   try {
     const { install } = await import('./installer.js');
     const r = await install(serverId, { projectId: 'automodpack', type: 'mod', direct: true });
-    if (!('installed' in r) || !r.installed.length) {
-      warnings.push('AutoModpack has no build for this MC/loader yet, so clients need a manual pack for now');
+    // an empty install also means "already there" when a create is resumed
+    if (!('installed' in r) || (!r.installed.length && !hasAutoModpackJar(serverId))) {
+      // no config either: a config without the mod makes every start wait for a pack nobody builds
+      const mc = detect(serverDir(serverId), serverId).mc;
+      warnings.push(`AutoModpack isn't out for Minecraft ${mc ?? 'this version'} yet, so friends must install this server's mods themselves. Pick an older version for automatic mod sync.`);
+      return warnings;
     }
     mkdirSync(join(extrasDir(serverId), 'mods'), { recursive: true });
     const cfgPath = join(amDir(serverId), 'automodpack-server.json');
