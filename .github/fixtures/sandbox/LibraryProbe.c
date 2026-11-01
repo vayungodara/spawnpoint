@@ -42,12 +42,13 @@ int wmain(int argc, wchar_t **argv) {
         }
         return 0;
     }
+    printf("PROCESS pid=%lu\n", GetCurrentProcessId());
     HANDLE token;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
         DWORD value = 0, size = 0;
-        GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &size);
+        if (!GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &size)) return 3;
         printf("TOKEN AppContainer=%lu\n", value);
-        GetTokenInformation(token, TokenIsLessPrivilegedAppContainer, &value, sizeof(value), &size);
+        if (!GetTokenInformation(token, TokenIsLessPrivilegedAppContainer, &value, sizeof(value), &size)) return 3;
         printf("TOKEN LPAC=%lu\n", value);
         BYTE buffer[1024];
         if (GetTokenInformation(token, TokenAppContainerSid, buffer, sizeof(buffer), &size)) {
