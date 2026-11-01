@@ -643,9 +643,16 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
           if (stale()) continue;
           if (before.result === 'passed' && again.result === 'failed') return reject(id, server, again, log);
           // what the owner needs is what applying it would do: keep the candidate's own crash
-          client = { ...client, result: 'unverified', detail: before.result !== 'passed'
-            ? `the client fails without this change too (with it, ${client.detail})`
-            : `the client test is unreliable with this change (it failed once, then passed: ${client.detail})` };
+          // the crash detail names the mods in its stack; add its first error
+          const first = `${client.detail}${client.excerpt?.[0] ? `; first error: ${client.excerpt[0]}` : ''}`;
+          client = { ...client, result: 'unverified', checks: before.result === 'passed' ? again.checks : client.checks, detail: before.result === 'failed'
+            ? `the client fails without this change too (with it, ${first})`
+            : before.result !== 'passed' ? `the client crashed with this change (${first}), and the current pack could not be tested to compare: ${before.detail}`
+              : again.result === 'passed' ? `the client test is unreliable with this change: it crashed once, then passed (${first})`
+                : `the client crashed once with this change (${first}); the retry was inconclusive: ${again.detail}` };
+          // the retry's own sub-checks replace the first attempt's; the first crash stays in the detail
+          const unrun = { result: 'inconclusive' as const, detail: 'not run in the last attempt', renderer: 'none' as const };
+          reportRevision(id, revision, { tests: { client: { ...client, result: 'inconclusive' }, clientBoot: unrun, rendering: unrun, join: unrun, handshake: unrun, ...client.checks } });
         }
       }
       if (stale()) continue; // more files arrived mid-test: test the new set
