@@ -6,7 +6,8 @@ container SID and writes only its scratch, which is granted to a capability
 SID that this process alone carries, so two processes sharing the container
 (the join's server copy and client) cannot write each other's files. A
 kill-on-close Job Object caps memory and CPU, so the test dies with this
-helper. Standard handles pass straight through.
+helper. Standard handles pass straight through. --unconfined retains the
+Job but runs as the panel's user, with no filesystem or network isolation.
 """
 import argparse
 from contextlib import contextmanager
@@ -325,18 +326,20 @@ def main():
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--capability", required=True)
     parser.add_argument("--control")
+    parser.add_argument("--unconfined", action="store_true")
     parser.add_argument("--write", action="append", default=[])
     parser.add_argument("--read", action="append", default=[])
     parser.add_argument("argv", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
-    sid, _package = container(args.name)
-    own = capability(args.capability)
-    runtime = capability("spawnpointRuntimeRead")
-    for path in args.read:
-        grant(path, sid_text(runtime), "RX")
-    for path in args.write:
-        grant(path, sid_text(own), "M")
+    if not args.unconfined:
+        sid, _package = container(args.name)
+        own = capability(args.capability)
+        runtime = capability("spawnpointRuntimeRead")
+        for path in args.read:
+            grant(path, sid_text(runtime), "RX")
+        for path in args.write:
+            grant(path, sid_text(own), "M")
 
     job = check(k32.CreateJobObjectW(None, None))
     limits = EXTENDED()
@@ -349,22 +352,22 @@ def main():
     rate = CPURATE(0x1 | 0x4, max(1, (os.cpu_count() or 2) // 2) * 10000 // (os.cpu_count() or 2))
     check(k32.SetInformationJobObject(job, 15, c.byref(rate), c.sizeof(rate)))
 
-    # WinSock reads the OS provider catalog during initialization. This
-    # standard LPAC capability grants registry reads where Windows permits
-    # them, not network access or ambient filesystem access.
-    registry = capability("registryRead")
-    held = (SIDATTR * 3)(SIDATTR(own, 0x4), SIDATTR(runtime, 0x4), SIDATTR(registry, 0x4))  # SE_GROUP_ENABLED
-    caps = CAPS(sid, c.cast(held, c.c_void_p), 3, 0)
-    size = c.c_size_t()
-    k32.InitializeProcThreadAttributeList(None, 2, 0, c.byref(size))
-    attrs = (c.c_byte * size.value)()
-    check(k32.InitializeProcThreadAttributeList(attrs, 2, 0, c.byref(size)))
-    check(k32.UpdateProcThreadAttribute(attrs, 0, 0x20009, c.byref(caps), c.sizeof(caps), None, None))
-    # LPAC: ignore ambient ALL APPLICATION PACKAGES grants. Only explicit
-    # capabilities and OS ALL RESTRICTED APPLICATION PACKAGES grants apply.
-    opt_out = w.DWORD(1)
-    check(k32.UpdateProcThreadAttribute(attrs, 0, 0x2000F, c.byref(opt_out), c.sizeof(opt_out), None, None))
     info = STARTUPINFOEX()
+    if not args.unconfined:
+        # WinSock needs registry reads for the OS provider catalog, not a
+        # network capability or ambient filesystem access.
+        registry = capability("registryRead")
+        held = (SIDATTR * 3)(SIDATTR(own, 0x4), SIDATTR(runtime, 0x4), SIDATTR(registry, 0x4))
+        caps = CAPS(sid, c.cast(held, c.c_void_p), 3, 0)
+        size = c.c_size_t()
+        k32.InitializeProcThreadAttributeList(None, 2, 0, c.byref(size))
+        attrs = (c.c_byte * size.value)()
+        check(k32.InitializeProcThreadAttributeList(attrs, 2, 0, c.byref(size)))
+        check(k32.UpdateProcThreadAttribute(attrs, 0, 0x20009, c.byref(caps), c.sizeof(caps), None, None))
+        # LPAC ignores ambient ALL APPLICATION PACKAGES grants.
+        opt_out = w.DWORD(1)
+        check(k32.UpdateProcThreadAttribute(attrs, 0, 0x2000F, c.byref(opt_out), c.sizeof(opt_out), None, None))
+        info.lpAttributeList = c.cast(attrs, c.c_void_p)
     info.StartupInfo.cb = c.sizeof(info)
     info.StartupInfo.dwFlags = 0x100  # use std handles
     handles = [k32.GetStdHandle(n) for n in (-10, -11, -12)]
@@ -372,7 +375,6 @@ def main():
         if h and h != w.HANDLE(-1).value:
             check(k32.SetHandleInformation(h, 1, 1))
     info.StartupInfo.hStdInput, info.StartupInfo.hStdOutput, info.StartupInfo.hStdError = handles
-    info.lpAttributeList = c.cast(attrs, c.c_void_p)
     child_env = dict(os.environ)
     child_env["PATH"] = os.path.join(os.environ["SystemRoot"], "System32")
     env = "".join(k + "=" + v + "\0" for k, v in sorted(child_env.items())) + "\0"
@@ -422,8 +424,8 @@ def main():
         if proc.hProcess:
             k32.CloseHandle(proc.hProcess)
         if args.control:
-            # This directory is never granted to the lowbox. A killed helper
-            # cannot falsely acknowledge that output capture is now safe.
+            # Protected from a lowbox, but not from an unconfined same-user
+            # process. That fallback is explicitly not a security boundary.
             with open(os.path.join(args.control, "closed"), "x"):
                 pass
     sys.exit(code.value)

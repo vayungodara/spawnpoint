@@ -304,6 +304,7 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
   const asked = c.files.filter((f) => f.entry?.via !== 'dependency' && !f.path)
   const excerpt = c.client?.excerpt?.length ? c.client.excerpt : c.server?.excerpt ?? []
   const solver = c.solver
+  const isolationWarnings = Object.entries(rev.tests ?? {}).filter(([key, value]) => key.endsWith('Isolation') && value.result !== 'passed')
   return (
     <div className="flex flex-col h-full min-h-0">
       <div className="flex items-start gap-3 p-5 sm:p-6 shrink-0 border-b-2 border-ink">
@@ -359,6 +360,12 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
               ))}
             </tbody>
           </table>
+          {isolationWarnings.map(([key, value]) => (
+            <p key={key} className="text-xs text-gold mt-2">
+              <b>{TEST_LABEL[key]} · Not isolated</b>
+              <span className="block">{value.detail.replace(/^Not isolated: /, '').split(' Probe:')[0]}</span>
+            </p>
+          ))}
           {excerpt.length > 0 && <pre className="console p-2.5 mt-2 text-xs whitespace-pre-wrap max-h-40 overflow-auto">{excerpt.join('\n')}</pre>}
         </section>
 
@@ -455,7 +462,7 @@ export function TestChips({ tests }: { tests: Revision['tests'] }) {
       )}
       {rest.map(([k, v]) => (
         <span key={k} title={`${label(k)}: ${v.detail}`} className={`chip ${v.result === 'failed' ? 'text-redstone' : 'text-gold'}`}>
-          {label(k)} {v.result === 'failed' ? '✗' : '?'}
+          {label(k)} {k.endsWith('Isolation') ? 'NOT ISOLATED' : v.result === 'failed' ? '✗' : '?'}
         </span>
       ))}
     </span>

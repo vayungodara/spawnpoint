@@ -9,8 +9,10 @@ import { PATHS } from '../config.js';
 import { IS_WIN, ROOT_PANEL, giveTree, killTree, KILLABLE_SPAWN_OPTS } from './platform.js';
 
 // CANDIDATE SANDBOX. Mods are code: every test JVM that loads a staged
-// candidate (server boot, client boot, join) runs here, never as the panel.
-// A test process sees its own scratch copy, the Java and launcher it needs
+// candidate (server boot, client boot, join) runs through this launcher.
+// Windows falls back to the panel's account when LPAC is unavailable, with
+// an explicit Not isolated result. That mode has no file/network boundary.
+// A confined process sees its own scratch copy, the Java and launcher it needs
 // and the OS's own libraries. Panel data, settings and tokens, other servers,
 // worlds, the home folder and the panel and supervisor ports are out of reach.
 //
@@ -25,9 +27,9 @@ import { IS_WIN, ROOT_PANEL, giveTree, killTree, KILLABLE_SPAWN_OPTS } from './p
 //   Windows  an AppContainer without network capabilities (loopback only
 //            among its own processes, files only where granted) in a Job
 //            Object that caps memory and CPU.
-// Where a sandbox cannot be created, candidate execution is refused.
+// Linux/macOS refuse execution when a sandbox cannot be created.
 //
-// Processes that share a box (the join's server copy and client) share
+// Confined processes that share a box (the join's server copy and client) share
 // loopback, but each still sees only its own scratch: the panel writes the
 // client's config while the server copy runs, and a link planted there must
 // not redirect that write.
@@ -54,7 +56,7 @@ export interface SandboxSpec {
 }
 
 /** How a test ran. `passed` means candidate code was confined as described. */
-export interface Isolation { result: 'passed' | 'inconclusive'; detail: string; renderer: 'none' }
+export interface Isolation { result: 'passed' | 'inconclusive'; detail: string; renderer: 'none'; unconfined?: true }
 
 /** One sandboxed process, with stdout and stderr merged. */
 export interface BoxProcess {
@@ -332,9 +334,9 @@ function winContainer(name: string, remove = false): void {
 
 /** All processes of one box share the AppContainer (and so its loopback);
     each one's scratch is granted to a capability only its token carries. */
-function winArgv(spec: SandboxSpec, argv: string[], cwd: string, name: string, control?: string): string[] {
+function winArgv(spec: SandboxSpec, argv: string[], cwd: string, name: string, control?: string, unconfined = false): string[] {
   return ['python', '-I', WIN_HELPER, '--name', name, '--capability', `spawnpointScratch${randomUUID()}`, '--mem-mb', String(Math.ceil(spec.memGb * 1024)),
-    '--cwd', cwd, ...(control ? ['--control', control] : []), ...spec.scratch.flatMap((d) => ['--write', d]), ...runtimeDirs(spec).flatMap((d) => ['--read', d]), '--', ...argv];
+    '--cwd', cwd, ...(unconfined ? ['--unconfined'] : []), ...(control ? ['--control', control] : []), ...spec.scratch.flatMap((d) => ['--write', d]), ...runtimeDirs(spec).flatMap((d) => ['--read', d]), '--', ...argv];
 }
 
 // ---- common ------------------------------------------------------------------
@@ -398,7 +400,8 @@ export function sandboxIsolation(spec: Pick<SandboxSpec, 'display'> = {}): Isola
     iso = !existsSync('/usr/bin/sandbox-exec') || !probe('darwin') ? unisolated('sandbox-exec is unavailable')
       : { result: 'passed', renderer: 'none', detail: 'Ran under a default-deny macOS sandbox: only OS libraries, declared runtimes and this process\'s scratch were readable; writes stayed in scratch and network access was limited to test loopback ports. Memory was bounded only by the Java heap' };
   } else if (IS_WIN) {
-    iso = !probe('win32') ? unisolated(`the AppContainer runtime and private-loopback probe failed: ${probeFailure}`)
+    iso = !probe('win32') ? { result: 'inconclusive', renderer: 'none', unconfined: true,
+      detail: `Not isolated: Windows tests run as the panel's user because the LPAC runtime or loopback probe failed. Mods can access panel data, other servers, the user's home and host network. Job limits and output checks are not a security boundary. Probe: ${probeFailure}` }
       : { result: 'passed', renderer: 'none', detail: 'Ran in a low-privilege AppContainer: files only where explicitly granted and no network beyond its own loopback; a Job Object capped memory, CPU and processes' };
   } else iso = unisolated(`no sandbox for ${process.platform}`);
   probed.set(key, iso);
@@ -409,7 +412,7 @@ export function sandboxIsolation(spec: Pick<SandboxSpec, 'display'> = {}): Isola
 function sandboxed(spec: SandboxSpec, argv: string[], cwd: string, capability: string, control?: string): { argv: string[]; env: Record<string, string>; isolation: Isolation } {
   const isolation = sandboxIsolation(spec);
   const env = testEnv(spec.scratch[0] ?? cwd);
-  if (isolation.result !== 'passed') throw new Error(isolation.detail);
+  if (isolation.result !== 'passed' && !isolation.unconfined) throw new Error(isolation.detail);
   handOver(spec);
   if (process.platform === 'linux') {
     // systemd-run needs its caller's session bus. These belong only to the
@@ -420,20 +423,20 @@ function sandboxed(spec: SandboxSpec, argv: string[], cwd: string, capability: s
   }
   if (process.platform === 'darwin') return { argv: ['/usr/bin/sandbox-exec', '-p', macProfile(spec), ...argv], env, isolation };
   // The helper itself is trusted and needs PATH to find Python.
-  return { argv: winArgv(spec, argv, cwd, capability, control), env: { ...env, PATH: process.env.PATH ?? env.PATH }, isolation };
+  return { argv: winArgv(spec, argv, cwd, capability, control, isolation.unconfined), env: { ...env, PATH: process.env.PATH ?? env.PATH }, isolation };
 }
 
 /** Spawn one sandboxed process with piped stdin and merged output. */
 export function sandboxSpawn(spec: SandboxSpec, argv: string[], cwd: string, capability?: string): BoxProcess & { isolation: Isolation; child: ChildProcess } {
-  // Never grant the candidate this sibling directory. Only the trusted
-  // Windows helper can acknowledge that its Job has no remaining processes.
+  // The Windows helper acknowledges Job shutdown here. In unconfined mode
+  // same-user mods can access this directory too; it is not a trust boundary.
   const control = IS_WIN ? scratchDir('control') : undefined;
   const name = capability ?? `Spawnpoint.Test.${randomUUID()}`;
   let ownsContainer = false;
   let s: ReturnType<typeof sandboxed>;
   try {
     s = sandboxed(spec, argv, cwd, name, control);
-    if (IS_WIN && !capability) { winContainer(name); ownsContainer = true; }
+    if (IS_WIN && !s.isolation.unconfined && !capability) { winContainer(name); ownsContainer = true; }
   } catch (error) { if (control) rmSync(control, { recursive: true, force: true }); throw error; }
   const child = spawn(s.argv[0], s.argv.slice(1), { cwd, env: s.env, stdio: ['pipe', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
   const output = new PassThrough();
@@ -460,14 +463,14 @@ export function sandboxSpawn(spec: SandboxSpec, argv: string[], cwd: string, cap
 /** A sandbox for processes that must reach each other on loopback. */
 export function sandboxBox(spec: SandboxSpec): Box {
   const isolation = sandboxIsolation(spec);
-  if (isolation.result !== 'passed') throw new Error(isolation.detail);
+  if (isolation.result !== 'passed' && !isolation.unconfined) throw new Error(isolation.detail);
   if (process.platform === 'linux' && isolation.result === 'passed') {
     handOver(spec);
     return linuxBox(linux as LinuxReady, spec, isolation);
   }
   const procs: BoxProcess[] = [];
   const name = `Spawnpoint.Test.${randomUUID()}`;
-  if (IS_WIN) winContainer(name);
+  if (IS_WIN && !isolation.unconfined) winContainer(name);
   return {
     isolation,
     run(argv, cwd, scratch) {
@@ -481,7 +484,7 @@ export function sandboxBox(spec: SandboxSpec): Box {
       for (const p of procs) p.kill();
       await Promise.all(procs.map((p) => p.exited));
       const safe = procs.every((p) => p.outputsSafe());
-      if (IS_WIN && safe) winContainer(name, true);
+      if (IS_WIN && !isolation.unconfined && safe) winContainer(name, true);
       return safe;
     },
   };

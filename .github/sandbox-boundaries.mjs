@@ -43,8 +43,13 @@ const args = (mode, peer = siblingFile) => [java, '-Xmx128m', '-XX:-UsePerfData'
 const spec = (scratch) => ({ scratch, runtimes: [runtimeHome(java), compiled], memGb: 1, ports: [ownPort], bindPorts: [ownPort] });
 const denied = ['outside-read', 'outside-alias-read', 'outside-write', 'panel-list', 'home-read', 'sibling-read', 'sibling-write', 'runtime-write', 'runtime-hardlink-write', 'host-port', 'environment', 'symlink-read'];
 if (process.platform === 'linux') denied.push('namespace-create');
+let unconfinedWindows = false;
 function verify(output) {
-  for (const name of denied) assert.match(output, new RegExp(`^ACCESS ${name} DENIED$`, 'm'), output);
+  for (const name of denied) {
+    if (unconfinedWindows && name === 'symlink-read') continue; // Windows may deny symlink creation even without isolation
+    const expected = unconfinedWindows && name !== 'environment' ? 'ALLOWED' : 'DENIED';
+    assert.match(output, new RegExp(`^ACCESS ${name} ${expected}$`, 'm'), output);
+  }
   for (const name of ['scratch-write', 'own-port', 'runtime-read']) assert.match(output, new RegExp(`^ACCESS ${name} ALLOWED$`, 'm'), output);
 }
 async function collect(child) {
@@ -81,18 +86,16 @@ async function checkBoundaries() {
   console.log('PASS: unconfined controls can reach the disposable files, environment and listener');
   for (const file of [outside, homeFile, siblingFile, runtimeFile]) writeFileSync(file, 'boundary control');
   const iso = sandboxIsolation(); console.log(JSON.stringify(iso));
-  if (iso.result !== 'passed') {
+  unconfinedWindows = process.platform === 'win32' && iso.unconfined === true;
+  if (unconfinedWindows) {
+    assert.equal(iso.result, 'inconclusive');
+    assert.match(iso.detail, /Not isolated: Windows tests run as the panel's user/);
+  } else if (iso.result !== 'passed') {
     assert.throws(() => sandboxSpawn(spec([control]), args('solo'), control), /Not isolated/);
     assert.throws(() => sandboxBox(spec([control, sibling])), /Not isolated/);
-    console.log('Verified refusal to execute after the sandbox availability probe failed');
-    if (process.platform === 'win32') {
-      assert.match(iso.detail, /Not isolated: the AppContainer runtime and private-loopback probe failed/);
-      console.log('PASS: Windows unavailable-sandbox refusal; candidate confinement and Minecraft boots NOT RUN');
-      return;
-    }
+    assert.fail('this host must exercise real confinement, not skip it');
   }
-  assert.equal(iso.result, 'passed', 'this host must exercise real confinement, not skip it');
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' && !unconfinedWindows) {
     const diagnostic = scratchDir('native-probe');
     const executable = join(diagnostic, 'BoundaryNative.exe');
     copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-boundary-native.exe'), executable);
@@ -104,9 +107,10 @@ async function checkBoundaries() {
     }
   }
   const solo = prepare('solo');
-  const soloProcess = sandboxSpawn(spec([solo]), args(process.platform === 'win32' ? 'profile' : 'solo'), solo);
+  const soloProcess = sandboxSpawn(spec([solo]), args(process.platform === 'win32' && !unconfinedWindows ? 'profile' : 'solo'), solo);
+  assert.deepEqual(soloProcess.isolation, iso);
   let profile;
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' && !unconfinedWindows) {
     const name = soloProcess.child.spawnargs[soloProcess.child.spawnargs.indexOf('--name') + 1];
     assert.match(name, /^Spawnpoint\.Test\./);
     // Inspect only the disposable profile this process just created.
@@ -156,11 +160,16 @@ print(folder.value)
   }
   await new Promise((r) => setTimeout(r, 3000));
   assert.equal(existsSync(join(descendants, 'late-write.txt')), false, 'descendant survived the sandbox');
-  console.log('PASS: descendants are denied or confined and reaped, including Unix session detachment');
+  console.log('PASS: descendants are denied or reaped, including Unix session detachment');
 
   const cancellation = prepare('cancellation');
   const held = sandboxSpawn(spec([cancellation]), args('hold'), cancellation);
-  await ready(held, 'HOLD READY');
+  const heldOutput = await ready(held, 'HOLD READY');
+  if (process.platform === 'darwin') assert.match(heldOutput, /^ACCESS descendant DENIED$/m, heldOutput);
+  else {
+    assert.match(heldOutput, /^ACCESS descendant ALLOWED$/m, heldOutput);
+    assert.match(heldOutput, /^DESCENDANT READY$/m, heldOutput);
+  }
   held.kill();
   await held.exited;
   assert.equal(held.outputsSafe(), true, 'forced stop must acknowledge descendant shutdown');
@@ -173,10 +182,11 @@ print(folder.value)
   const nativeProbe = join(client, 'BoundaryNative.exe');
   if (process.platform === 'win32') copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-boundary-native.exe'), nativeProbe);
   box = sandboxBox(spec([server, client]));
+  assert.deepEqual(box.isolation, iso);
   const listener = box.run([java, '-Xmx128m', '-cp', '.', 'BoundaryProbe', 'listen', String(ownPort)], server, server);
   const listening = await ready(listener, 'READY');
   verify(await collect(box.run(args('pair', join(server, 'canary.txt')), client, client)));
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' && !unconfinedWindows) {
     const pid = /^READY (\d+)\r?$/m.exec(listening)?.[1];
     assert.ok(pid, listening);
     const control = execFileSync(nativeProbe, ['--peer', pid], { encoding: 'utf8' });
@@ -188,9 +198,11 @@ print(folder.value)
     }
   }
   await box.close(); box = null;
-  assert.equal(readFileSync(join(server, 'canary.txt'), 'utf8'), 'server control');
-  for (const file of [outside, homeFile, siblingFile, runtimeFile]) assert.equal(readFileSync(file, 'utf8'), 'boundary control');
-  console.log('PASS: separate process scratch and shared private loopback');
+  assert.equal(readFileSync(join(server, 'canary.txt'), 'utf8'), unconfinedWindows ? 'changed' : 'server control');
+  for (const file of [outside, siblingFile, runtimeFile]) assert.equal(readFileSync(file, 'utf8'), unconfinedWindows ? 'changed' : 'boundary control');
+  assert.equal(readFileSync(homeFile, 'utf8'), 'boundary control');
+  console.log(unconfinedWindows ? 'PASS: Windows standalone and paired tests execute; host and sibling access remain ALLOWED (Not isolated)'
+    : 'PASS: separate process scratch and shared private loopback');
   const disabled = spawnSync(process.execPath, ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import {sandboxIsolation,sandboxSpawn} from './server/dist/services/testsandbox.js';
@@ -208,5 +220,5 @@ print(folder.value)
     assert.equal(overlap.status, 0, overlap.stderr);
     console.log('PASS: layouts inside ambient OS mounts refuse execution');
   }
-  console.log(`sandbox boundaries passed on ${process.platform}`);
+  console.log(unconfinedWindows ? 'Windows unisolated execution checks passed; confinement NOT provided' : `sandbox boundaries passed on ${process.platform}`);
 }

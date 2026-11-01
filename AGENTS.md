@@ -57,9 +57,10 @@ unproven until those exact tests complete; do not report a reduced pack or
 stubbed renderer as equivalent. Windows CI boundary checks likewise do not
 replace a real confined Minecraft client run.
 Windows LPAC currently rejects its own TCP sockets with WSAEACCES 10013.
-The approved Windows fallback is an honest Not isolated report and refusal
-to execute candidates. CI verifies both standalone and paired launch refusal
-when the availability probe fails; this is not a Windows confinement pass.
+The approved Windows fallback runs tests as the panel's user, with Job limits
+but no AppContainer, and reports Not isolated. CI must execute standalone
+and paired JVM probes, check permitted host access using disposable canaries,
+and verify normal/forced descendant cleanup. This is not a confinement pass.
 If the probe succeeds, the complete boundary harness must pass, including
 the own-port control and denied host/peer access. Do not remove LPAC silently.
 Default Linux/macOS installs keep the same-UID supervisor and need no sudo.

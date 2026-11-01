@@ -45,7 +45,9 @@ need `approve`. Token management, PIN and credential changes, server
 deletion, Crafty import and panel exit stay owner-only. Test JVMs run as
 confined processes through `testsandbox.ts`: bubblewrap namespaces on Linux,
 a default-deny sandbox-exec profile on macOS and an AppContainer with a Job
-Object on Windows. Missing confinement refuses execution. These are test
+Object on Windows when available. Windows falls back to the panel's user
+with Job limits and an explicit Not isolated report when LPAC is unavailable.
+Linux/macOS still refuse execution without confinement. These are test
 boundaries, not restrictions on approved live servers or the supervisor's
 account. Control and approve remain host-trusted; only `read` is safe for
 an untrusted machine. `cli/` is a dependency-free

@@ -53,8 +53,8 @@ publish it. See [the supervisor docs](supervisor.md).
 
 The server boot, client boot and join tests run candidate code in disposable
 scratch directories. The join's server and client have separate writable
-trees. Launcher caches are copied before execution. Shared tools and sealed
-inputs are not writable by a test. The panel refuses linked output paths,
+trees. Launcher caches are copied before execution. Confined tests cannot
+write shared tools or sealed inputs. The panel refuses linked output paths,
 including links in intermediate directories, before reading generated files.
 Only an allowlisted environment reaches a test process.
 
@@ -77,14 +77,19 @@ Only an allowlisted environment reaches a test process.
   are denied; HeadlessMC loads the client in the confined JVM. Java's heap
   does not limit native memory. Packs incompatible with stubbed graphics
   receive an inconclusive client result, not a rendering pass.
-- **Windows:** the tested host reports **Not isolated** and refuses candidate
-  execution. The low-privilege AppContainer (LPAC) prototype rejects its own
-  TCP sockets with error 10013. The panel probes the confined runtime and a
-  private loopback connection before running candidates. If that probe fails,
-  server, client and join tests remain inconclusive without loading any mods.
-  Windows CI verifies this refusal, not successful Minecraft confinement.
-  There is no fallback to ordinary AppContainer: it inherits ambient file
-  grants that LPAC excludes.
+- **Windows:** if the low-privilege AppContainer (LPAC) runtime or loopback
+  probe fails, candidate tests still run as the panel's user and report
+  **Not isolated**. LPAC currently rejects its own TCP sockets with error
+  10013 on the tested host. The fallback applies to server boot, client boot
+  and the join's test processes. It uses no AppContainer, retains Job Object
+  resource limits and shutdown handling, and keeps the allowlisted environment
+  and output-path checks. Those measures do not provide a security boundary:
+  a staged mod can read or modify panel data, other servers and the user's
+  home, and access the host network before approval. Use only trusted mods
+  and control tokens on Windows. Boot and join outcomes remain separate
+  from isolation; a passed boot never changes Not isolated to a pass.
+  Windows CI exercises actual unisolated JVM execution and records permitted
+  access to disposable host canaries. This is not a confinement pass.
   When the probe succeeds, LPAC ignores ambient All Application Packages
   grants and has no network capabilities or host-loopback exemption.
   A join pair shares a fresh container identity, with separate scratch
@@ -96,9 +101,10 @@ Only an allowlisted environment reaches a test process.
   denies the container access; candidate writes use only the granted scratch.
   The parent removes the profile after confirmed shutdown.
 
-If the OS sandbox cannot start, the report says **Not isolated** and the
-test does not execute candidate code. `SPAWNPOINT_UNSANDBOXED=1` also refuses
-execution; it does not enable an unsafe fallback. A confinement check does
+On Linux and macOS, an unavailable sandbox reports **Not isolated** and
+refuses execution. Windows uses the unisolated fallback described above.
+`SPAWNPOINT_UNSANDBOXED=1` explicitly disables execution on every OS; it
+does not request the Windows fallback. A confinement check does
 not prove that Minecraft booted, rendered or completed its join handshake.
 Those checks have separate results.
 
@@ -110,7 +116,7 @@ or separate service account. Live mods can read and modify the user's panel
 data, settings and home. Candidate test isolation does not protect these
 files after a mod goes live.
 
-Replacements, removals, config edits and inconclusive tests require the
+Replacements, removals, config edits and inconclusive functional tests require the
 owner's approval of the tested revision. Clean additions can go live
 automatically after passing tests. An approve token delegates owner consent,
 including acceptance of test gaps. A passed test is not a security audit
