@@ -28,8 +28,10 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (argc != 2) return 2;
     if (!wcscmp(argv[1], L"--device-acl")) {
-        wchar_t *names[] = { L"\\\\?\\GLOBALROOT\\Device\\Afd", L"\\\\?\\GLOBALROOT\\Device\\Nsi" };
-        for (unsigned i = 0; i < 2; i++) {
+        wchar_t *names[] = { L"\\\\?\\GLOBALROOT\\Device\\Afd", L"\\\\?\\GLOBALROOT\\Device\\Nsi",
+            L"\\\\?\\GLOBALROOT\\Device\\Tcp", L"\\\\?\\GLOBALROOT\\Device\\Tcp6",
+            L"\\\\?\\GLOBALROOT\\Device\\Udp", L"\\\\?\\GLOBALROOT\\Device\\Udp6" };
+        for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
             PSECURITY_DESCRIPTOR descriptor = NULL;
             DWORD error = GetNamedSecurityInfoW(names[i], SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &descriptor);
             wprintf(L"DEVICE %ls error=%lu\n", names[i], error);
