@@ -1,3 +1,4 @@
+import AdmZip from 'adm-zip';
 import { existsSync, mkdirSync, rmSync, copyFileSync, writeFileSync, readdirSync, renameSync, readFileSync, realpathSync, cpSync, constants } from 'node:fs';
 import { spawnSync, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -52,6 +53,10 @@ const LAUNCHER_SHA256 = process.platform === 'darwin' ? 'bf80d84516eeeb9a51fa358
   : '52bd5006f478377b3893011d458562977d38c65ead6d2b31089beb4d614f13cd';
 const RUNTIME_TEST_VERSION = '4.5.1';
 const RUN_TIMEOUT_MS = 15 * 60_000;
+/** mc-runtime-test polls once a tick while it waits for its world. Only these
+    lines and nothing else for this long means a screen holds the test up. */
+const STALL_MS = 2 * 60_000;
+const POLL_LINE = /Waiting for player to load|Screen not yet null|Closing screen|Waiting for overlay|Players chunk not yet loaded|Waiting \d+ ticks/;
 export const JOIN_SKIPPED = 'The join test runs only on Linux with xvfb installed, so it was skipped here.';
 
 /** The newest JDK under Tools/ runs the launcher (numeric sort: jdk-8 < jdk-25). */
@@ -95,7 +100,8 @@ function writeHmcConfig(gamedir: string, java = gateJava(), launcherDir = HMC): 
     'hmc.java.use.current=false',
     'hmc.auto.download.java=false',
     'hmc.java.require.exact=true',
-    'hmc.jvmargs=-XshowSettings:properties',
+    // mc-runtime-test closes a mod's notice screen once the test world is up
+    'hmc.jvmargs=-XshowSettings:properties -DMcRuntimeGameTestCloseAnyScreen=true',
     'hmc.offline=true',
     '',
   ].join('\n'), 'utf8');
@@ -113,7 +119,7 @@ function clientArgv(gameArgs: string, version: string, heap: string, java: strin
     inMemory ? java : gateJava()!,
     // LWJGL on macOS must create its window on the first thread
     // The macOS sandbox forbids forks; the game uses this locked JVM itself.
-    ...(inMemory ? ['-XstartOnFirstThread', '-XshowSettings:properties', heap] : []),
+    ...(inMemory ? ['-XstartOnFirstThread', '-XshowSettings:properties', '-DMcRuntimeGameTestCloseAnyScreen=true', heap] : []),
     ...props,
     '-jar', LAUNCHER,
     '--command', 'launch', version, '-offline',
@@ -402,10 +408,27 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
     canRemove = false;
     child.stdin?.end();
     let out = '';
-    child.output.on('data', (d: Buffer) => { out += d.toString(); });
-    const killer = setTimeout(() => child.kill(), RUN_TIMEOUT_MS);
+    let progressAt = Date.now();
+    let blocked: string | undefined;
+    const onData = (d: Buffer): void => {
+      const text = d.toString();
+      out += text;
+      if (text.split('\n').some((l) => l.trim() && !POLL_LINE.test(l))) progressAt = Date.now();
+    };
+    child.output.on('data', onData);
+    const stop = (why: string): void => { blocked ??= why; child.kill(); };
+    // End a blocked play-test after two quiet minutes, not at the hard limit.
+    // Only a confirmed obstruction counts; anything else runs to the limit.
+    const watch = setInterval(() => {
+      if (Date.now() - progressAt < STALL_MS) return;
+      const why = obstruction(out);
+      if (why) stop(why);
+    }, 10_000);
+    let timedOut = false;
+    const killer = setTimeout(() => { timedOut = true; stop(obstruction(out) ?? ''); }, RUN_TIMEOUT_MS);
     void child.exited.then((code) => {
       clearTimeout(killer);
+      clearInterval(watch);
       const seconds = Math.round((Date.now() - started) / 1000);
       writeFileSync(join(work, `${set.label}-client.log`), out.slice(-40_000), 'utf8');
       if (!child.outputsSafe()) {
@@ -419,7 +442,8 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
         return;
       }
       if (code === 0 && /exited with code: 0/.test(out)) {
-        resolve({ result: 'passed', detail: `a client booted into a world with ${mods} mods`, seconds });
+        const closed = closedScreens(out);
+        resolve({ result: 'passed', detail: `a client booted into a world with ${mods} mods${closed.length ? ` (closed ${closed.join(', ')} to finish)` : ''}`, seconds });
         return;
       }
       const crash = /Crash report saved to:.*?(\S+\.txt)/.exec(out)?.[1];
@@ -434,17 +458,23 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
         resolve({ result: 'unverified', detail: 'the launcher\'s stubbed graphics cannot run this pack; a Linux host with xvfb can test real rendering', seconds, excerpt: excerptOf(out) });
         return;
       }
-      // killed by our timeout after the client reached the interactive phase:
-      // a mod's modal screen or spawn hook blocked the automated play-test.
-      // Load failures crash with an exit code, so the boot itself is proven.
-      if (code === null && !crash && /(Screen not yet null:|Waiting for player to load)/.test(out)) {
-        resolve({ result: 'passed', detail: `a client booted with ${mods} mods; a mod's screen blocked the automated play-test`, seconds });
+      // Stopped while mc-runtime-test waited: every mod loaded and the menu
+      // came up (load failures crash), but no world was played. Only the
+      // join can prove a player gets in, so this is not a pass on its own.
+      if (timedOut && !blocked && !crash) {
+        resolve({ result: 'unverified', detail: `the client did not finish within ${RUN_TIMEOUT_MS / 60_000} min and gave no reason`, seconds, excerpt: excerptOf(out) });
         return;
       }
+      if (blocked && !crash) {
+        resolve({ result: 'passed', blocked, detail: `a client loaded ${mods} mods, but ${blocked}, so the singleplayer play-test did not finish`, seconds });
+        return;
+      }
+      const suspects = crashMods(out, set.files.filter((f) => !skipped(basename(f.rel))));
       resolve({
         result: 'failed', seconds,
-        detail: `the client crashed with exit code ${code}${crash ? ` (${basename(crash)})` : ''}`,
+        detail: `the client crashed with exit code ${code}${crash ? ` (${basename(crash)})` : ''}${suspects.length ? `; mods in the crash: ${suspects.join(', ')}` : ''}`,
         excerpt: excerptOf(out),
+        suspects,
         javaFailure: classVersionFailure(out),
       });
     });
@@ -455,7 +485,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   const seen = renderingEvidence(clientOut, gateMode());
   const checks: NonNullable<Verdict['checks']> = {
     clientIsolation: gateIsolation(),
-    clientBoot: { result: sp.result === 'unverified' ? 'inconclusive' : sp.result, detail: sp.detail, renderer: gateMode() },
+    clientBoot: { result: sp.result === 'unverified' || sp.blocked ? 'inconclusive' : sp.result, detail: sp.detail, renderer: gateMode() },
     rendering: left.length ? { result: 'skipped', detail: `Not loaded or rendered: ${left.join(', ')}`, renderer: gateMode() }
       : sp.result !== 'passed' ? { result: 'inconclusive', detail: 'The client did not complete its rendering check', renderer: gateMode() }
         : { result: seen.result, detail: seen.detail, renderer: gateMode() },
@@ -465,7 +495,8 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   // never connects; waiting out the join only ended "unverified" every time.
   // Not the real-window retry after an xvfb crash: that host has xvfb.
   if (gateMode() === 'window' && !modeOverride) {
-    return { ...sp, detail: `${sp.detail}, without graphics`, skipped: JOIN_SKIPPED, checks: { ...checks,
+    // a blocked play-test and no join prove nothing past the menu
+    return { ...sp, result: sp.blocked ? 'unverified' : sp.result, detail: `${sp.detail}, without graphics`, skipped: JOIN_SKIPPED, checks: { ...checks,
       join: { result: 'skipped', detail: JOIN_SKIPPED, renderer: 'window' },
       handshake: { result: 'skipped', detail: tested ? 'AutoModpack handshake was not run: the join test was skipped' : 'AutoModpack handshake was not run', renderer: 'window' } } };
   }
@@ -484,7 +515,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
     seen.stubbed && (gateMode() === 'headless' ? 'graphics stubbed: install xvfb to test rendering too' : 'the launcher stubbed graphics, so rendering was not tested'),
     gateMode() !== 'headless' && left.length && `${left.join(', ')} left out${handshakeOff ? ', so AutoModpack\'s handshake and the exact friend download were not proven' : ''}`,
   ].filter(Boolean);
-  return { result: notes.length ? 'unverified' : 'passed', detail: `${sp.detail}, then ${join_.detail}${notes.length ? ` (${notes.join('; ')})` : ''}`, seconds: Math.round((Date.now() - started) / 1000),
+  return { result: notes.length ? 'unverified' : 'passed', blocked: sp.blocked, detail: `${sp.detail}, then ${join_.detail}${notes.length ? ` (${notes.join('; ')})` : ''}`, seconds: Math.round((Date.now() - started) / 1000),
     checks: {
       ...checks,
       join: { result: 'passed', detail: join_.detail, renderer: gateMode() },
@@ -666,7 +697,11 @@ async function joinTest(
         writeFileSync(join(work, 'join.log'), srvOut.slice(-30_000), 'utf8');
         writeFileSync(join(work, 'join-client.log'), cliOut.slice(-40_000), 'utf8');
       } catch { /* diagnostics */ }
-      resolve({ ...v, javaFailure: v.result === 'failed' ? classVersionFailure(cliOut) ?? classVersionFailure(srvOut) : undefined, seconds: Math.round((Date.now() - started) / 1000),
+      // a client crash in the join names its stack like a boot crash does
+      const crashed = v.result === 'failed' && /the client exited/.test(v.detail);
+      const suspects = crashed ? crashMods(cliOut, set.files) : [];
+      resolve({ ...v, ...(crashed ? { excerpt: v.excerpt ?? excerptOf(cliOut), suspects, detail: `${v.detail}${suspects.length ? `; mods in the crash: ${suspects.join(', ')}` : ''}` } : {}),
+        javaFailure: v.result === 'failed' ? classVersionFailure(cliOut) ?? classVersionFailure(srvOut) : undefined, seconds: Math.round((Date.now() - started) / 1000),
         checks: { joinIsolation: box.isolation } });
     };
     // A client that never even tried to connect proves nothing either way:
@@ -790,4 +825,53 @@ async function joinTest(
     if (activeBox) canRemove = await activeBox.close();
     if (canRemove) for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** Why mc-runtime-test is stuck, when its own log proves it: a screen it
+    keeps naming after the world loaded, or a world whose integrated server
+    never started. Active world generation is not an obstruction. */
+function obstruction(out: string): string | null {
+  const last = out.slice(-4000).split('\n').filter((l) => l.trim()).slice(-10);
+  if (!last.length || !last.every((l) => POLL_LINE.test(l))) return null;
+  // closing it does not help when a mod opens it again every tick
+  const screen = last.map((l) => /Screen not yet null: ([^\s@]+)/.exec(l)?.[1]).filter(Boolean).at(-1);
+  if (screen) return `a screen (${screen.split('.').pop()}) stayed open over the test world`;
+  if (/Waiting for player to load/.test(last.at(-1)!) && !/Starting integrated minecraft server/.test(out)) {
+    return 'the singleplayer test world never started (a mod screen probably took over world creation)';
+  }
+  return null;
+}
+
+/** Screens mc-runtime-test closed so its test could finish. */
+function closedScreens(out: string): string[] {
+  // vanilla loading screens (net.minecraft.class_434) close as the world arrives; only mod screens are news
+  const names = [...out.matchAll(/Screen not yet null: ([^\s@]+)[^\n]*\n[^\n]*Closing screen/g)].map((m) => m[1]).filter((n) => !n.startsWith('net.minecraft.')).map((n) => n.split('.').pop()!);
+  return [...new Set(names)].slice(0, 4);
+}
+
+/** Pack jars a crash's stack runs through, in order of appearance: by the jar
+    the loader names on a frame, or by the jar that holds the frame's class. */
+export function crashMods(out: string, files: { src: string; rel: string }[]): string[] {
+  const jars = files.filter((f) => f.rel.startsWith('mods/') && f.rel.endsWith('.jar'));
+  const byName = new Map(jars.map((f) => [basename(f.rel), f]));
+  const found: string[] = [];
+  const add = (name: string): void => { if (!found.includes(name)) found.push(name); };
+  const classes: string[] = [];
+  for (const line of out.split('\n')) {
+    if (!/^\s+at /.test(line)) continue;
+    for (const m of line.matchAll(/\[([^[\]:/\\]+\.jar)[:\]]/g)) if (byName.has(m[1])) add(m[1]);
+    const cls = /^\s+at (?:[\w.]*\/\/)?([\w.$]+)\.[\w$<>]+\(/.exec(line)?.[1]?.replace(/\$.*$/, '');
+    if (cls && !/^(java|javax|jdk|sun|net\.minecraft|com\.mojang|net\.fabricmc|org\.spongepowered|cpw|net\.minecraftforge|net\.neoforged)\./.test(cls) && !classes.includes(cls)) classes.push(cls);
+  }
+  const entries = new Map<string, Set<string>>();
+  for (const cls of classes.slice(0, 80)) {
+    const path = `${cls.replace(/\./g, '/')}.class`;
+    for (const [name, f] of byName) {
+      if (!entries.has(name)) {
+        try { entries.set(name, new Set(new AdmZip(f.src).getEntries().map((e) => e.entryName))); } catch { entries.set(name, new Set()); }
+      }
+      if (entries.get(name)!.has(path)) { add(name); break; }
+    }
+  }
+  return found.slice(0, 6);
 }

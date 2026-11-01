@@ -350,7 +350,8 @@ function ReviewBody({ id, c, p, onClose }: { id: string; c: Candidate; p: Promot
                 <tr key={label}>
                   <th scope="row" className="!font-sans !text-[12.5px] !text-text font-bold w-28">{label}</th>
                   <td>
-                    {v ? <><b className={RESULT[v.result][1]}>{v.skipped ? '✓ booted' : RESULT[v.result][0]}{v.seconds ? ` in ${v.seconds} s` : ''}</b><span className="text-text-dim"> · {v.detail}</span>
+                    {v ? <><b className={RESULT[v.result][1]}>{v.skipped && v.result === 'passed' ? '✓ booted' : RESULT[v.result][0]}{v.seconds ? ` in ${v.seconds} s` : ''}</b><span className="text-text-dim"> · {v.detail}</span>
+                      {v.blocked && <span className="block text-gold text-xs mt-1">Not checked: the singleplayer play-test, because {v.blocked}.</span>}
                       {v.skipped && <span className="block text-gold text-xs mt-1">{v.skipped}</span>}</>
                       : <span className="text-text-dim">{c.status === 'testing' ? 'running…' : c.detail === FIRST_CONSENT ? 'runs after you approve' : 'not run'}</span>}
                   </td>
