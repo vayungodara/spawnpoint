@@ -48,8 +48,9 @@ int wmain(int argc, wchar_t **argv) {
         DWORD value = 0, size = 0;
         if (!GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &size)) return 3;
         printf("TOKEN AppContainer=%lu\n", value);
-        if (!GetTokenInformation(token, TokenIsLessPrivilegedAppContainer, &value, sizeof(value), &size)) return 3;
-        printf("TOKEN LPAC=%lu\n", value);
+        if (!GetTokenInformation(token, TokenIsLessPrivilegedAppContainer, &value, sizeof(value), &size))
+            printf("TOKEN LPAC query-error=%lu\n", GetLastError());
+        else printf("TOKEN LPAC=%lu\n", value);
         BYTE buffer[1024];
         if (GetTokenInformation(token, TokenAppContainerSid, buffer, sizeof(buffer), &size)) {
             LPWSTR text;
