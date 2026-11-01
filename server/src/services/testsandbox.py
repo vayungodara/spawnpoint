@@ -288,8 +288,12 @@ def main():
     rate = CPURATE(0x1 | 0x4, max(1, (os.cpu_count() or 2) // 2) * 10000 // (os.cpu_count() or 2))
     check(k32.SetInformationJobObject(job, 15, c.byref(rate), c.sizeof(rate)))
 
-    held = (SIDATTR * 2)(SIDATTR(own, 0x4), SIDATTR(runtime, 0x4))  # SE_GROUP_ENABLED
-    caps = CAPS(sid, c.cast(held, c.c_void_p), 2, 0)
+    # WinSock reads the OS provider catalog during initialization. This
+    # standard LPAC capability grants registry reads where Windows permits
+    # them, not network access or ambient filesystem access.
+    registry = capability("registryRead")
+    held = (SIDATTR * 3)(SIDATTR(own, 0x4), SIDATTR(runtime, 0x4), SIDATTR(registry, 0x4))  # SE_GROUP_ENABLED
+    caps = CAPS(sid, c.cast(held, c.c_void_p), 3, 0)
     size = c.c_size_t()
     k32.InitializeProcThreadAttributeList(None, 2, 0, c.byref(size))
     attrs = (c.c_byte * size.value)()
