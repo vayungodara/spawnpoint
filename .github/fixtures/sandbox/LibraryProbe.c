@@ -10,6 +10,22 @@
 
 /* Temporary diagnostic: public runtime libraries only, no user data. */
 int wmain(int argc, wchar_t **argv) {
+    if (argc == 3 && !wcscmp(argv[1], L"--peer")) {
+        DWORD pid = wcstoul(argv[2], NULL, 10);
+        const DWORD rights[] = { PROCESS_VM_READ, PROCESS_VM_WRITE | PROCESS_VM_OPERATION, PROCESS_DUP_HANDLE };
+        const char *names[] = { "peer-memory-read", "peer-memory-write", "peer-handle-duplicate" };
+        for (unsigned i = 0; i < 3; i++) {
+            HANDLE process = OpenProcess(rights[i], FALSE, pid);
+            printf("ACCESS %s %s\n", names[i], process ? "ALLOWED" : "DENIED");
+            if (process) CloseHandle(process);
+        }
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid), token = NULL;
+        BOOL allowed = process && OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE, &token);
+        printf("ACCESS peer-token-duplicate %s\n", allowed ? "ALLOWED" : "DENIED");
+        if (token) CloseHandle(token);
+        if (process) CloseHandle(process);
+        return 0;
+    }
     if (argc != 2) return 2;
     if (!wcscmp(argv[1], L"--device-acl")) {
         wchar_t *names[] = { L"\\\\?\\GLOBALROOT\\Device\\Afd", L"\\\\?\\GLOBALROOT\\Device\\Nsi" };

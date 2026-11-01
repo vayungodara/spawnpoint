@@ -56,7 +56,7 @@ public class BoundaryProbe {
         }
         if (args[0].equals("listen")) {
             try (ServerSocket server = listen(Integer.parseInt(args[1]))) {
-                System.out.println("READY");
+                System.out.println("READY " + ProcessHandle.current().pid());
                 System.out.flush();
                 Thread.sleep(60000);
             }

@@ -260,37 +260,6 @@ def capability(name):
     return caps[0]
 
 
-def enable_loopback():
-    """Administrator setup: open socket devices, without network capabilities.
-
-    The LPAC token needs device access even for private loopback sockets.
-    WFP still denies non-container traffic: no Internet/LAN capability or
-    host-loopback exemption is installed. Device ACLs reset on reboot.
-    """
-    class TRUSTEE(c.Structure):
-        _fields_ = [("multiple", c.c_void_p), ("operation", w.DWORD), ("form", w.DWORD),
-                    ("kind", w.DWORD), ("sid", c.c_void_p)]
-    class ACCESS(c.Structure):
-        _fields_ = [("mask", w.DWORD), ("mode", w.DWORD), ("inheritance", w.DWORD), ("trustee", TRUSTEE)]
-    for device, mask in [("Nsi", 0x1200A0), ("Afd", 0x1201BF)]:
-        path = os.path.join(r"\\?\GLOBALROOT\Device", device)
-        descriptor, old, updated = c.c_void_p(), c.c_void_p(), c.c_void_p()
-        error = advapi.GetNamedSecurityInfoW(path, 1, 4, None, None, c.byref(old), None, c.byref(descriptor))
-        if error:
-            raise c.WinError(error)
-        try:
-            entry = ACCESS(mask, 1, 0, TRUSTEE(None, 0, 0, 0, capability("spawnpointLoopback")))
-            error = advapi.SetEntriesInAclW(1, c.byref(entry), old, c.byref(updated))
-            if not error:
-                error = advapi.SetNamedSecurityInfoW(path, 1, 4, None, None, updated, None)
-            if error:
-                raise c.WinError(error)
-        finally:
-            if updated:
-                k32.LocalFree(updated)
-            k32.LocalFree(descriptor)
-
-
 def grant(path, sid, rights):
     """Inheritable grant for the container SID. icacls output names the SID
     once granted, so large runtime trees are only walked the first time."""
@@ -384,9 +353,8 @@ def main():
     # standard LPAC capability grants registry reads where Windows permits
     # them, not network access or ambient filesystem access.
     registry = capability("registryRead")
-    loopback = capability("spawnpointLoopback")
-    held = (SIDATTR * 4)(SIDATTR(own, 0x4), SIDATTR(runtime, 0x4), SIDATTR(registry, 0x4), SIDATTR(loopback, 0x4))  # SE_GROUP_ENABLED
-    caps = CAPS(sid, c.cast(held, c.c_void_p), 4, 0)
+    held = (SIDATTR * 3)(SIDATTR(own, 0x4), SIDATTR(runtime, 0x4), SIDATTR(registry, 0x4))  # SE_GROUP_ENABLED
+    caps = CAPS(sid, c.cast(held, c.c_void_p), 3, 0)
     size = c.c_size_t()
     k32.InitializeProcThreadAttributeList(None, 2, 0, c.byref(size))
     attrs = (c.c_byte * size.value)()
@@ -462,9 +430,7 @@ def main():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:2] == ["--enable-loopback"]:
-        enable_loopback()
-    elif sys.argv[1:2] == ["--create-container"]:
+    if sys.argv[1:2] == ["--create-container"]:
         create_container(sys.argv[2])
     elif sys.argv[1:2] == ["--delete-container"]:
         hr = userenv.DeleteAppContainerProfile(sys.argv[2])

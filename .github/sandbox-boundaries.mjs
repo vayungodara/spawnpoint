@@ -59,6 +59,7 @@ async function ready(child, marker) {
     child.output.on('data', (d) => { output += d; if (output.includes(marker)) { clearTimeout(timer); resolve(); } });
     child.exited.then((code) => { clearTimeout(timer); reject(new Error(`exited ${code}: ${output}`)); });
   });
+  return output;
 }
 let box;
 try {
@@ -153,10 +154,23 @@ print(folder.value)
 
   const server = prepare('pair-server'), client = prepare('pair-client');
   writeFileSync(join(server, 'canary.txt'), 'server control');
+  const nativeProbe = join(client, 'LibraryProbe.exe');
+  if (process.platform === 'win32') copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-library-probe.exe'), nativeProbe);
   box = sandboxBox(spec([server, client]));
   const listener = box.run([java, '-Xmx128m', '-cp', '.', 'BoundaryProbe', 'listen', String(ownPort)], server, server);
-  await ready(listener, 'READY');
+  const listening = await ready(listener, 'READY');
   verify(await collect(box.run(args('pair', join(server, 'canary.txt')), client, client)));
+  if (process.platform === 'win32') {
+    const pid = /^READY (\d+)\r?$/m.exec(listening)?.[1];
+    assert.ok(pid, listening);
+    const control = execFileSync(nativeProbe, ['--peer', pid], { encoding: 'utf8' });
+    const confined = await collect(box.run([nativeProbe, '--peer', pid], client, client));
+    console.log(confined);
+    for (const name of ['peer-memory-read', 'peer-memory-write', 'peer-handle-duplicate', 'peer-token-duplicate']) {
+      assert.match(control, new RegExp(`ACCESS ${name} ALLOWED`));
+      assert.match(confined, new RegExp(`ACCESS ${name} DENIED`));
+    }
+  }
   await box.close(); box = null;
   assert.equal(readFileSync(join(server, 'canary.txt'), 'utf8'), 'server control');
   for (const file of [outside, homeFile, siblingFile, runtimeFile]) assert.equal(readFileSync(file, 'utf8'), 'boundary control');
