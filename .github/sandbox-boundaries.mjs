@@ -76,17 +76,9 @@ try {
   if (process.platform === 'win32') {
     // Temporary loader diagnostic: only inspect public runtime libraries.
     const diagnostic = scratchDir('library-probe');
-    const code = `
-      const fs = require('node:fs'), path = require('node:path');
-      for (const name of ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'server/jvm.dll']) {
-        const file = path.join(${JSON.stringify(dirname(java))}, name);
-        try { fs.closeSync(fs.openSync(file, 'r')); console.log('READ', name, 'OK'); }
-        catch (error) { console.log('READ', name, error.message); }
-        try { process.dlopen({exports:{}}, file); console.log('LOAD', name, 'OK'); }
-        catch (error) { console.log('LOAD', name, error.message); }
-      }
-    `;
-    const child = sandboxSpawn({ ...spec([diagnostic]), runtimes: [runtimeHome(java), runtimeHome(process.execPath)] }, [process.execPath, '-e', code], diagnostic);
+    const executable = join(diagnostic, 'LibraryProbe.exe');
+    copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-library-probe.exe'), executable);
+    const child = sandboxSpawn(spec([diagnostic]), [executable, dirname(java)], diagnostic);
     console.log(await collect(child));
   }
   const solo = prepare('solo');
