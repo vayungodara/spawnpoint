@@ -29,13 +29,17 @@ jobs:
           distribution: temurin
           java-version: '21'
       - if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+        # Ubuntu's stock bwrap profile forbids nesting. Keep that policy and
+        # allow user namespaces only for Spawnpoint's dedicated copy.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+          sudo install -D -m 0755 /usr/bin/bwrap /usr/local/libexec/spawnpoint-bwrap
+          echo 'profile spawnpoint-bwrap /usr/local/libexec/spawnpoint-bwrap flags=(unconfined) { userns, }' | sudo tee /etc/apparmor.d/spawnpoint-bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/spawnpoint-bwrap
       - run: npm ci
       - run: npm run build -w server
       - run: npm run build -w web
       - run: node .github/sandbox-boundaries.mjs
-      - if: failure()
-        run: node .github/sandbox-diagnostics.mjs
       - if: runner.os == 'Linux'
         run: sudo env "PATH=$PATH" "JAVA_HOME=$JAVA_HOME" node .github/sandbox-boundaries.mjs
       # smoke 1: the built server must load its entrypoint cleanly

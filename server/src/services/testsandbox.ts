@@ -34,6 +34,9 @@ import { IS_WIN, ROOT_PANEL, giveTree, killTree, KILLABLE_SPAWN_OPTS } from './p
 
 export const SANDBOX_ROOT = join(PATHS.root, 'Spawnpoint', 'sandbox');
 const ACCOUNT = 'spawnpoint-sandbox';
+// An administrator can give this dedicated copy a nesting-capable AppArmor
+// profile without weakening the distro policy for every use of bwrap.
+const BWRAP = existsSync('/usr/local/libexec/spawnpoint-bwrap') ? '/usr/local/libexec/spawnpoint-bwrap' : 'bwrap';
 
 export interface SandboxSpec {
   /** Scratch trees the test may write. They live under SANDBOX_ROOT. */
@@ -142,7 +145,7 @@ function sandboxAccount(): { uid: number; gid: number } | null {
 
 function linuxState(): NonNullable<typeof linux> {
   if (linux) return linux;
-  if (spawnSync('bwrap', ['--version'], { stdio: 'ignore' }).status !== 0) return (linux = { ok: false, why: 'bubblewrap (bwrap) is not installed' });
+  if (spawnSync(BWRAP, ['--version'], { stdio: 'ignore' }).status !== 0) return (linux = { ok: false, why: 'bubblewrap (bwrap) is not installed' });
   const acct = ROOT_PANEL ? sandboxAccount() : null;
   if (ROOT_PANEL && !acct) return (linux = { ok: false, why: `the ${ACCOUNT} account could not be created` });
   const base: LinuxReady = { ok: true, uid: acct?.uid, gid: acct?.gid, account: acct ? `the ${ACCOUNT} account` : 'the panel\'s account', scope: null };
@@ -155,7 +158,7 @@ function linuxState(): NonNullable<typeof linux> {
       linux = state;
       const spec = { scratch: [dir], runtimes: [join(PATHS.root, 'Tools')], memGb: 1 };
       handOver(spec);
-      const inner = nested ? ['bwrap', ...bwrapArgs(spec, dir, true), '/usr/bin/true'] : ['/usr/bin/true'];
+      const inner = nested ? [BWRAP, ...bwrapArgs(spec, dir, true), '/usr/bin/true'] : ['/usr/bin/true'];
       const argv = linuxArgv(state, spec, inner, dir, !nested);
       const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 20_000 });
       failure = result.error?.message ?? result.stderr.trim().slice(-500);
@@ -203,7 +206,7 @@ function linuxArgv(state: LinuxReady, spec: SandboxSpec, argv: string[], cwd: st
   const cpu = Math.max(1, Math.floor(cpus().length / 2)) * 100;
   const scope = state.scope ? [...state.scope, '-p', `MemoryMax=${Math.ceil(spec.memGb * 1024)}M`, '-p', 'MemorySwapMax=0', '-p', `CPUQuota=${cpu}%`, '-p', 'TasksMax=1024', '--'] : [];
   const drop = state.uid !== undefined ? ['setpriv', `--reuid=${state.uid}`, `--regid=${state.gid}`, '--clear-groups', '--inh-caps=-all', '--bounding-set=-all', '--no-new-privs', '--'] : [];
-  return [...scope, ...drop, 'bwrap', ...bwrapArgs(spec, cwd, disableUserns), ...argv];
+  return [...scope, ...drop, BWRAP, ...bwrapArgs(spec, cwd, disableUserns), ...argv];
 }
 
 // A box: one outer bubblewrap owns the shared loopback network and runs this
@@ -272,7 +275,7 @@ function linuxBox(state: LinuxReady, spec: SandboxSpec, isolation: Isolation): B
         void gone.then(() => resolve(null));
       });
       void exited.then(() => { if (errors.trim()) output.write(`\n[sandbox] ${errors.trim().slice(-400)}\n`); });
-      const inner = ['bwrap', ...bwrapArgs({ ...spec, scratch: [scratch] }, cwd, true, true), ...cmd];
+      const inner = [BWRAP, ...bwrapArgs({ ...spec, scratch: [scratch] }, cwd, true, true), ...cmd];
       helper.stdin!.write(`${JSON.stringify({ argv: inner, fd: 4 + i })}\n`);
       // Linux processes of one box share its PID namespace: ending one ends the box.
       return { output, stdin: null, exited, outputsSafe: () => helper.exitCode !== null || helper.signalCode !== null, kill: end };
@@ -312,6 +315,16 @@ function macProfile(spec: SandboxSpec): string {
 
 const WIN_HELPER = fileURLToPath(new URL('./testsandbox.py', import.meta.url));
 
+function winContainer(name: string, remove = false): void {
+  const result = spawnSync('python', ['-I', WIN_HELPER, remove ? '--delete-container' : '--create-container', name],
+    { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  if (result.status !== 0) {
+    const detail = result.error?.message ?? result.stderr.trim().slice(-1000);
+    if (remove) console.warn(`Test container cleanup failed: ${detail}`);
+    else throw new Error(`Test container creation failed: ${detail}`);
+  }
+}
+
 /** All processes of one box share the AppContainer (and so its loopback);
     each one's scratch is granted to a capability only its token carries. */
 function winArgv(spec: SandboxSpec, argv: string[], cwd: string, name: string, control?: string): string[] {
@@ -326,14 +339,18 @@ let probeFailure = '';
 
 function probe(kind: 'darwin' | 'win32'): boolean {
   const dir = scratchDir('probe');
+  const name = `Spawnpoint.Probe.${randomUUID()}`;
+  let created = false;
   try {
+    if (kind === 'win32') { winContainer(name); created = true; }
     const spec = { scratch: [dir], runtimes: [], memGb: 1 };
     const argv = kind === 'darwin' ? ['/usr/bin/sandbox-exec', '-p', macProfile(spec), '/usr/bin/true']
-      : winArgv(spec, [`${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\cmd.exe`, '/d', '/c', 'exit 0'], dir, 'spawnpointProbe');
+      : winArgv(spec, [`${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\cmd.exe`, '/d', '/c', 'exit 0'], dir, name);
     const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 60_000, windowsHide: true });
     probeFailure = result.error?.message ?? (result.stderr.trim() || `probe exited ${result.status}`).slice(-1000);
     return result.status === 0;
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } catch (error) { probeFailure = String(error); return false; }
+  finally { if (created) winContainer(name, true); rmSync(dir, { recursive: true, force: true }); }
 }
 
 /** What this host's sandbox confines. Probed once per display choice. */
@@ -387,13 +404,17 @@ function sandboxed(spec: SandboxSpec, argv: string[], cwd: string, capability: s
 }
 
 /** Spawn one sandboxed process with piped stdin and merged output. */
-export function sandboxSpawn(spec: SandboxSpec, argv: string[], cwd: string, capability = `Spawnpoint.Test.${randomUUID()}`): BoxProcess & { isolation: Isolation; child: ChildProcess } {
+export function sandboxSpawn(spec: SandboxSpec, argv: string[], cwd: string, capability?: string): BoxProcess & { isolation: Isolation; child: ChildProcess } {
   // Never grant the candidate this sibling directory. Only the trusted
   // Windows helper can acknowledge that its Job has no remaining processes.
   const control = IS_WIN ? scratchDir('control') : undefined;
+  const name = capability ?? `Spawnpoint.Test.${randomUUID()}`;
+  let ownsContainer = false;
   let s: ReturnType<typeof sandboxed>;
-  try { s = sandboxed(spec, argv, cwd, capability, control); }
-  catch (error) { if (control) rmSync(control, { recursive: true, force: true }); throw error; }
+  try {
+    s = sandboxed(spec, argv, cwd, name, control);
+    if (IS_WIN && !capability) { winContainer(name); ownsContainer = true; }
+  } catch (error) { if (control) rmSync(control, { recursive: true, force: true }); throw error; }
   const child = spawn(s.argv[0], s.argv.slice(1), { cwd, env: s.env, stdio: ['pipe', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
   const output = new PassThrough();
   child.stdout!.on('data', (d: Buffer) => output.write(d));
@@ -404,6 +425,7 @@ export function sandboxSpawn(spec: SandboxSpec, argv: string[], cwd: string, cap
     child.once('close', (code) => {
       closed = true;
       safe = !control || existsSync(join(control, 'closed'));
+      if (ownsContainer && safe) winContainer(name, true);
       if (control) rmSync(control, { recursive: true, force: true });
       resolve(code);
     });
@@ -425,6 +447,7 @@ export function sandboxBox(spec: SandboxSpec): Box {
   }
   const procs: BoxProcess[] = [];
   const name = `Spawnpoint.Test.${randomUUID()}`;
+  if (IS_WIN) winContainer(name);
   return {
     isolation,
     run(argv, cwd, scratch) {
@@ -434,7 +457,13 @@ export function sandboxBox(spec: SandboxSpec): Box {
       procs.push(p);
       return p;
     },
-    async close() { for (const p of procs) p.kill(); await Promise.all(procs.map((p) => p.exited)); return procs.every((p) => p.outputsSafe()); },
+    async close() {
+      for (const p of procs) p.kill();
+      await Promise.all(procs.map((p) => p.exited));
+      const safe = procs.every((p) => p.outputsSafe());
+      if (IS_WIN && safe) winContainer(name, true);
+      return safe;
+    },
   };
 }
 

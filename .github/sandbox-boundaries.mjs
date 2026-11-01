@@ -41,6 +41,7 @@ const outsideAlias = process.platform === 'darwin' ? `/System/Volumes/Data${outs
 const args = (mode, peer = siblingFile) => [java, '-Xmx128m', '-XX:-UsePerfData', '-cp', '.', 'BoundaryProbe', mode, outside, panel, homeFile, peer, String(hostPort), String(ownPort), runtimeFile, outsideAlias];
 const spec = (scratch) => ({ scratch, runtimes: [runtimeHome(java), compiled], memGb: 1, ports: [ownPort], bindPorts: [ownPort] });
 const denied = ['outside-read', 'outside-alias-read', 'outside-write', 'panel-list', 'home-read', 'sibling-read', 'sibling-write', 'runtime-write', 'runtime-hardlink-write', 'host-port', 'environment', 'symlink-read'];
+if (process.platform === 'linux') denied.push('namespace-create');
 function verify(output) {
   for (const name of denied) assert.match(output, new RegExp(`^ACCESS ${name} DENIED$`, 'm'), output);
   for (const name of ['scratch-write', 'own-port', 'runtime-read']) assert.match(output, new RegExp(`^ACCESS ${name} ALLOWED$`, 'm'), output);

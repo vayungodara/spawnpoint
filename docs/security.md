@@ -67,6 +67,9 @@ Only an allowlisted environment reaches a test process.
   Xvfb runs inside the sandbox; the host desktop is never shared.
   Layouts and home directories inside its OS mounts, such as `/usr`, refuse
   testing rather than expose their files through a read-only mount.
+  Ubuntu can require an administrator-installed
+  [dedicated AppArmor profile](cli.md#enable-candidate-tests-on-ubuntu).
+  Spawnpoint does not disable host AppArmor restrictions automatically.
 - **macOS:** a default-deny `sandbox-exec` profile permits OS libraries,
   declared runtimes and the process's scratch tree. Writes stay in scratch.
   TCP binds and connections have separate loopback-port allowlists. The
@@ -81,6 +84,9 @@ Only an allowlisted environment reaches a test process.
   and process count. The helper confirms that all descendants have exited
   before the panel accepts outputs. Without confirmation, the test is
   inconclusive and its scratch is retained.
+  Windows requires a temporary AppContainer profile. Its filesystem tree
+  denies the container access; candidate writes use only the granted scratch.
+  The parent removes the profile after confirmed shutdown.
 
 If the OS sandbox cannot start, the report says **Not isolated** and the
 test does not execute candidate code. `SPAWNPOINT_UNSANDBOXED=1` also refuses

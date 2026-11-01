@@ -78,6 +78,12 @@ public class BoundaryProbe {
         check("environment", () -> {
             if (System.getenv("SPAWNPOINT_BOUNDARY_CANARY") == null) throw new Exception("absent");
         });
+        if (System.getProperty("os.name").equals("Linux")) check("namespace-create", () -> {
+            String bwrap = Files.isExecutable(Path.of("/usr/local/libexec/spawnpoint-bwrap"))
+                ? "/usr/local/libexec/spawnpoint-bwrap" : "/usr/bin/bwrap";
+            Process child = new ProcessBuilder(bwrap, "--ro-bind", "/", "/", "--unshare-user", "/usr/bin/true").start();
+            if (child.waitFor() != 0) throw new Exception("namespace refused");
+        });
         check("scratch-write", () -> {
             Files.writeString(Path.of("control.txt"), "scratch control");
             Files.createDirectories(Path.of("outputs", "nested"));

@@ -123,6 +123,8 @@ userenv.CreateAppContainerProfile.argtypes = [w.LPCWSTR, w.LPCWSTR, w.LPCWSTR, c
 userenv.CreateAppContainerProfile.restype = c.c_long
 userenv.DeriveAppContainerSidFromAppContainerName.argtypes = [w.LPCWSTR, c.POINTER(c.c_void_p)]
 userenv.DeriveAppContainerSidFromAppContainerName.restype = c.c_long
+userenv.DeleteAppContainerProfile.argtypes = [w.LPCWSTR]
+userenv.GetAppContainerFolderPath.argtypes = [w.LPCWSTR, c.POINTER(w.LPWSTR)]
 advapi.ConvertSidToStringSidW.argtypes = [c.c_void_p, c.POINTER(w.LPWSTR)]
 kbase = c.WinDLL("kernelbase", use_last_error=True)
 kbase.DeriveCapabilitySidsFromName.argtypes = [w.LPCWSTR, c.POINTER(c.POINTER(c.c_void_p)), c.POINTER(w.DWORD), c.POINTER(c.POINTER(c.c_void_p)), c.POINTER(w.DWORD)]
@@ -155,8 +157,8 @@ def check(ok):
 
 def container(name):
     sid = c.c_void_p()
-    # A fresh lowbox identity per test, with no persistent profile/cache and
-    # no loopback exemptions. Related processes use the same package SID.
+    # The trusted parent creates the profile before launch and deletes it
+    # only after every process sharing this identity has stopped.
     hr = userenv.DeriveAppContainerSidFromAppContainerName(name, c.byref(sid))
     if hr:
         raise OSError("AppContainer profile failed (0x%08x)" % (hr & 0xFFFFFFFF))
@@ -167,6 +169,26 @@ def sid_text(sid):
     text = w.LPWSTR()
     check(advapi.ConvertSidToStringSidW(sid, c.byref(text)))
     return text.value
+
+
+def create_container(name):
+    sid = c.c_void_p()
+    hr = userenv.CreateAppContainerProfile(name, name, name, None, 0, c.byref(sid))
+    if hr:
+        raise OSError("AppContainer creation failed (0x%08x)" % (hr & 0xFFFFFFFF))
+    try:
+        folder = w.LPWSTR()
+        hr = userenv.GetAppContainerFolderPath(sid_text(sid), c.byref(folder))
+        if hr:
+            raise OSError("AppContainer folder lookup failed (0x%08x)" % (hr & 0xFFFFFFFF))
+        # Windows requires a registered profile to create the lowbox, but
+        # candidate files belong only in per-process scratch. In particular,
+        # two processes sharing loopback must not share a writable profile.
+        subprocess.run(["icacls", folder.value, "/deny", "*" + sid_text(sid) + ":(OI)(CI)F", "/Q"],
+                       check=True, stdout=subprocess.DEVNULL)
+    except BaseException:
+        userenv.DeleteAppContainerProfile(name)
+        raise
 
 
 def capability(name):
@@ -343,4 +365,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:2] == ["--create-container"]:
+        create_container(sys.argv[2])
+    elif sys.argv[1:2] == ["--delete-container"]:
+        hr = userenv.DeleteAppContainerProfile(sys.argv[2])
+        if hr:
+            raise OSError("AppContainer deletion failed (0x%08x)" % (hr & 0xFFFFFFFF))
+    else:
+        main()

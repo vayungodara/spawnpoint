@@ -66,6 +66,26 @@ It refuses to print a token into a pipe or an agent log, and
 `spawnpoint api` cannot create tokens. `SPAWNPOINT_TOKEN` is sent only to
 `SPAWNPOINT_URL`.
 
+## Enable candidate tests on Ubuntu
+
+Install `bubblewrap` on the panel host. If the test reports that bubblewrap
+cannot nest a sandbox, Ubuntu's AppArmor policy may be blocking the join's
+per-process namespaces. An administrator can install a dedicated copy with
+its own policy, leaving the distribution's `bwrap` policy unchanged:
+
+```sh
+sudo apt-get install bubblewrap
+sudo install -D -m 0755 /usr/bin/bwrap /usr/local/libexec/spawnpoint-bwrap
+echo 'profile spawnpoint-bwrap /usr/local/libexec/spawnpoint-bwrap flags=(unconfined) { userns, }' | sudo tee /etc/apparmor.d/spawnpoint-bwrap
+sudo apparmor_parser -r /etc/apparmor.d/spawnpoint-bwrap
+```
+
+Restart the panel and retest. This policy lets the dedicated executable
+create namespaces; bubblewrap still confines the candidate and prevents it
+from creating further namespaces. Refresh the executable copy after
+bubblewrap package updates. If no administrator permits this setup, tests
+remain inconclusive and do not execute candidate code.
+
 ## Commands
 
 `spawnpoint help` lists every command, and `spawnpoint help COMMAND` shows
