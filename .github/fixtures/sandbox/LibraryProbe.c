@@ -44,9 +44,14 @@ int wmain(int argc, wchar_t **argv) {
         CloseHandle(token);
     }
     HKEY registry;
-    HRESULT location = GetAppContainerRegistryLocation(KEY_CREATE_SUB_KEY, &registry);
+    HRESULT location = GetAppContainerRegistryLocation(KEY_READ | KEY_CREATE_SUB_KEY, &registry);
     printf("PROFILE registry-open=%ld\n", location);
     if (SUCCEEDED(location)) {
+        typedef LONG (WINAPI *QueryKey)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+        QueryKey query = (QueryKey)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryKey");
+        BYTE name[8192]; ULONG size;
+        if (query && query(registry, 3, name, sizeof(name), &size) == 0)
+            wprintf(L"PROFILE registry-path=%.*ls\n", *(ULONG *)name / 2, (wchar_t *)(name + sizeof(ULONG)));
         HKEY probe;
         LSTATUS result = RegCreateKeyExW(registry, L"SpawnpointBoundaryProbe", 0, NULL, 0, KEY_SET_VALUE, NULL, &probe, NULL);
         printf("PROFILE registry-create=%ld\n", result);
