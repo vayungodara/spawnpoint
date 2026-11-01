@@ -126,6 +126,12 @@ userenv.DeriveAppContainerSidFromAppContainerName.restype = c.c_long
 userenv.DeleteAppContainerProfile.argtypes = [w.LPCWSTR]
 userenv.GetAppContainerFolderPath.argtypes = [w.LPCWSTR, c.POINTER(w.LPWSTR)]
 advapi.ConvertSidToStringSidW.argtypes = [c.c_void_p, c.POINTER(w.LPWSTR)]
+advapi.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)]
+advapi.GetTokenInformation.argtypes = [w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.POINTER(w.DWORD)]
+advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [w.LPCWSTR, w.DWORD, c.POINTER(c.c_void_p), c.c_void_p]
+advapi.GetSecurityDescriptorDacl.argtypes = [c.c_void_p, c.POINTER(w.BOOL), c.POINTER(c.c_void_p), c.POINTER(w.BOOL)]
+advapi.SetNamedSecurityInfoW.argtypes = [w.LPWSTR, c.c_int, w.DWORD, c.c_void_p, c.c_void_p, c.c_void_p, c.c_void_p]
+k32.LocalFree.argtypes = [c.c_void_p]
 kbase = c.WinDLL("kernelbase", use_last_error=True)
 kbase.DeriveCapabilitySidsFromName.argtypes = [w.LPCWSTR, c.POINTER(c.POINTER(c.c_void_p)), c.POINTER(w.DWORD), c.POINTER(c.POINTER(c.c_void_p)), c.POINTER(w.DWORD)]
 k32.CreateJobObjectW.restype = w.HANDLE
@@ -184,8 +190,33 @@ def create_container(name):
         # Windows requires a registered profile to create the lowbox, but
         # candidate files belong only in per-process scratch. In particular,
         # two processes sharing loopback must not share a writable profile.
-        subprocess.run(["icacls", folder.value, "/deny", "*" + sid_text(sid) + ":(OI)(CI)F", "/Q"],
-                       check=True, stdout=subprocess.DEVNULL)
+        # Replace the DACL: icacls /deny leaves Windows' conditional grant
+        # intact. Protect the package parent too, not just its AC subfolder.
+        profile = os.path.dirname(folder.value)
+        if os.path.basename(profile).casefold() != name.casefold():
+            raise ValueError("unexpected AppContainer profile directory")
+        token, size = w.HANDLE(), w.DWORD()
+        check(advapi.OpenProcessToken(w.HANDLE(-1), 8, c.byref(token)))
+        try:
+            advapi.GetTokenInformation(token, 1, None, 0, c.byref(size))  # TokenUser
+            user = (c.c_byte * size.value)()
+            check(advapi.GetTokenInformation(token, 1, user, size, c.byref(size)))
+            owner = sid_text(SIDATTR.from_buffer(user).Sid)
+        finally:
+            k32.CloseHandle(token)
+        descriptor, acl = c.c_void_p(), c.c_void_p()
+        present, defaulted = w.BOOL(), w.BOOL()
+        check(advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + owner + ")", 1, c.byref(descriptor), None))
+        try:
+            check(advapi.GetSecurityDescriptorDacl(descriptor, c.byref(present), c.byref(acl), c.byref(defaulted)))
+            for path, dirs, files in os.walk(profile):
+                for target in [path, *(os.path.join(path, f) for f in files)]:
+                    error = advapi.SetNamedSecurityInfoW(target, 1, 0x80000004, None, None, acl, None)
+                    if error:
+                        raise c.WinError(error)
+        finally:
+            k32.LocalFree(descriptor)
     except BaseException:
         userenv.DeleteAppContainerProfile(name)
         raise

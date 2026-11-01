@@ -1,13 +1,31 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <sddl.h>
+#include <aclapi.h>
+#include <userenv.h>
 #include <stdio.h>
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "userenv.lib")
 
 /* Temporary diagnostic: public runtime libraries only, no user data. */
 int wmain(int argc, wchar_t **argv) {
     if (argc != 2) return 2;
+    if (!wcscmp(argv[1], L"--device-acl")) {
+        wchar_t *names[] = { L"\\\\?\\GLOBALROOT\\Device\\Afd", L"\\\\?\\GLOBALROOT\\Device\\Nsi" };
+        for (unsigned i = 0; i < 2; i++) {
+            PSECURITY_DESCRIPTOR descriptor = NULL;
+            DWORD error = GetNamedSecurityInfoW(names[i], SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &descriptor);
+            wprintf(L"DEVICE %ls error=%lu\n", names[i], error);
+            LPWSTR text;
+            if (!error && ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &text, NULL)) {
+                wprintf(L"ACL %ls\n", text);
+                LocalFree(text);
+            }
+            if (descriptor) LocalFree(descriptor);
+        }
+        return 0;
+    }
     HANDLE token;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
         DWORD value = 0, size = 0;
@@ -24,6 +42,21 @@ int wmain(int argc, wchar_t **argv) {
             }
         }
         CloseHandle(token);
+    }
+    HKEY registry;
+    HRESULT location = GetAppContainerRegistryLocation(KEY_CREATE_SUB_KEY, &registry);
+    printf("PROFILE registry-open=%ld\n", location);
+    if (SUCCEEDED(location)) {
+        HKEY probe;
+        LSTATUS result = RegCreateKeyExW(registry, L"SpawnpointBoundaryProbe", 0, NULL, 0, KEY_SET_VALUE, NULL, &probe, NULL);
+        printf("PROFILE registry-create=%ld\n", result);
+        if (!result) {
+            DWORD value = 42;
+            printf("PROFILE registry-write=%ld\n", RegSetValueExW(probe, L"control", 0, REG_DWORD, (BYTE *)&value, sizeof(value)));
+            RegCloseKey(probe);
+            RegDeleteKeyW(registry, L"SpawnpointBoundaryProbe");
+        }
+        RegCloseKey(registry);
     }
     WSADATA data;
     printf("WSAStartup=%d\n", WSAStartup(MAKEWORD(2, 2), &data));

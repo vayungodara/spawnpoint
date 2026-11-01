@@ -78,6 +78,7 @@ try {
     const diagnostic = scratchDir('library-probe');
     const executable = join(diagnostic, 'LibraryProbe.exe');
     copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-library-probe.exe'), executable);
+    console.log(execFileSync(executable, ['--device-acl'], { encoding: 'utf8' }));
     const child = sandboxSpawn(spec([diagnostic]), [executable, dirname(java)], diagnostic);
     console.log(await collect(child));
   }
