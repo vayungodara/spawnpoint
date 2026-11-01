@@ -48,10 +48,12 @@ panel. A read token sees no file contents except plain files in `logs/` and
 `server.properties`.
 
 Only a read token is safe to give to a machine you do not trust. Control
-and approve tokens can run code on the host, because mods are code: a
-staged mod runs in the boot test as the panel's user. Treat them like shell
-access. The scopes stop mistakes and keep approvals deliberate. They do not
-contain an adversary.
+and approve tokens remain host-trusted. Staged server, client and join tests
+require an OS sandbox and refuse to run when isolation is unavailable.
+That boundary does not restrict approved live servers or repair existing
+supervisor permissions. Treat control and approve tokens like shell access.
+See [candidate test isolation](security.md#candidate-test-isolation) for
+the platform boundaries and limits.
 
 The panel stores only a SHA-256 hash of each token and shows it once.
 Revoking it takes effect on the next request. An approval made with a token

@@ -24,9 +24,18 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
       - run: npm ci
       - run: npm run build -w server
       - run: npm run build -w web
+      - run: node .github/sandbox-boundaries.mjs
+      - if: runner.os == 'Linux'
+        run: sudo env "PATH=$PATH" "JAVA_HOME=$JAVA_HOME" node .github/sandbox-boundaries.mjs
       # smoke 1: the built server must load its entrypoint cleanly
       - run: node -e "import('./server/dist/config.js').then(m => { if (!m.PATHS) throw new Error('config failed'); console.log('config loads on', process.platform); })"
       # smoke 2: boot the real panel on an empty layout and hit /api/health

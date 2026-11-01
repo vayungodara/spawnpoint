@@ -49,6 +49,50 @@ access. See [cli.md](cli.md).
 The supervisor's runtime directory contains a private IPC capability. Never
 publish it. See [the supervisor docs](supervisor.md).
 
+## Candidate test isolation
+
+The server boot, client boot and join tests run candidate code in disposable
+scratch directories. The join's server and client have separate writable
+trees. Launcher caches are copied before execution. Shared tools and sealed
+inputs are not writable by a test. The panel refuses linked output paths,
+including links in intermediate directories, before reading generated files.
+Only an allowlisted environment reaches a test process.
+
+- **Linux:** bubblewrap creates private filesystem, process and network
+  namespaces. A join pair shares its own loopback network, not the host's.
+  A root panel drops to `spawnpoint-sandbox` through `setpriv` first.
+  An unprivileged panel uses its own UID inside the namespaces. A systemd
+  scope limits memory, CPU and tasks when the account has a working service
+  manager. Otherwise the report states that only Java's heap is bounded.
+  Xvfb runs inside the sandbox; the host desktop is never shared.
+  Layouts and home directories inside its OS mounts, such as `/usr`, refuse
+  testing rather than expose their files through a read-only mount.
+- **macOS:** a default-deny `sandbox-exec` profile permits OS libraries,
+  declared runtimes and the process's scratch tree. Writes stay in scratch.
+  TCP binds and connections have separate loopback-port allowlists. The
+  process retains the panel's UID, but root panels refuse testing. Forks
+  are denied; HeadlessMC loads the client in the confined JVM. Java's heap
+  does not limit native memory. Packs incompatible with stubbed graphics
+  receive an inconclusive client result, not a rendering pass.
+- **Windows:** a low-privilege AppContainer ignores ambient All Application
+  Packages grants and has no network capabilities or host-loopback exemption.
+  A join pair shares a fresh container identity, with separate scratch
+  capabilities. A Job Object per launched process tree limits memory, CPU
+  and process count. The helper confirms that all descendants have exited
+  before the panel accepts outputs. Without confirmation, the test is
+  inconclusive and its scratch is retained.
+
+If the OS sandbox cannot start, the report says **Not isolated** and the
+test does not execute candidate code. `SPAWNPOINT_UNSANDBOXED=1` also refuses
+execution; it does not enable an unsafe fallback. A confinement check does
+not prove that Minecraft booted, rendered or completed its join handshake.
+Those checks have separate results.
+
+This boundary covers candidate tests, not live Minecraft servers. The
+supervisor still owns trusted registry, installation and publication state.
+Its existing account permissions must not be treated as a sandbox for live
+mods. Control and approve tokens therefore remain host-trusted.
+
 ## Chat genie
 
 The genie is optional and off until you connect an AI account in Settings →

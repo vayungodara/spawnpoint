@@ -291,24 +291,27 @@ cfg = json.loads(p.read_text('utf-8'))
 full = {'DO_NOT_CHANGE_IT': 2, 'modpackHost': True, 'syncedFiles': ['/mods/*.jar'], 'bindPort': -1, 'nagMessage': 'caf\u00e9 \u4e16\u754c', **cfg}
 out = json.dumps(full, indent=2, ensure_ascii=False).encode('utf-8')
 p.write_bytes(out)
-pathlib.Path(sys.argv[2]).write_bytes(out)
+# The test runs sandboxed and may write only its copy: report the bytes instead.
+print('BOOTED ' + out.hex(), flush=True)
 print(sys.argv[1], flush=True)
 for line in sys.stdin:
     if line.strip() == 'stop': break
 `;
   const provisioned = JSON.stringify({ DO_NOT_CHANGE_IT: 2, modpackName: '', modpackHost: true, generateModpackOnStart: true, selfUpdater: false, acceptedLoaders: ['fabric'] }, null, 2);
   const probe = async (kind, config, opts) => {
-    const source = join(dir, `first-boot-${kind}-${checks}`), output = join(dir, `first-boot-${kind}-${checks}.json`);
+    const source = join(dir, `first-boot-${kind}-${checks}`), id = randomUUID();
     mkdirSync(join(source, 'automodpack'), { recursive: true });
     if (kind === 'forge') mkdirSync(join(source, 'libraries/net/minecraftforge/forge/1.20.1-47.4.28'), { recursive: true });
     writeFileSync(join(source, 'fabric.jar'), 'stand-in');
     writeFileSync(join(source, 'loader.py'), loader);
     writeFileSync(join(source, 'automodpack/automodpack-server.json'), config);
     const lock = { files: ['fabric.jar', 'loader.py', 'automodpack/automodpack-server.json'].map((path) => ({ path, location: 'server' })),
-      arguments: ['loader.py', kind === 'forge' ? 'Done (1.0s)! For help, type "help"' : 'You need to agree to the EULA in order to run the server.', output],
+      arguments: ['loader.py', kind === 'forge' ? 'Done (1.0s)! For help, type "help"' : 'You need to agree to the EULA in order to run the server.'],
       java: { executable: python } };
-    const verdict = await dryBootInner(randomUUID(), [], source, lock, opts.autoModpackDefaults);
-    return { verdict, booted: existsSync(output) ? readFileSync(output, 'utf8') : undefined };
+    const verdict = await dryBootInner(id, [], source, lock, opts.autoModpackDefaults);
+    const log = readFileSync(join(process.env.SPAWNPOINT_ROOT, 'Spawnpoint', 'data', 'preflight', `${id}.log`), 'utf8');
+    const hex = /^BOOTED ([0-9a-f]+)\r?$/m.exec(log)?.[1];
+    return { verdict, booted: hex ? Buffer.from(hex, 'hex').toString('utf8') : undefined };
   };
   const fabric = await probe('fabric', provisioned, { autoModpackDefaults: true });
   check('a first boot that fills in AutoModpack defaults is returned byte for byte', fabric.verdict.result === 'passed'
