@@ -661,6 +661,21 @@ try {
   check('an unrecognised extras root file is a readable error, not a guess', (() => { try { candidateSet(crafty.id, { files: [] }); return false; } catch (e) { return /not a pack-owned path: extra\/servers\.dat/.test(String(e)); } })());
   rmSync(join(main, 'servers.dat'));
 
+  // Real EMF/ETF jars carry raw control characters inside fabric.mod.json
+  // strings. Fabric Loader's reader accepts them; the solver must too, and
+  // unreadable metadata is a pack error naming the jar.
+  const rawJar = (id, json) => { const zip = new AdmZip(); zip.addFile('fabric.mod.json', Buffer.from(json)); return zip.toBuffer(); };
+  const lenient = fixture([]);
+  writeFileSync(join(lenient.dir, 'mods', 'entity_model_features-fixture.jar'), rawJar('emf_fixture',
+    `{"schemaVersion":1,"id":"emf_fixture","version":"3.2.4","description":"line one\tline two\u0001 it\\'s","depends":{}}`));
+  const lenientSolve = await solveCandidate(lenient.id);
+  check('a fabric.mod.json with raw control characters and \\\' solves like Fabric Loader reads it', !lenientSolve.error);
+  writeFileSync(join(lenient.dir, 'mods', 'broken-fixture.jar'), rawJar('broken', '{"schemaVersion":1,"id":"broken","version":"1" /* comment */}'));
+  const brokenSolve = await solveCandidate(lenient.id);
+  check('unreadable metadata is a pack error naming the jar, not an inconclusive solve', brokenSolve.error?.includes('broken-fixture.jar')
+    && !brokenSolve.error.includes('Solver inconclusive'));
+  discard(lenient.id);
+
   // Real extraction, controlled archives: normalize a macOS bundle and retain
   // the ordinary flat layout. No fake Java process is presented as a boot.
   for (const feature of [21, 25]) {

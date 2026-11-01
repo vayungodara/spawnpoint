@@ -88,6 +88,9 @@ async function isRunning(uuid: string): Promise<boolean> {
   return craftyApi.getStats(uuid).then((s) => s.running, () => false);
 }
 
+/** A pack jar whose metadata cannot be read: the owner's to fix, not a solver verdict. */
+class UnreadableJar extends Error {}
+
 /** What is installed or already staged, by project id. A ledger entry whose
     file is gone does not count. */
 function knownProjects(serverUuid: string): Map<string, LedgerEntry> {
@@ -273,8 +276,11 @@ export function solveCandidate(
       const pinsByPath = new Map<string, Pin>();
       const idsByPath = new Map<string, string[]>();
       for (const row of [...before.live, ...before.rows]) {
-        const meta = det.loader === 'fabric' ? readFabricJar(readFileSync(row.path))
-          : readForgeJar(readFileSync(row.path), basename(row.path), { mc: det.mc, forge: loader, loader: det.loader });
+        let meta: ReturnType<typeof readFabricJar> | ReturnType<typeof readForgeJar>;
+        try {
+          meta = det.loader === 'fabric' ? readFabricJar(readFileSync(row.path))
+            : readForgeJar(readFileSync(row.path), basename(row.path), { mc: det.mc, forge: loader, loader: det.loader });
+        } catch (e) { throw new UnreadableJar(`Spawnpoint could not read the mod metadata in ${basename(row.path)}: ${(e as Error).message}`); }
         const ids = modIds(meta);
         idsByPath.set(row.path, ids);
         const entry = row.entry;
@@ -375,7 +381,7 @@ export function solveCandidate(
       } });
     } catch (error) {
       return { ...result, solver: { status: 'inconclusive', reason: (error as Error).message },
-        error: `Nothing was installed. Solver inconclusive: ${(error as Error).message}`, manualDownloads: catalog?.manualDownloads };
+        error: error instanceof UnreadableJar ? `Nothing was installed. ${error.message}` : `Nothing was installed. Solver inconclusive: ${(error as Error).message}`, manualDownloads: catalog?.manualDownloads };
     }
   });
 }

@@ -99,6 +99,24 @@ export function matchesFabric(version: string, predicate: Predicate): boolean {
   return alternatives.some((terms) => terms.every((test) => test(version)));
 }
 
+/** Parse metadata as Fabric Loader's strict Gson reader does. It accepts a
+    raw control characters inside strings and the escapes \\' and
+    backslash-newline, which JSON.parse rejects. Comments, other lenient-only
+    syntax and a BOM stay errors: Loader's rewind path refuses a BOM. */
+export function parseLoaderJson(text: string): unknown {
+  let out = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (!quoted) { if (c === '"') quoted = true; out += c; continue; }
+    if (c === '"') { quoted = false; out += c; }
+    else if (c === '\\') {
+      const next = text[++i];
+      out += next === "'" ? "'" : next === '\n' ? '\\n' : `\\${next ?? ''}`;
+    } else out += c < ' ' ? `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}` : c;
+  }
+  return JSON.parse(out);
+}
+
 /** Loader-specific boundary. Reads only metadata; never runs code from a jar. */
 export function readFabricJar(buffer: Buffer, maxDepth = 32): JarMeta {
   let expanded = 0;
@@ -111,7 +129,9 @@ export function readFabricJar(buffer: Buffer, maxDepth = 32): JarMeta {
       throw new Error('Jar has no fabric.mod.json');
     }
     if (json.header.size > 1024 * 1024) throw new Error('Fabric metadata exceeds one MiB');
-    const raw = JSON.parse(json.getData().toString('utf8')) as Record<string, unknown>;
+    let raw: Record<string, unknown>;
+    try { raw = parseLoaderJson(json.getData().toString('utf8')) as Record<string, unknown>; }
+    catch (e) { throw new Error(`fabric.mod.json is not valid JSON (${(e as Error).message})`); }
     if (raw.schemaVersion !== 1) throw new Error('Only Fabric metadata schema 1 is supported');
     if (typeof raw.id !== 'string' || typeof raw.version !== 'string') throw new Error('Fabric metadata needs id and version');
     if (raw.provides !== undefined && (!Array.isArray(raw.provides) || !raw.provides.every((id) => typeof id === 'string'))) {

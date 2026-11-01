@@ -2,6 +2,7 @@ import AdmZip from 'adm-zip';
 import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { PATHS } from '../config.js';
+import { parseLoaderJson } from './solver/fabric.js';
 
 // Static dependency scan. Every mod jar declares its mandatory dependencies
 // (fabric.mod.json `depends`, mods.toml `[[dependencies]]`). Reading them
@@ -23,7 +24,7 @@ const BUILTIN = new Set([
 ]);
 
 function parseFabricJson(buf: Buffer): { ids: string[]; deps: string[]; nested: string[]; serverOnly: boolean } {
-  const j = JSON.parse(buf.toString('utf8')) as {
+  const j = parseLoaderJson(buf.toString('utf8')) as {
     id?: string; provides?: string[]; depends?: Record<string, unknown>; jars?: { file: string }[]; environment?: string;
   };
   return {

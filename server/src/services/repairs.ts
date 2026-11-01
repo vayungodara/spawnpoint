@@ -13,7 +13,7 @@ import { ledgerEntries } from './ledger.js';
 import { writeFileAtomic } from './platform.js';
 import { ensureJdk } from './temurin.js';
 import { NetworkCatalog } from './solver/catalog.js';
-import { compareFabricVersions, readFabricJar } from './solver/fabric.js';
+import { compareFabricVersions, parseLoaderJson, readFabricJar } from './solver/fabric.js';
 import { compareMavenVersions } from './solver/maven.js';
 import { readForgeJar } from './solver/forge.js';
 import { modIds } from './solver/index.js';
@@ -80,7 +80,7 @@ export async function repairCandidate(id: string, log: (m: string) => void, fail
       }
       const fabric = zip.getEntry('fabric.mod.json');
       const jarjar = zip.getEntry('META-INF/jarjar/metadata.json');
-      const nested = fabric ? (JSON.parse(fabric.getData().toString()) as { jars?: { file: string }[] }).jars?.map((j) => j.file) ?? []
+      const nested = fabric ? (parseLoaderJson(fabric.getData().toString()) as { jars?: { file: string }[] }).jars?.map((j) => j.file) ?? []
         : jarjar ? (JSON.parse(jarjar.getData().toString()) as { jars: { path: string }[] }).jars.map((j) => j.path) : [];
       for (const path of nested) {
         const entry = zip.getEntry(path);
@@ -136,7 +136,7 @@ export async function repairCandidate(id: string, log: (m: string) => void, fail
     try { if (modIds(native(buf, row.file)).length) continue; } catch { /* inspect foreign top-level metadata */ }
     const foreign = ['fabric.mod.json', 'META-INF/mods.toml', 'META-INF/neoforge.mods.toml'].find((p) => zip.getEntry(p));
     if (!foreign) continue;
-    const own = foreign === 'fabric.mod.json' ? [JSON.parse(zip.getEntry(foreign)!.getData().toString()).id as string]
+    const own = foreign === 'fabric.mod.json' ? [(parseLoaderJson(zip.getEntry(foreign)!.getData().toString()) as { id: string }).id]
       : ((parse(zip.getEntry(foreign)!.getData().toString()).mods ?? []) as { modId: string }[]).map((m) => m.modId);
     if (!own.length) continue;
     const source = (await identifyByHashes([row.sha1]))[row.sha1];
