@@ -100,6 +100,10 @@ function ApiTokens() {
         For the <span className="font-mono">spawnpoint</span> CLI on another machine or a coding agent. Give each one the lowest scope it needs.
         On this machine the CLI uses the admin token by itself.
       </p>
+      <p className="text-text-dim text-xs mb-3 max-w-[70ch]">
+        On default Linux and macOS installs, live mods run as the panel’s user to keep installation sudo-free. They can access that user’s panel data and home.
+        Clean additions can go live automatically after tests pass. Replacements, removals, config edits and test gaps need owner approval; an approve token delegates that decision. Tests do not make a mod trustworthy.
+      </p>
       {fresh && (
         <div className="field px-3 py-3 mb-3 space-y-2" role="status">
           <p className="text-sm font-bold">Token for {fresh.name}. Copy it now: it is not shown again.</p>

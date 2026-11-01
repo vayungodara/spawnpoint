@@ -49,13 +49,23 @@ must start with no runtime directory so fresh service-account permissions are ex
 The sandbox boundary harness requires a JDK and actual OS confinement. Install
 bubblewrap on Linux and run the harness both normally and through `sudo`.
 It uses disposable path and environment canaries, never real secrets. A
-missing sandbox is a test failure, not a skip. Also run real confined Fabric
+missing Linux or macOS sandbox is a test failure, not a skip. Also run real confined Fabric
 server, client and AutoModpack join tests; the permission harness does not
 prove Minecraft compatibility. macOS's offline launcher can fail on graphics
 mods even when confinement passes. A full-pack Mac client and join remain
 unproven until those exact tests complete; do not report a reduced pack or
 stubbed renderer as equivalent. Windows CI boundary checks likewise do not
 replace a real confined Minecraft client run.
+Windows LPAC currently rejects its own TCP sockets with WSAEACCES 10013.
+The approved Windows fallback is an honest Not isolated report and refusal
+to execute candidates. CI verifies both standalone and paired launch refusal
+when the availability probe fails; this is not a Windows confinement pass.
+If the probe succeeds, the complete boundary harness must pass, including
+the own-port control and denied host/peer access. Do not remove LPAC silently.
+Default Linux/macOS installs keep the same-UID supervisor and need no sudo.
+The optional admin-assisted hardened install and permission repair are design
+only (docs/security.md); they are not prerequisites for this release and must
+not be described as implemented.
 
 ## Disposable orb integration environment
 

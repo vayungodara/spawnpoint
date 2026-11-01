@@ -77,8 +77,16 @@ Only an allowlisted environment reaches a test process.
   are denied; HeadlessMC loads the client in the confined JVM. Java's heap
   does not limit native memory. Packs incompatible with stubbed graphics
   receive an inconclusive client result, not a rendering pass.
-- **Windows:** a low-privilege AppContainer ignores ambient All Application
-  Packages grants and has no network capabilities or host-loopback exemption.
+- **Windows:** the tested host reports **Not isolated** and refuses candidate
+  execution. The low-privilege AppContainer (LPAC) prototype rejects its own
+  TCP sockets with error 10013. The panel probes the confined runtime and a
+  private loopback connection before running candidates. If that probe fails,
+  server, client and join tests remain inconclusive without loading any mods.
+  Windows CI verifies this refusal, not successful Minecraft confinement.
+  There is no fallback to ordinary AppContainer: it inherits ambient file
+  grants that LPAC excludes.
+  When the probe succeeds, LPAC ignores ambient All Application Packages
+  grants and has no network capabilities or host-loopback exemption.
   A join pair shares a fresh container identity, with separate scratch
   capabilities. A Job Object per launched process tree limits memory, CPU
   and process count. The helper confirms that all descendants have exited
@@ -94,10 +102,46 @@ execution; it does not enable an unsafe fallback. A confinement check does
 not prove that Minecraft booted, rendered or completed its join handshake.
 Those checks have separate results.
 
-This boundary covers candidate tests, not live Minecraft servers. The
-supervisor still owns trusted registry, installation and publication state.
-Its existing account permissions must not be treated as a sandbox for live
-mods. Control and approve tokens therefore remain host-trusted.
+## Live server permissions
+
+On default Linux and macOS installs, live server mods run as the panel's
+user. The supervisor keeps that UID so the one-line install needs no sudo
+or separate service account. Live mods can read and modify the user's panel
+data, settings and home. Candidate test isolation does not protect these
+files after a mod goes live.
+
+Replacements, removals, config edits and inconclusive tests require the
+owner's approval of the tested revision. Clean additions can go live
+automatically after passing tests. An approve token delegates owner consent,
+including acceptance of test gaps. A passed test is not a security audit
+of the mod. Control and approve tokens therefore remain host-trusted.
+
+Windows uses a separate supervisor service account, but its existing grants
+still allow writes across the layout, including panel code and data. This
+release does not change live-server accounts or repair those permissions.
+
+## Optional hardened install (design only)
+
+The hardened install is not implemented and has no install command yet.
+It would be opt-in and require administrator assistance; the default
+Linux and macOS install would remain sudo-free.
+
+The trusted coordinator would retain the registry, install and publication
+journals, IPC credentials and lifetime fences. It would launch JVMs through
+a separate restricted executor account. That account could write only the
+server directories it runs. Panel code, data, settings, tools, service
+definitions and fence parent directories would remain unwritable by it.
+Control files inside server trees would also need protection or relocation
+before the coordinator could trust them. Restricting the current supervisor's
+ACLs alone would break its trusted-state writes without separating mod code.
+
+Opt-in migration would stop and drain every live JVM, preserve server bytes
+and fence identities, revoke old recursive grants, and install the account
+and service boundary. Updates to a hardened install would repeat the repair
+idempotently and refuse starts on failure. Acceptance must exercise real
+live mods and restart, import, publication, Undo and recovery paths on each
+OS, including an upgrade from today's broad-permission layout. None of
+those hardened-install guarantees apply to this release.
 
 ## Chat genie
 

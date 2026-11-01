@@ -311,23 +311,39 @@ for line in sys.stdin:
       arguments: ['loader.py', kind === 'forge' ? 'Done (1.0s)! For help, type "help"' : 'You need to agree to the EULA in order to run the server.'],
       java: { executable: interpreter } };
     const verdict = await dryBootInner(id, [], source, lock, opts.autoModpackDefaults);
-    const log = readFileSync(join(process.env.SPAWNPOINT_ROOT, 'Spawnpoint', 'data', 'preflight', `${id}.log`), 'utf8');
+    const logPath = join(process.env.SPAWNPOINT_ROOT, 'Spawnpoint', 'data', 'preflight', `${id}.log`);
+    if (process.platform === 'win32' && verdict.checks?.serverIsolation?.result === 'inconclusive') {
+      assert.equal(verdict.result, 'unverified');
+      assert.match(verdict.detail, /Not isolated: the AppContainer runtime and private-loopback probe failed/);
+      assert.equal(existsSync(logPath), false, 'refusal must happen before launching the loader');
+      assert.equal(verdict.autoModpackConfig, undefined);
+      assert.equal(readFileSync(join(source, 'automodpack/automodpack-server.json'), 'utf8'), config);
+      return { verdict, refused: true };
+    }
+    const log = readFileSync(logPath, 'utf8');
     if (verdict.result !== 'passed') console.error('First-boot probe failed:', verdict, log.slice(-4000));
     const hex = /^BOOTED ([0-9a-f]+)\r?$/m.exec(log)?.[1];
     return { verdict, booted: hex ? Buffer.from(hex, 'hex').toString('utf8') : undefined };
   };
   const fabric = await probe('fabric', provisioned, { autoModpackDefaults: true });
-  check('a first boot that fills in AutoModpack defaults is returned byte for byte', fabric.verdict.result === 'passed'
-    && fabric.booted !== provisioned && fabric.verdict.autoModpackConfig === fabric.booted);
-  const settled = await probe('fabric', fabric.booted, { autoModpackDefaults: true });
-  check('a config AutoModpack has already completed is left alone', settled.verdict.result === 'passed' && settled.booted === fabric.booted
-    && settled.verdict.autoModpackConfig === undefined);
-  const candidateTest = await probe('fabric', provisioned, {});
-  check('ordinary candidate tests do not propose AutoModpack config writes', candidateTest.verdict.result === 'passed' && candidateTest.verdict.autoModpackConfig === undefined);
-  const forge = await probe('forge', provisioned, { autoModpackDefaults: true });
-  check('the Forge test copy runs with hosting off, yet the owner\'s publication settings are what is kept', forge.verdict.result === 'passed'
-    && JSON.parse(forge.booted).modpackHost === false
-    && assert.deepStrictEqual(JSON.parse(forge.verdict.autoModpackConfig), { ...JSON.parse(forge.booted), modpackHost: true, generateModpackOnStart: true, selfUpdater: false }) === undefined);
+  if (fabric.refused) {
+    check('Windows first-boot probe refuses unavailable confinement without changing configs', fabric.refused);
+    check('Windows candidate probe also refuses execution', (await probe('fabric', provisioned, {})).refused);
+    check('Windows Forge probe also refuses execution', (await probe('forge', provisioned, { autoModpackDefaults: true })).refused);
+    console.log('First-boot config capture NOT RUN: Windows sandbox unavailable');
+  } else {
+    check('a first boot that fills in AutoModpack defaults is returned byte for byte', fabric.verdict.result === 'passed'
+      && fabric.booted !== provisioned && fabric.verdict.autoModpackConfig === fabric.booted);
+    const settled = await probe('fabric', fabric.booted, { autoModpackDefaults: true });
+    check('a config AutoModpack has already completed is left alone', settled.verdict.result === 'passed' && settled.booted === fabric.booted
+      && settled.verdict.autoModpackConfig === undefined);
+    const candidateTest = await probe('fabric', provisioned, {});
+    check('ordinary candidate tests do not propose AutoModpack config writes', candidateTest.verdict.result === 'passed' && candidateTest.verdict.autoModpackConfig === undefined);
+    const forge = await probe('forge', provisioned, { autoModpackDefaults: true });
+    check('the Forge test copy runs with hosting off, yet the owner\'s publication settings are what is kept', forge.verdict.result === 'passed'
+      && JSON.parse(forge.booted).modpackHost === false
+      && assert.deepStrictEqual(JSON.parse(forge.verdict.autoModpackConfig), { ...JSON.parse(forge.booted), modpackHost: true, generateModpackOnStart: true, selfUpdater: false }) === undefined);
+  }
   console.log(`${checks} revision guard checks passed on ${process.platform}`);
 } finally {
   if (running) { const closed = once(running, 'close'); running.stdin.end(); await closed; }

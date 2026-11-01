@@ -63,6 +63,14 @@ async function ready(child, marker) {
 }
 let box;
 try {
+  await checkBoundaries();
+} finally {
+  await box?.close();
+  host.close();
+  rmSync(root, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true });
+}
+
+async function checkBoundaries() {
   const control = prepare('control');
   // Spawn asynchronously: the host listener must be serviced during the probe.
   const { spawn } = await import('node:child_process');
@@ -73,17 +81,27 @@ try {
   console.log('PASS: unconfined controls can reach the disposable files, environment and listener');
   for (const file of [outside, homeFile, siblingFile, runtimeFile]) writeFileSync(file, 'boundary control');
   const iso = sandboxIsolation(); console.log(JSON.stringify(iso));
+  if (iso.result !== 'passed') {
+    assert.throws(() => sandboxSpawn(spec([control]), args('solo'), control), /Not isolated/);
+    assert.throws(() => sandboxBox(spec([control, sibling])), /Not isolated/);
+    console.log('Verified refusal to execute after the sandbox availability probe failed');
+    if (process.platform === 'win32') {
+      assert.match(iso.detail, /Not isolated: the AppContainer runtime and private-loopback probe failed/);
+      console.log('PASS: Windows unavailable-sandbox refusal; candidate confinement and Minecraft boots NOT RUN');
+      return;
+    }
+  }
   assert.equal(iso.result, 'passed', 'this host must exercise real confinement, not skip it');
   if (process.platform === 'win32') {
-    // Temporary loader diagnostic: only inspect public runtime libraries.
-    const diagnostic = scratchDir('library-probe');
-    const executable = join(diagnostic, 'LibraryProbe.exe');
-    copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-library-probe.exe'), executable);
-    console.log(execFileSync(executable, ['--device-acl'], { encoding: 'utf8' }));
-    const child = sandboxSpawn(spec([diagnostic]), [executable, dirname(java)], diagnostic);
+    const diagnostic = scratchDir('native-probe');
+    const executable = join(diagnostic, 'BoundaryNative.exe');
+    copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-boundary-native.exe'), executable);
+    const child = sandboxSpawn(spec([diagnostic]), [executable, '--profile'], diagnostic);
     const native = await collect(child);
     console.log(native);
-    assert.match(native, /PROFILE registry-open=-2147024891/, 'private registry storage must deny access');
+    for (const name of ['profile-registry-read', 'profile-registry-write', 'profile-registry-create']) {
+      assert.match(native, new RegExp(`^ACCESS ${name} DENIED$`, 'm'));
+    }
   }
   const solo = prepare('solo');
   const soloProcess = sandboxSpawn(spec([solo]), args(process.platform === 'win32' ? 'profile' : 'solo'), solo);
@@ -108,8 +126,6 @@ print(folder.value)
 `, name], { encoding: 'utf8' }).trim();
     writeFileSync(join(profile, 'boundary-canary.txt'), 'profile control');
     assert.equal(readFileSync(join(profile, 'boundary-canary.txt'), 'utf8'), 'profile control');
-    console.log(execFileSync('icacls', [profile], { encoding: 'utf8' }));
-    console.log(execFileSync('icacls', [join(profile, 'boundary-canary.txt')], { encoding: 'utf8' }));
     writeFileSync(join(solo, 'profile-target.txt'), profile);
   }
   const output = await collect(soloProcess);
@@ -154,8 +170,8 @@ print(folder.value)
 
   const server = prepare('pair-server'), client = prepare('pair-client');
   writeFileSync(join(server, 'canary.txt'), 'server control');
-  const nativeProbe = join(client, 'LibraryProbe.exe');
-  if (process.platform === 'win32') copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-library-probe.exe'), nativeProbe);
+  const nativeProbe = join(client, 'BoundaryNative.exe');
+  if (process.platform === 'win32') copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-boundary-native.exe'), nativeProbe);
   box = sandboxBox(spec([server, client]));
   const listener = box.run([java, '-Xmx128m', '-cp', '.', 'BoundaryProbe', 'listen', String(ownPort)], server, server);
   const listening = await ready(listener, 'READY');
@@ -193,8 +209,4 @@ print(folder.value)
     console.log('PASS: layouts inside ambient OS mounts refuse execution');
   }
   console.log(`sandbox boundaries passed on ${process.platform}`);
-} finally {
-  await box?.close();
-  host.close();
-  rmSync(root, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true });
 }

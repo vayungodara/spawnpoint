@@ -348,9 +348,24 @@ function probe(kind: 'darwin' | 'win32'): boolean {
   let created = false;
   try {
     if (kind === 'win32') { winContainer(name); created = true; }
-    const spec = { scratch: [dir], runtimes: [], memGb: 1 };
+    const python = kind === 'win32' ? runtimeExecutable('python') : '';
+    const runtime = dirname(python);
+    if (kind === 'win32' && (!isAbsolute(python) || [resolved(PATHS.data), resolved(homedir())].some((p) => inside(p, runtime)))) {
+      throw new Error('Python must have its own runtime directory for the sandbox probe');
+    }
+    const spec = { scratch: [dir], runtimes: kind === 'win32' ? [runtime] : [], memGb: 1 };
     const argv = kind === 'darwin' ? ['/usr/bin/sandbox-exec', '-p', macProfile(spec), '/usr/bin/true']
-      : winArgv(spec, [`${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\cmd.exe`, '/d', '/c', 'exit 0'], dir, name);
+      : winArgv(spec, [python, '-I', '-S', '-c', [
+        'import socket',
+        'with socket.socket() as listener, socket.socket() as client:',
+        ' listener.settimeout(3); client.settimeout(3)',
+        ' listener.bind(("127.0.0.1", 0)); listener.listen(1)',
+        ' client.connect(listener.getsockname())',
+        ' peer, _ = listener.accept()',
+        ' with peer:',
+        '  peer.settimeout(3); peer.sendall(b"control")',
+        '  with client.makefile("rb") as incoming: assert incoming.read(7) == b"control"',
+      ].join('\n')], dir, name);
     const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 60_000, windowsHide: true });
     probeFailure = result.error?.message ?? (result.stderr.trim() || `probe exited ${result.status}`).slice(-1000);
     return result.status === 0;
@@ -383,7 +398,7 @@ export function sandboxIsolation(spec: Pick<SandboxSpec, 'display'> = {}): Isola
     iso = !existsSync('/usr/bin/sandbox-exec') || !probe('darwin') ? unisolated('sandbox-exec is unavailable')
       : { result: 'passed', renderer: 'none', detail: 'Ran under a default-deny macOS sandbox: only OS libraries, declared runtimes and this process\'s scratch were readable; writes stayed in scratch and network access was limited to test loopback ports. Memory was bounded only by the Java heap' };
   } else if (IS_WIN) {
-    iso = !probe('win32') ? unisolated(`an AppContainer could not be created: ${probeFailure}`)
+    iso = !probe('win32') ? unisolated(`the AppContainer runtime and private-loopback probe failed: ${probeFailure}`)
       : { result: 'passed', renderer: 'none', detail: 'Ran in a low-privilege AppContainer: files only where explicitly granted and no network beyond its own loopback; a Job Object capped memory, CPU and processes' };
   } else iso = unisolated(`no sandbox for ${process.platform}`);
   probed.set(key, iso);
