@@ -80,7 +80,9 @@ try {
     copyFileSync(join(process.env.RUNNER_TEMP, 'spawnpoint-library-probe.exe'), executable);
     console.log(execFileSync(executable, ['--device-acl'], { encoding: 'utf8' }));
     const child = sandboxSpawn(spec([diagnostic]), [executable, dirname(java)], diagnostic);
-    console.log(await collect(child));
+    const native = await collect(child);
+    console.log(native);
+    assert.match(native, /PROFILE registry-open=-2147024891/, 'private registry storage must deny access');
   }
   const solo = prepare('solo');
   const soloProcess = sandboxSpawn(spec([solo]), args(process.platform === 'win32' ? 'profile' : 'solo'), solo);

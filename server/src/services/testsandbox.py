@@ -131,6 +131,7 @@ advapi.GetTokenInformation.argtypes = [w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c
 advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [w.LPCWSTR, w.DWORD, c.POINTER(c.c_void_p), c.c_void_p]
 advapi.GetSecurityDescriptorDacl.argtypes = [c.c_void_p, c.POINTER(w.BOOL), c.POINTER(c.c_void_p), c.POINTER(w.BOOL)]
 advapi.SetNamedSecurityInfoW.argtypes = [w.LPWSTR, c.c_int, w.DWORD, c.c_void_p, c.c_void_p, c.c_void_p, c.c_void_p]
+advapi.SetSecurityInfo.argtypes = [w.HANDLE, c.c_int, w.DWORD, c.c_void_p, c.c_void_p, c.c_void_p, c.c_void_p]
 advapi.GetNamedSecurityInfoW.argtypes = [w.LPWSTR, c.c_int, w.DWORD, c.c_void_p, c.c_void_p, c.POINTER(c.c_void_p), c.c_void_p, c.POINTER(c.c_void_p)]
 advapi.SetEntriesInAclW.argtypes = [w.ULONG, c.c_void_p, c.c_void_p, c.POINTER(c.c_void_p)]
 k32.LocalFree.argtypes = [c.c_void_p]
@@ -219,6 +220,33 @@ def create_container(name):
                         raise c.WinError(error)
         finally:
             k32.LocalFree(descriptor)
+        # AppContainers also have private registry storage. Do not leave a
+        # second writable shared tree outside per-process scratch.
+        import winreg
+        registry = os.path.join(r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage", name.lower())
+        check(advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            "D:P(A;CI;KA;;;SY)(A;CI;KA;;;" + owner + ")", 1, c.byref(descriptor), None))
+        try:
+            check(advapi.GetSecurityDescriptorDacl(descriptor, c.byref(present), c.byref(acl), c.byref(defaulted)))
+            def protect(key):
+                index = 0
+                while True:
+                    try:
+                        child = winreg.EnumKey(key, index)
+                    except OSError as error:
+                        if error.winerror == 259:
+                            break
+                        raise
+                    with winreg.OpenKey(key, child, 0, winreg.KEY_READ | 0x40000) as subkey:
+                        protect(subkey)
+                    index += 1
+                error = advapi.SetSecurityInfo(int(key), 4, 0x80000004, None, None, acl, None)
+                if error:
+                    raise c.WinError(error)
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, registry, 0, winreg.KEY_READ | 0x40000) as key:
+                protect(key)
+        finally:
+            k32.LocalFree(descriptor)
     except BaseException:
         userenv.DeleteAppContainerProfile(name)
         raise
@@ -233,10 +261,9 @@ def capability(name):
 
 
 def enable_loopback():
-    """Administrator setup: permit querying NSI, without network capabilities.
+    """Administrator setup: open socket devices, without network capabilities.
 
-    LPAC does not inherit NSI's All Application Packages device grant. Its
-    socket provider needs this execute/query right even for private loopback.
+    The LPAC token needs device access even for private loopback sockets.
     WFP still denies non-container traffic: no Internet/LAN capability or
     host-loopback exemption is installed. Device ACLs reset on reboot.
     """
@@ -245,22 +272,23 @@ def enable_loopback():
                     ("kind", w.DWORD), ("sid", c.c_void_p)]
     class ACCESS(c.Structure):
         _fields_ = [("mask", w.DWORD), ("mode", w.DWORD), ("inheritance", w.DWORD), ("trustee", TRUSTEE)]
-    path = r"\\?\GLOBALROOT\Device\Nsi"
-    descriptor, old, updated = c.c_void_p(), c.c_void_p(), c.c_void_p()
-    error = advapi.GetNamedSecurityInfoW(path, 1, 4, None, None, c.byref(old), None, c.byref(descriptor))
-    if error:
-        raise c.WinError(error)
-    try:
-        entry = ACCESS(0x1200A0, 1, 0, TRUSTEE(None, 0, 0, 0, capability("spawnpointLoopback")))
-        error = advapi.SetEntriesInAclW(1, c.byref(entry), old, c.byref(updated))
-        if not error:
-            error = advapi.SetNamedSecurityInfoW(path, 1, 4, None, None, updated, None)
+    for device, mask in [("Nsi", 0x1200A0), ("Afd", 0x1201BF)]:
+        path = os.path.join(r"\\?\GLOBALROOT\Device", device)
+        descriptor, old, updated = c.c_void_p(), c.c_void_p(), c.c_void_p()
+        error = advapi.GetNamedSecurityInfoW(path, 1, 4, None, None, c.byref(old), None, c.byref(descriptor))
         if error:
             raise c.WinError(error)
-    finally:
-        if updated:
-            k32.LocalFree(updated)
-        k32.LocalFree(descriptor)
+        try:
+            entry = ACCESS(mask, 1, 0, TRUSTEE(None, 0, 0, 0, capability("spawnpointLoopback")))
+            error = advapi.SetEntriesInAclW(1, c.byref(entry), old, c.byref(updated))
+            if not error:
+                error = advapi.SetNamedSecurityInfoW(path, 1, 4, None, None, updated, None)
+            if error:
+                raise c.WinError(error)
+        finally:
+            if updated:
+                k32.LocalFree(updated)
+            k32.LocalFree(descriptor)
 
 
 def grant(path, sid, rights):
