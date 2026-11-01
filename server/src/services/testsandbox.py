@@ -314,7 +314,6 @@ def main():
     info.lpAttributeList = c.cast(attrs, c.c_void_p)
     child_env = dict(os.environ)
     child_env["PATH"] = os.path.join(os.environ["SystemRoot"], "System32")
-    child_env["_JAVA_LAUNCHER_DEBUG"] = "1"
     env = "".join(k + "=" + v + "\0" for k, v in sorted(child_env.items())) + "\0"
     proc = PROCINFO()
     command = c.create_unicode_buffer(subprocess.list2cmdline(argv))

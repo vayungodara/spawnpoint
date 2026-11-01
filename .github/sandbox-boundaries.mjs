@@ -104,6 +104,8 @@ print(folder.value)
 `, name], { encoding: 'utf8' }).trim();
     writeFileSync(join(profile, 'boundary-canary.txt'), 'profile control');
     assert.equal(readFileSync(join(profile, 'boundary-canary.txt'), 'utf8'), 'profile control');
+    console.log(execFileSync('icacls', [profile], { encoding: 'utf8' }));
+    console.log(execFileSync('icacls', [join(profile, 'boundary-canary.txt')], { encoding: 'utf8' }));
     writeFileSync(join(solo, 'profile-target.txt'), profile);
   }
   const output = await collect(soloProcess);

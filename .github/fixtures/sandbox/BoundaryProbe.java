@@ -73,7 +73,11 @@ public class BoundaryProbe {
         }
         Path outside = Path.of(args[1]), panel = Path.of(args[2]), home = Path.of(args[3]), sibling = Path.of(args[4]);
         int hostPort = Integer.parseInt(args[5]), ownPort = Integer.parseInt(args[6]);
-        ServerSocket own = !args[0].equals("pair") ? listen(ownPort) : null;
+        ServerSocket own = null;
+        if (!args[0].equals("pair")) {
+            try { own = listen(ownPort); }
+            catch (Exception e) { System.out.println("LISTENER FAILED " + e); }
+        }
         check("outside-read", () -> Files.readAllBytes(outside));
         check("outside-alias-read", () -> Files.readAllBytes(Path.of(args[8])));
         check("outside-write", () -> Files.writeString(outside, "changed", StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING));

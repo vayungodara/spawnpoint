@@ -1,9 +1,39 @@
+#include <winsock2.h>
 #include <windows.h>
+#include <sddl.h>
 #include <stdio.h>
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 /* Temporary diagnostic: public runtime libraries only, no user data. */
 int wmain(int argc, wchar_t **argv) {
     if (argc != 2) return 2;
+    HANDLE token;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        DWORD value = 0, size = 0;
+        GetTokenInformation(token, TokenIsAppContainer, &value, sizeof(value), &size);
+        printf("TOKEN AppContainer=%lu\n", value);
+        GetTokenInformation(token, TokenIsLessPrivilegedAppContainer, &value, sizeof(value), &size);
+        printf("TOKEN LPAC=%lu\n", value);
+        BYTE buffer[1024];
+        if (GetTokenInformation(token, TokenAppContainerSid, buffer, sizeof(buffer), &size)) {
+            LPWSTR text;
+            if (ConvertSidToStringSidW(((TOKEN_APPCONTAINER_INFORMATION *)buffer)->TokenAppContainer, &text)) {
+                wprintf(L"TOKEN SID=%ls\n", text);
+                LocalFree(text);
+            }
+        }
+        CloseHandle(token);
+    }
+    WSADATA data;
+    printf("WSAStartup=%d\n", WSAStartup(MAKEWORD(2, 2), &data));
+    SOCKET ipv4 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    printf("SOCKET IPv4=%d error=%d\n", ipv4 != INVALID_SOCKET, WSAGetLastError());
+    if (ipv4 != INVALID_SOCKET) closesocket(ipv4);
+    SOCKET ipv6 = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    printf("SOCKET IPv6=%d error=%d\n", ipv6 != INVALID_SOCKET, WSAGetLastError());
+    if (ipv6 != INVALID_SOCKET) closesocket(ipv6);
+    WSACleanup();
     SetDllDirectoryW(argv[1]);
     const wchar_t *names[] = { L"vcruntime140.dll", L"vcruntime140_1.dll", L"msvcp140.dll",
         L"ADVAPI32.dll", L"USER32.dll", L"WINMM.dll", L"WS2_32.dll", L"VERSION.dll", L"dbghelp.dll", L"POWRPROF.dll", L"server\\jvm.dll" };
