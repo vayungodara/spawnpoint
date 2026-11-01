@@ -141,8 +141,8 @@ export async function dryBootInner(serverId: string, jars: string[], dir: string
   const java = runtimeExecutable(selectedJava);
 
   const isolation = sandboxIsolation();
-  if (isolation.result !== 'passed') return { result: 'unverified', detail: isolation.detail, checks: { serverIsolation: isolation } };
-  // The candidate's code runs here, confined to this copy (testsandbox.ts).
+  if (isolation.result !== 'passed' && !isolation.unconfined) return { result: 'unverified', detail: isolation.detail, checks: { serverIsolation: isolation } };
+  // Copy inputs even when Windows must run without confinement.
   const sandbox = scratchDir(`preflight-${serverId}`);
   mkdirSync(join(sandbox, 'mods'), { recursive: true });
   linkLoader(dir, sandbox, lock);

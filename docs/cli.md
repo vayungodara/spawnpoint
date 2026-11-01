@@ -48,12 +48,15 @@ panel. A read token sees no file contents except plain files in `logs/` and
 `server.properties`.
 
 Only a read token is safe to give to a machine you do not trust. Control
-and approve tokens remain host-trusted. Staged server, client and join tests
-require an OS sandbox and refuse to run when isolation is unavailable.
+and approve tokens remain host-trusted. Linux and macOS candidate tests
+require an OS sandbox. On Windows, unavailable LPAC confinement falls back
+to tests as the panel's user, labelled **Not isolated**. A staged mod can
+then access panel data, the user's home, other servers and the host network
+before approval. Only stage trusted mods and give control tokens to trusted agents.
 On the default Linux and macOS install, live server mods run as the panel's
 user. This keeps the one-line install usable without sudo or a separate
 service account. Live mods can access that user's panel data and home.
-Replacements, removals, config edits and inconclusive tests require owner
+Replacements, removals, config edits and inconclusive functional tests require owner
 approval of the tested revision. Clean additions can go live automatically
 after passing tests. An approve token delegates owner consent, including
 acceptance of test gaps. Testing does not make a mod trustworthy.

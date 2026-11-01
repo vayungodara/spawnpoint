@@ -89,7 +89,7 @@ function Proof({ checks }: { checks?: Record<string, Check> }) {
   return (
     <ul className="text-xs space-y-1 mt-2">
       {Object.entries(checks).map(([k, v]) => (
-        <li key={k}><b className={v.result === 'passed' ? 'text-emerald' : v.result === 'failed' ? 'text-redstone' : 'text-gold'}>{CHECK_LABELS[k] ?? k}: {v.result}</b> · {v.detail}</li>
+        <li key={k}><b className={v.result === 'passed' ? 'text-emerald' : v.result === 'failed' ? 'text-redstone' : 'text-gold'}>{CHECK_LABELS[k] ?? k}: {k.endsWith('Isolation') && v.result !== 'passed' ? 'Not isolated' : v.result}</b> · {v.detail}</li>
       ))}
     </ul>
   )

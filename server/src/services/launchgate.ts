@@ -309,7 +309,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   const blocker = clientGateBlocker(serverId);
   if (blocker) return { result: 'unverified', detail: blocker };
   const isolation = gateIsolation();
-  if (isolation.result !== 'passed') return { result: 'unverified', detail: isolation.detail, checks: { clientIsolation: isolation } };
+  if (isolation.result !== 'passed' && !isolation.unconfined) return { result: 'unverified', detail: isolation.detail, checks: { clientIsolation: isolation } };
   const sourceDir = set.sourceDir ?? serverDir(serverId);
   const det = detect(sourceDir, serverId) as Detection & { mc: string; loader: 'fabric' | 'forge' | 'neoforge' };
   await waitForQuiet(onStatus);
