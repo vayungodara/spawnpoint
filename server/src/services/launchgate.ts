@@ -8,7 +8,7 @@ import { serverDir, javaFor } from './servers.js';
 import { detect, loaderVersion, type Detection } from './detect.js';
 import { killTree, IS_WIN, KILLABLE_SPAWN_OPTS, linkOrCopy, withMemory } from './platform.js';
 import { loaderLaunchArgs, lockedLaunchArgs, linkLoader, excerptOf, classVersionFailure, type Verdict } from './preflight.js';
-import { packFiles, type RevisionLock } from './revisions.js';
+import { CLIENT_ROOT_FILES, packFiles, type RevisionLock } from './revisions.js';
 
 // CLIENT BOOT TEST. AutoModpack mirrors whatever the server has; it does not
 // check that the result runs. So before a change reaches friends, this boots
@@ -465,6 +465,25 @@ interface AutoModpackFile {
   forceCopy: boolean;
 }
 
+/** The first tested client input whose bytes differ, or null. Minecraft
+    rewrites its root settings files (options.txt) in the game directory
+    while it runs, so after launch only their pristine pack copy is compared.
+    Every other input stays byte-exact in both places. */
+export function clientInputDifference(rundir: string, expected: Map<string, string>, launched: boolean): string | null {
+  try {
+    const pack = join(rundir, 'automodpack', 'modpacks', 'spawnpoint-join-test');
+    for (const [rel, sha512] of expected) {
+      const copies = [...launched && CLIENT_ROOT_FILES.includes(rel) ? [] : [join(rundir, rel)], join(pack, rel)].filter(existsSync);
+      if (!copies.length || copies.some((p) => createHash('sha512').update(readFileSync(p)).digest('hex') !== sha512)) return rel;
+    }
+    for (const base of [rundir, pack]) for (const file of packFiles(join(base, 'mods')).filter((f) => f.endsWith('.jar'))) {
+      const rel = relative(base, file).replace(/\\/g, '/');
+      if (!expected.has(rel)) return `${rel} (unexpected executable input)`;
+    }
+    return null;
+  } catch { return 'unreadable client inventory'; }
+}
+
 /** Reproduce publishPack's shelf overlay, keeping hand-placed extras and the
     server's own sync/exclusion rules. Do not manufacture the host pack from
     the tested list: that would hide files AutoModpack serves but we never booted. */
@@ -560,20 +579,7 @@ async function joinTest(
 
   const started = Date.now();
   const expected = new Map(set.files.map((f) => [f.rel, createHash('sha512').update(readFileSync(f.src)).digest('hex')]));
-  const inventoryDifference = (): string | null => {
-    try {
-      const pack = join(rundir, 'automodpack', 'modpacks', 'spawnpoint-join-test');
-      for (const [rel, sha512] of expected) {
-        const copies = [join(rundir, rel), join(pack, rel)].filter(existsSync);
-        if (!copies.length || copies.some((p) => createHash('sha512').update(readFileSync(p)).digest('hex') !== sha512)) return rel;
-      }
-      for (const base of [rundir, pack]) for (const file of packFiles(join(base, 'mods')).filter((f) => f.endsWith('.jar'))) {
-        const rel = relative(base, file).replace(/\\/g, '/');
-        if (!expected.has(rel)) return `${rel} (unexpected executable input)`;
-      }
-      return null;
-    } catch { return 'unreadable client inventory'; }
-  };
+  const inventoryDifference = (launched: boolean): string | null => clientInputDifference(rundir, expected, launched);
   return await new Promise<Verdict>((resolve) => {
     let srvOut = '';
     let cliOut = '';
@@ -639,7 +645,7 @@ async function joinTest(
         dwell = setTimeout(() => {
           const k = kicked();
           const handshake = cliOut.indexOf('Modpack address:');
-          const altered = tested ? inventoryDifference() : null;
+          const altered = tested ? inventoryDifference(true) : null;
           if (tested && (handshake < 0 || !/Modpack .* is up to date!/.test(cliOut.slice(handshake)) || !/has installed whole modpack/.test(srvOut))) {
             finish({ result: 'unverified', detail: 'the player joined, but AutoModpack did not verify its client handshake' });
           } else if (altered) {
@@ -705,6 +711,16 @@ async function joinTest(
           return;
         }
       }
+      // The client boot test already ran in this game directory and rewrote
+      // its settings; start the join from the tested bytes a friend receives.
+      try {
+        if (tested) for (const rel of CLIENT_ROOT_FILES) {
+          const pristine = join(rundir, 'automodpack', 'modpacks', 'spawnpoint-join-test', rel);
+          if (expected.has(rel) && existsSync(pristine)) copyFileSync(pristine, join(rundir, rel));
+        }
+      } catch (e) { finish({ result: 'unverified', detail: `the join client's settings could not be reset: ${String(e).slice(0, 120)}` }); return; }
+      const before = tested && inventoryDifference(false);
+      if (before) { finish({ result: 'failed', detail: `AutoModpack client inputs differ from the tested bytes before launch: ${before}` }); return; }
       const argv = clientArgv(`--quickPlayMultiplayer 127.0.0.1:${JOIN_PORT}`, version, big ? '-Xmx4G' : '-Xmx2G');
       cli = spawn(argv[0], argv.slice(1), { cwd: HMC, stdio: ['ignore', 'pipe', 'pipe'], ...KILLABLE_SPAWN_OPTS });
       cli.on('error', (e) => finish({ result: 'unverified', detail: `the join client could not start: ${e.message}` }));
