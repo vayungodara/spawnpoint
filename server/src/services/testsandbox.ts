@@ -145,6 +145,7 @@ function linuxState(): NonNullable<typeof linux> {
   const base: LinuxReady = { ok: true, uid: acct?.uid, gid: acct?.gid, account: acct ? `the ${ACCOUNT} account` : 'the panel\'s account', scope: null };
   // Probe with a real scratch tree and the Tools mount: a root panel's
   // account must be able to reach both through the layout's directories.
+  let failure = '';
   const works = (state: LinuxReady, nested: boolean): boolean => {
     const dir = scratchDir('probe');
     try {
@@ -153,11 +154,13 @@ function linuxState(): NonNullable<typeof linux> {
       handOver(spec);
       const inner = nested ? ['bwrap', ...bwrapArgs(spec, dir, true), '/usr/bin/true'] : ['/usr/bin/true'];
       const argv = linuxArgv(state, spec, inner, dir, !nested);
-      return spawnSync(argv[0], argv.slice(1), { stdio: 'ignore', timeout: 20_000 }).status === 0;
+      const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 20_000 });
+      failure = result.error?.message ?? result.stderr.trim().slice(-500);
+      return result.status === 0;
     } catch { return false; } finally { linux = undefined; rmSync(dir, { recursive: true, force: true }); }
   };
-  if (!works(base, false)) return (linux = { ok: false, why: 'bubblewrap could not create user and network namespaces here' });
-  if (!works(base, true)) return (linux = { ok: false, why: 'bubblewrap could not nest a sandbox for each test process' });
+  if (!works(base, false)) return (linux = { ok: false, why: `bubblewrap could not create user and network namespaces here: ${failure}` });
+  if (!works(base, true)) return (linux = { ok: false, why: `bubblewrap could not nest a sandbox for each test process: ${failure}` });
   const scope = { ...base, scope: ROOT_PANEL ? ['systemd-run', '--scope', '--quiet', '--collect'] : ['systemd-run', '--user', '--scope', '--quiet', '--collect'] };
   return (linux = works(scope, false) ? scope : base);
 }
@@ -316,6 +319,7 @@ function winArgv(spec: SandboxSpec, argv: string[], cwd: string, name: string, c
 // ---- common ------------------------------------------------------------------
 
 const probed = new Map<string, Isolation>();
+let probeFailure = '';
 
 function probe(kind: 'darwin' | 'win32'): boolean {
   const dir = scratchDir('probe');
@@ -323,7 +327,9 @@ function probe(kind: 'darwin' | 'win32'): boolean {
     const spec = { scratch: [dir], runtimes: [], memGb: 1 };
     const argv = kind === 'darwin' ? ['/usr/bin/sandbox-exec', '-p', macProfile(spec), '/usr/bin/true']
       : winArgv(spec, [`${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\cmd.exe`, '/d', '/c', 'exit 0'], dir, 'spawnpointProbe');
-    return spawnSync(argv[0], argv.slice(1), { stdio: 'ignore', timeout: 60_000, windowsHide: true }).status === 0;
+    const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+    probeFailure = result.error?.message ?? (result.stderr.trim() || `probe exited ${result.status}`).slice(-1000);
+    return result.status === 0;
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
@@ -352,7 +358,7 @@ export function sandboxIsolation(spec: Pick<SandboxSpec, 'display'> = {}): Isola
     iso = !existsSync('/usr/bin/sandbox-exec') || !probe('darwin') ? unisolated('sandbox-exec is unavailable')
       : { result: 'passed', renderer: 'none', detail: 'Ran under a default-deny macOS sandbox: only OS libraries, declared runtimes and this process\'s scratch were readable; writes stayed in scratch and network access was limited to test loopback ports. Memory was bounded only by the Java heap' };
   } else if (IS_WIN) {
-    iso = !probe('win32') ? unisolated('an AppContainer could not be created')
+    iso = !probe('win32') ? unisolated(`an AppContainer could not be created: ${probeFailure}`)
       : { result: 'passed', renderer: 'none', detail: 'Ran in a low-privilege AppContainer: files only where explicitly granted and no network beyond its own loopback; a Job Object capped memory, CPU and processes' };
   } else iso = unisolated(`no sandbox for ${process.platform}`);
   probed.set(key, iso);

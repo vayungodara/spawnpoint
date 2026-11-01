@@ -17,6 +17,7 @@ node .github/native-runtime.mjs
 sudo -E env "PATH=$PATH" node .github/ownership-handover.mjs   # Linux
 node .github/client-evidence.mjs
 node .github/revision-guard.mjs
+node .github/sandbox-boundaries.mjs
 node .github/publication-guard.mjs
 node .github/solver-test.mjs
 node .github/solver-install.mjs
@@ -43,6 +44,17 @@ and refuses to replace an existing service. It uses Node as the Java stand-in;
 it does not replace real Minecraft lifecycle proof. Windows requires an elevated
 runner. A Linux system unit uses the current unprivileged account. The test
 must start with no runtime directory so fresh service-account permissions are exercised.
+
+The sandbox boundary harness requires a JDK and actual OS confinement. Install
+bubblewrap on Linux and run the harness both normally and through `sudo`.
+It uses disposable path and environment canaries, never real secrets. A
+missing sandbox is a test failure, not a skip. Also run real confined Fabric
+server, client and AutoModpack join tests; the permission harness does not
+prove Minecraft compatibility. macOS's offline launcher can fail on graphics
+mods even when confinement passes. A full-pack Mac client and join remain
+unproven until those exact tests complete; do not report a reduced pack or
+stubbed renderer as equivalent. Windows CI boundary checks likewise do not
+replace a real confined Minecraft client run.
 
 ## Disposable orb integration environment
 
