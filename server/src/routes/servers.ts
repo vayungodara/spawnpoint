@@ -337,7 +337,7 @@ export default async function serverRoutes(app: FastifyInstance) {
       // once a tested candidate for it is waiting or applied.
       tested: !!state.active && (!state.active.endsWith('-baseline') || c?.status === 'ready' || c?.status === 'applied'),
       candidate: c && { status: c.status, detail: c.detail, revision: c.revision, files: c.files.map((f) => ({ file: f.file, to: f.to, remove: f.remove, duplicateOf: f.duplicateOf })),
-        consent: c.consent, server: c.server && { result: c.server.result, detail: c.server.detail }, client: c.client && { result: c.client.result, detail: c.client.detail, checks: c.client.checks } },
+        consent: c.consent, server: c.server && { result: c.server.result, detail: c.server.detail, checks: c.server.checks }, client: c.client && { result: c.client.result, detail: c.client.detail, checks: c.client.checks } },
       duplicates, packError,
       move: single ? 'single' : 'all-crafty',
       crafty: plan && !single ? await craftyOffline() : undefined,

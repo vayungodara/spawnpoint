@@ -17,6 +17,7 @@ node .github/native-runtime.mjs
 sudo -E env "PATH=$PATH" node .github/ownership-handover.mjs   # Linux
 node .github/client-evidence.mjs
 node .github/revision-guard.mjs
+node .github/sandbox-boundaries.mjs
 node .github/publication-guard.mjs
 node .github/solver-test.mjs
 node .github/solver-install.mjs
@@ -33,8 +34,9 @@ baseline has five server lint warnings and two web lint warnings. Do not
 suppress them to make a change look green.
 In a seeded orb, prepend the installed `Tools/jdk-21…/bin` directory to
 `PATH` for the installer checks. The setup script installs Java there.
-Stop the `crafty` container (`sudo docker stop crafty`) before
-`native-runtime.mjs` and start it again afterwards: the import contract
+Stop the managed `crafty` service (`amp orb service stop crafty`) and its
+container (`sudo docker stop crafty`) before `native-runtime.mjs`. Restart
+the service afterwards with `amp orb service restart crafty`: the import contract
 treats Crafty listening on 8443 as a running Crafty service and fails.
 
 CI also runs `node .github/native-runtime.mjs --service` on each OS. This
@@ -43,6 +45,27 @@ and refuses to replace an existing service. It uses Node as the Java stand-in;
 it does not replace real Minecraft lifecycle proof. Windows requires an elevated
 runner. A Linux system unit uses the current unprivileged account. The test
 must start with no runtime directory so fresh service-account permissions are exercised.
+
+The sandbox boundary harness requires a JDK and actual OS confinement. Install
+bubblewrap on Linux and run the harness both normally and through `sudo`.
+It uses disposable path and environment canaries, never real secrets. A
+missing Linux or macOS sandbox is a test failure, not a skip. Also run real confined Fabric
+server, client and AutoModpack join tests; the permission harness does not
+prove Minecraft compatibility. macOS's offline launcher can fail on graphics
+mods even when confinement passes. A full-pack Mac client and join remain
+unproven until those exact tests complete; do not report a reduced pack or
+stubbed renderer as equivalent. Windows CI boundary checks likewise do not
+replace a real confined Minecraft client run.
+Windows LPAC currently rejects its own TCP sockets with WSAEACCES 10013.
+The approved Windows fallback is an honest Not isolated report and refusal
+to execute candidates. CI verifies both standalone and paired launch refusal
+when the availability probe fails; this is not a Windows confinement pass.
+If the probe succeeds, the complete boundary harness must pass, including
+the own-port control and denied host/peer access. Do not remove LPAC silently.
+Default Linux/macOS installs keep the same-UID supervisor and need no sudo.
+The optional admin-assisted hardened install and permission repair are design
+only (docs/security.md); they are not prerequisites for this release and must
+not be described as implemented.
 
 ## Disposable orb integration environment
 

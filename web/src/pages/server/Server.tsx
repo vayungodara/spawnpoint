@@ -73,7 +73,7 @@ interface RuntimeView {
   candidate?: {
     status: string; detail: string; revision?: string; consent?: string[]
     files: { file: string; to: string; remove?: boolean; duplicateOf?: string }[]
-    server?: { result: string; detail: string }; client?: { result: string; detail: string; checks?: Record<string, Check> }
+    server?: { result: string; detail: string; checks?: Record<string, Check> }; client?: { result: string; detail: string; checks?: Record<string, Check> }
   } | null
   duplicates?: { id: string; name: string; keep: { file: string; to: string; version: string }; drop: { file: string; to: string; version: string }[] }[]
   packError?: string | null
@@ -81,7 +81,7 @@ interface RuntimeView {
   crafty?: { port: 'closed' | 'open' | 'unknown'; processes: string[] | null }
 }
 
-const CHECK_LABELS: Record<string, string> = { server: 'Server boot', solver: 'Dependencies', clientBoot: 'Client boot', rendering: 'Rendering', join: 'Join', handshake: 'AutoModpack handshake' }
+const CHECK_LABELS: Record<string, string> = { server: 'Server boot', solver: 'Dependencies', clientBoot: 'Client boot', rendering: 'Rendering', join: 'Join', handshake: 'AutoModpack handshake', serverIsolation: 'Server test sandbox', clientIsolation: 'Client test sandbox', joinIsolation: 'Join test sandbox' }
 
 /** Exactly what the client test proved, one line per check. */
 function Proof({ checks }: { checks?: Record<string, Check> }) {
@@ -202,7 +202,7 @@ function RuntimeSection({ id }: { id: string }) {
             <div className="mt-1 space-y-2">
               <p>{c.detail}</p>
               {!!c.consent?.length && <ul className="text-text-dim list-disc pl-5">{c.consent.map((x) => <li key={x}>{x}</li>)}</ul>}
-              <Proof checks={{ ...(c.server ? { server: c.server } : {}), ...c.client?.checks }} />
+              <Proof checks={{ ...(c.server ? { server: { result: c.server.result, detail: c.server.detail } } : {}), ...c.server?.checks, ...c.client?.checks }} />
               <div className="flex flex-wrap gap-3">
                 <button className="btn btn-emerald px-4 py-2 text-sm" disabled={busy}
                   onClick={() => post.mutate({ path: `/api/servers/${id}/candidate/apply`, body: { consent: true, revision: c.revision } })}>Approve this exact version</button>

@@ -438,6 +438,7 @@ export function UndoWaitingBanner({ id, p }: { id: string; p: Promotion }) {
 const TEST_LABEL: Record<string, string> = {
   server: 'SERVER BOOT', client: 'CLIENT', clientBoot: 'CLIENT BOOT', join: 'JOIN', handshake: 'SYNC', rendering: 'RENDERING',
   liveBoot: 'LIVE BOOT', publication: 'PUBLISHED', solver: 'SOLVER', optimality: 'FEWEST CHANGES',
+  serverIsolation: 'SERVER SANDBOX', clientIsolation: 'CLIENT SANDBOX', joinIsolation: 'JOIN SANDBOX',
 }
 /** A clean revision reads as one line; anything not passed gets its own chip. */
 export function TestChips({ tests }: { tests: Revision['tests'] }) {

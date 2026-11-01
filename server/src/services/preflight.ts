@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync, cpSync, copyFileSync, constants } from 'node:fs';
-import { spawn } from 'node:child_process';
-import { join, basename, dirname, relative } from 'node:path';
+import { createHash } from 'node:crypto';
+import { join, basename, dirname } from 'node:path';
+import { createServer } from 'node:net';
 import { PATHS } from '../config.js';
 import { serverDir, javaFor } from './servers.js';
 import { detect, type Detection } from './detect.js';
 import { IS_WIN, withMemory } from './platform.js';
-import { hashes, packFiles, packPath, type RevisionLock } from './revisions.js';
+import { packPath, type RevisionLock } from './revisions.js';
+import { copyOutput, listOutput, readOutput, runtimeExecutable, runtimeHome, sandboxIsolation, sandboxSpawn, scratchDir } from './testsandbox.js';
 
 // SERVER BOOT TEST. The loader is the only honest judge of whether a mod set
 // boots, so the panel does not model compatibility: it boots the real thing.
@@ -134,28 +136,41 @@ export async function dryBootInner(serverId: string, jars: string[], dir: string
   const det = detect(dir, serverId);
   const launchArgs = lock ? lockedLaunchArgs(lock, '-Xmx1G') : loaderLaunchArgs(dir, det, '-Xmx2G');
   if (!launchArgs) return { result: 'unverified', detail: `Spawnpoint cannot boot-test ${det.loader} servers yet` };
-  const java = lock?.java.executable ?? javaFor(det.mc, det.loader);
-  if (!java) return { result: 'unverified', detail: 'no JDK for this Minecraft version yet; it downloads the first time the server starts' };
+  const selectedJava = lock?.java.executable ?? javaFor(det.mc, det.loader);
+  if (!selectedJava) return { result: 'unverified', detail: 'no JDK for this Minecraft version yet; it downloads the first time the server starts' };
+  const java = runtimeExecutable(selectedJava);
 
-  const sandbox = join(PATHS.data, 'preflight', serverId);
-  rmSync(sandbox, { recursive: true, force: true });
+  const isolation = sandboxIsolation();
+  if (isolation.result !== 'passed') return { result: 'unverified', detail: isolation.detail, checks: { serverIsolation: isolation } };
+  // The candidate's code runs here, confined to this copy (testsandbox.ts).
+  const sandbox = scratchDir(`preflight-${serverId}`);
   mkdirSync(join(sandbox, 'mods'), { recursive: true });
   linkLoader(dir, sandbox, lock);
   for (const jar of jars) copyFileSync(jar, join(sandbox, 'mods', basename(jar)), constants.COPYFILE_FICLONE);
   const fullBoot = det.loader === 'forge' || det.loader === 'neoforge';
   const pass = fullBoot ? /Done \([\d.]+s\)!/ : PASS_RE;
+  // macOS filters declared ports rather than providing a network namespace.
+  // Choose the port before building its profile, not inside the JVM.
+  const port = fullBoot ? await new Promise<number>((resolve, reject) => {
+    const socket = createServer().once('error', reject);
+    socket.listen(0, '127.0.0.1', () => {
+      const port = (socket.address() as { port: number }).port;
+      socket.close((error) => error ? reject(error) : resolve(port));
+    });
+  }) : 0;
   writeFileSync(join(sandbox, 'eula.txt'), `eula=${fullBoot}\n`, 'utf8');
   if (fullBoot) {
-    writeFileSync(join(sandbox, 'server.properties'), 'server-ip=127.0.0.1\nserver-port=0\nenable-rcon=false\nonline-mode=false\nlevel-type=flat\ngenerate-structures=false\nview-distance=2\nsimulation-distance=2\nsync-chunk-writes=false\n');
+    writeFileSync(join(sandbox, 'server.properties'), `server-ip=127.0.0.1\nserver-port=${port}\nenable-rcon=false\nonline-mode=false\nlevel-type=flat\ngenerate-structures=false\nview-distance=2\nsimulation-distance=2\nsync-chunk-writes=false\n`);
     const config = join(sandbox, 'automodpack', 'automodpack-server.json');
     if (existsSync(config)) writeFileSync(config, JSON.stringify({ ...JSON.parse(readFileSync(config, 'utf8')), modpackHost: false, generateModpackOnStart: false, selfUpdater: false }));
   }
 
   const started = Date.now();
   return await new Promise<Verdict>((resolve) => {
-    const [cmd, args] = IS_WIN ? [java, launchArgs] : ['nice', ['-n', '19', java, ...launchArgs]];
-    const child = spawn(cmd, args, { cwd: sandbox, stdio: ['pipe', 'pipe', 'pipe'] });
-    const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+    const child = sandboxSpawn({ scratch: [sandbox], runtimes: [runtimeHome(java)], memGb: lock ? 2 : 3, bindPorts: port ? [port] : [] },
+      IS_WIN ? [java, ...launchArgs] : ['nice', '-n', '19', java, ...launchArgs], sandbox);
+    const isolation = child.isolation;
+    const closed = child.exited;
     let out = '';
     let settled = false;
     const finish = async (v: Verdict): Promise<void> => {
@@ -163,21 +178,23 @@ export async function dryBootInner(serverId: string, jars: string[], dir: string
       settled = true;
       clearInterval(poll);
       clearTimeout(killer);
-      const shutdown = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already dead */ } }, 10_000);
-      if (fullBoot && v.result === 'passed') child.stdin.end('stop\n');
-      else try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      const shutdown = setTimeout(() => child.kill(), 10_000);
+      if (fullBoot && v.result === 'passed') child.stdin!.end('stop\n');
+      else child.kill();
       await closed; // no JVM can keep writing while outputs are captured
       clearTimeout(shutdown);
+      const safe = child.outputsSafe();
+      if (!safe) v = { result: 'unverified', detail: 'The sandbox did not confirm descendant shutdown; its scratch was retained and no outputs were accepted' };
       try {
-        if (lock && v.result === 'passed') {
+        if (safe && lock && v.result === 'passed') {
           const before = new Map(lock.files.filter((f) => f.location === 'server' && f.path.startsWith('config/')).map((f) => [f.path, f.sha512]));
           const configs: NonNullable<Verdict['configs']> = [];
-          for (const src of packFiles(join(sandbox, 'config'))) {
-            const path = packPath(relative(sandbox, src).replace(/\\/g, '/'), 'server');
-            if ((await hashes(src)).sha512 !== before.get(path)) {
+          for (const rel of listOutput(sandbox, 'config')) {
+            const path = packPath(rel, 'server');
+            // test outputs are untrusted: read them without following links
+            if (createHash('sha512').update(readOutput(sandbox, rel)).digest('hex') !== before.get(path)) {
               const dest = join(PATHS.data, 'preflight', `${serverId}-outputs`, path);
-              mkdirSync(dirname(dest), { recursive: true });
-              copyFileSync(src, dest, constants.COPYFILE_FICLONE);
+              copyOutput(sandbox, rel, dest);
               configs.push({ path, src: dest });
             }
             before.delete(path);
@@ -188,26 +205,29 @@ export async function dryBootInner(serverId: string, jars: string[], dir: string
           // Fabric's EULA check and during Forge's construction
           if (autoModpackDefaults && lock.files.some((f) => f.location === 'server' && f.path === AM_CONFIG)) {
             const sealed = readFileSync(join(dir, AM_CONFIG), 'utf8');
-            const booted = withOwnerHosting(sealed, readFileSync(join(sandbox, AM_CONFIG), 'utf8'));
+            const booted = withOwnerHosting(sealed, readOutput(sandbox, AM_CONFIG).toString('utf8'));
             if (booted !== sealed) v = { ...v, autoModpackConfig: booted };
           }
         }
       } catch (e) { v = { result: 'unverified', detail: `could not capture generated configs: ${String(e)}` }; }
       // the log outlives the sandbox wipe so the panel can show it
-      try { writeFileSync(join(PATHS.data, 'preflight', `${serverId}.log`), out, 'utf8'); } catch { /* diagnostics only */ }
-      rmSync(sandbox, { recursive: true, force: true });
-      resolve({ ...v, javaFailure: v.result === 'failed' ? classVersionFailure(out) : undefined, seconds: Math.round((Date.now() - started) / 1000) });
+      try {
+        mkdirSync(join(PATHS.data, 'preflight'), { recursive: true });
+        writeFileSync(join(PATHS.data, 'preflight', `${serverId}.log`), out, 'utf8');
+      } catch { /* diagnostics only */ }
+      if (safe) rmSync(sandbox, { recursive: true, force: true });
+      resolve({ ...v, javaFailure: v.result === 'failed' ? classVersionFailure(out) : undefined, seconds: Math.round((Date.now() - started) / 1000),
+        checks: { ...v.checks, serverIsolation: isolation } });
     };
-    child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
-    child.stderr.on('data', (d: Buffer) => { out += d.toString(); });
-    child.on('error', (e) => { void finish({ result: 'unverified', detail: `could not launch the server test: ${e.message}` }); });
+    child.output.on('data', (d: Buffer) => { out += d.toString(); });
+    child.child.on('error', (e) => { void finish({ result: 'unverified', detail: `could not launch the server test: ${e.message}` }); });
     // Reap the JVM before capturing outputs. Forge's EULA line alone says
     // nothing about mod construction and can never pass this check.
     const poll = setInterval(() => {
       if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mod${jars.length === 1 ? '' : 's'}${fullBoot ? ' into a disposable world' : ''}` });
       else if (FAIL_RE.test(out)) finish({ result: 'failed', detail: 'the loader rejected this mod set', excerpt: excerptOf(out) });
     }, 1000);
-    child.on('exit', (code) => {
+    child.child.on('exit', (code) => {
       setTimeout(() => {
         if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mod${jars.length === 1 ? '' : 's'}${fullBoot ? ' into a disposable world' : ''}` });
         else finish({ result: 'failed', detail: `the server exited (code ${code}) before it finished loading mods`, excerpt: excerptOf(out) });

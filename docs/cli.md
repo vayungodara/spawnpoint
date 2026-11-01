@@ -48,10 +48,20 @@ panel. A read token sees no file contents except plain files in `logs/` and
 `server.properties`.
 
 Only a read token is safe to give to a machine you do not trust. Control
-and approve tokens can run code on the host, because mods are code: a
-staged mod runs in the boot test as the panel's user. Treat them like shell
-access. The scopes stop mistakes and keep approvals deliberate. They do not
-contain an adversary.
+and approve tokens remain host-trusted. Staged server, client and join tests
+require an OS sandbox and refuse to run when isolation is unavailable.
+On the default Linux and macOS install, live server mods run as the panel's
+user. This keeps the one-line install usable without sudo or a separate
+service account. Live mods can access that user's panel data and home.
+Replacements, removals, config edits and inconclusive tests require owner
+approval of the tested revision. Clean additions can go live automatically
+after passing tests. An approve token delegates owner consent, including
+acceptance of test gaps. Testing does not make a mod trustworthy.
+Treat control and approve tokens like shell access. The optional
+[hardened install](security.md#optional-hardened-install-design-only) is
+designed but not implemented; this update does not repair supervisor permissions.
+See [candidate test isolation](security.md#candidate-test-isolation) for
+the platform boundaries and limits.
 
 The panel stores only a SHA-256 hash of each token and shows it once.
 Revoking it takes effect on the next request. An approval made with a token
@@ -63,6 +73,26 @@ the panel machine. It writes a new owner-only file and never overwrites one.
 It refuses to print a token into a pipe or an agent log, and
 `spawnpoint api` cannot create tokens. `SPAWNPOINT_TOKEN` is sent only to
 `SPAWNPOINT_URL`.
+
+## Enable candidate tests on Ubuntu
+
+Install `bubblewrap` on the panel host. If the test reports that bubblewrap
+cannot nest a sandbox, Ubuntu's AppArmor policy may be blocking the join's
+per-process namespaces. An administrator can install a dedicated copy with
+its own policy, leaving the distribution's `bwrap` policy unchanged:
+
+```sh
+sudo apt-get install bubblewrap
+sudo install -D -m 0755 /usr/bin/bwrap /usr/local/libexec/spawnpoint-bwrap
+echo 'profile spawnpoint-bwrap /usr/local/libexec/spawnpoint-bwrap flags=(unconfined) { userns, }' | sudo tee /etc/apparmor.d/spawnpoint-bwrap
+sudo apparmor_parser -r /etc/apparmor.d/spawnpoint-bwrap
+```
+
+Restart the panel and retest. This policy lets the dedicated executable
+create namespaces; bubblewrap still confines the candidate and prevents it
+from creating further namespaces. Refresh the executable copy after
+bubblewrap package updates. If no administrator permits this setup, tests
+remain inconclusive and do not execute candidate code.
 
 ## Commands
 

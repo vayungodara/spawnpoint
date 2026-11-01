@@ -49,6 +49,100 @@ access. See [cli.md](cli.md).
 The supervisor's runtime directory contains a private IPC capability. Never
 publish it. See [the supervisor docs](supervisor.md).
 
+## Candidate test isolation
+
+The server boot, client boot and join tests run candidate code in disposable
+scratch directories. The join's server and client have separate writable
+trees. Launcher caches are copied before execution. Shared tools and sealed
+inputs are not writable by a test. The panel refuses linked output paths,
+including links in intermediate directories, before reading generated files.
+Only an allowlisted environment reaches a test process.
+
+- **Linux:** bubblewrap creates private filesystem, process and network
+  namespaces. A join pair shares its own loopback network, not the host's.
+  A root panel drops to `spawnpoint-sandbox` through `setpriv` first.
+  An unprivileged panel uses its own UID inside the namespaces. A systemd
+  scope limits memory, CPU and tasks when the account has a working service
+  manager. Otherwise the report states that only Java's heap is bounded.
+  Xvfb runs inside the sandbox; the host desktop is never shared.
+  Layouts and home directories inside its OS mounts, such as `/usr`, refuse
+  testing rather than expose their files through a read-only mount.
+  Ubuntu can require an administrator-installed
+  [dedicated AppArmor profile](cli.md#enable-candidate-tests-on-ubuntu).
+  Spawnpoint does not disable host AppArmor restrictions automatically.
+- **macOS:** a default-deny `sandbox-exec` profile permits OS libraries,
+  declared runtimes and the process's scratch tree. Writes stay in scratch.
+  TCP binds and connections have separate loopback-port allowlists. The
+  process retains the panel's UID, but root panels refuse testing. Forks
+  are denied; HeadlessMC loads the client in the confined JVM. Java's heap
+  does not limit native memory. Packs incompatible with stubbed graphics
+  receive an inconclusive client result, not a rendering pass.
+- **Windows:** the tested host reports **Not isolated** and refuses candidate
+  execution. The low-privilege AppContainer (LPAC) prototype rejects its own
+  TCP sockets with error 10013. The panel probes the confined runtime and a
+  private loopback connection before running candidates. If that probe fails,
+  server, client and join tests remain inconclusive without loading any mods.
+  Windows CI verifies this refusal, not successful Minecraft confinement.
+  There is no fallback to ordinary AppContainer: it inherits ambient file
+  grants that LPAC excludes.
+  When the probe succeeds, LPAC ignores ambient All Application Packages
+  grants and has no network capabilities or host-loopback exemption.
+  A join pair shares a fresh container identity, with separate scratch
+  capabilities. A Job Object per launched process tree limits memory, CPU
+  and process count. The helper confirms that all descendants have exited
+  before the panel accepts outputs. Without confirmation, the test is
+  inconclusive and its scratch is retained.
+  Windows requires a temporary AppContainer profile. Its filesystem tree
+  denies the container access; candidate writes use only the granted scratch.
+  The parent removes the profile after confirmed shutdown.
+
+If the OS sandbox cannot start, the report says **Not isolated** and the
+test does not execute candidate code. `SPAWNPOINT_UNSANDBOXED=1` also refuses
+execution; it does not enable an unsafe fallback. A confinement check does
+not prove that Minecraft booted, rendered or completed its join handshake.
+Those checks have separate results.
+
+## Live server permissions
+
+On default Linux and macOS installs, live server mods run as the panel's
+user. The supervisor keeps that UID so the one-line install needs no sudo
+or separate service account. Live mods can read and modify the user's panel
+data, settings and home. Candidate test isolation does not protect these
+files after a mod goes live.
+
+Replacements, removals, config edits and inconclusive tests require the
+owner's approval of the tested revision. Clean additions can go live
+automatically after passing tests. An approve token delegates owner consent,
+including acceptance of test gaps. A passed test is not a security audit
+of the mod. Control and approve tokens therefore remain host-trusted.
+
+Windows uses a separate supervisor service account, but its existing grants
+still allow writes across the layout, including panel code and data. This
+release does not change live-server accounts or repair those permissions.
+
+## Optional hardened install (design only)
+
+The hardened install is not implemented and has no install command yet.
+It would be opt-in and require administrator assistance; the default
+Linux and macOS install would remain sudo-free.
+
+The trusted coordinator would retain the registry, install and publication
+journals, IPC credentials and lifetime fences. It would launch JVMs through
+a separate restricted executor account. That account could write only the
+server directories it runs. Panel code, data, settings, tools, service
+definitions and fence parent directories would remain unwritable by it.
+Control files inside server trees would also need protection or relocation
+before the coordinator could trust them. Restricting the current supervisor's
+ACLs alone would break its trusted-state writes without separating mod code.
+
+Opt-in migration would stop and drain every live JVM, preserve server bytes
+and fence identities, revoke old recursive grants, and install the account
+and service boundary. Updates to a hardened install would repeat the repair
+idempotently and refuse starts on failure. Acceptance must exercise real
+live mods and restart, import, publication, Undo and recovery paths on each
+OS, including an upgrade from today's broad-permission layout. None of
+those hardened-install guarantees apply to this release.
+
 ## Chat genie
 
 The genie is optional and off until you connect an AI account in Settings →
