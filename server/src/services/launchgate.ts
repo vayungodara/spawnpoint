@@ -9,7 +9,7 @@ import { detect, loaderVersion, type Detection } from './detect.js';
 import { IS_WIN, linkOrCopy, withMemory } from './platform.js';
 import { loaderLaunchArgs, lockedLaunchArgs, linkLoader, excerptOf, classVersionFailure, type Verdict } from './preflight.js';
 import { CLIENT_ROOT_FILES, type RevisionLock } from './revisions.js';
-import { listOutput, readOutput, runtimeHome, sandboxBox, sandboxIsolation, sandboxSpawn, scratchDir, type BoxProcess, type Isolation, type SandboxSpec } from './testsandbox.js';
+import { listOutput, readOutput, runtimeHome, sandboxBox, sandboxIsolation, sandboxSpawn, scratchDir, type Box, type BoxProcess, type Isolation, type SandboxSpec } from './testsandbox.js';
 
 // CLIENT BOOT TEST. AutoModpack mirrors whatever the server has; it does not
 // check that the result runs. So before a change reaches friends, this boots
@@ -473,7 +473,7 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   // the join runs a client and a copy of the server at once
   const join_ = await withMemory(needGb.join, 'the join test', onStatus, () => {
     onStatus('joining a throwaway copy of the server');
-    return joinTest(serverId, det, version, set, () => { const dir = scratchDir(`join-client-${serverId}`); fill(dir); return dir; }, tested, log)
+    return joinTest(serverId, det, version, set, fill, tested, log)
       .catch((e): Verdict => ({ result: 'unverified', detail: `the join test errored: ${String(e).slice(0, 140)}` }));
   });
   if (typeof join_ !== 'string' && join_.checks?.joinIsolation) checks.joinIsolation = join_.checks.joinIsolation;
@@ -584,7 +584,7 @@ async function joinTest(
   det: Detection & { mc: string; loader: 'fabric' | 'forge' | 'neoforge' },
   version: string,
   set: ClientSet,
-  freshClient: () => string,
+  fillClient: (dir: string) => void,
   tested: AutoModpackFile[] | null,
   log: (m: string) => void,
 ): Promise<Verdict> {
@@ -599,16 +599,21 @@ async function joinTest(
   const serverUpMs = (big ? 8 : 4) * 60_000;
   const totalMs = (big ? 20 : 8) * 60_000;
 
-  const rundir = freshClient();
+  const dirs: string[] = [];
+  let activeBox: Box | undefined;
+  let canRemove = true;
+  try {
+  const rundir = scratchDir(`join-client-${serverId}`);
+  dirs.push(rundir);
+  fillClient(rundir);
   const srv = scratchDir(`join-server-${serverId}`);
+  dirs.push(srv);
   mkdirSync(join(srv, 'mods'), { recursive: true });
   linkLoader(set.sourceDir ?? serverDir(serverId), srv, set.lock);
   for (const jar of serverJars) if (tested || !/automodpack/i.test(basename(jar))) linkOrCopy(jar, join(srv, 'mods', basename(jar)));
   if (tested) {
     try { prepareAutoModpack(serverId, srv, set); }
     catch (e) {
-      rmSync(srv, { recursive: true, force: true });
-      rmSync(rundir, { recursive: true, force: true });
       return { result: 'unverified', detail: `AutoModpack handshake could not be prepared: ${String(e)}` };
     }
   }
@@ -641,6 +646,7 @@ async function joinTest(
     let dwell: NodeJS.Timeout | null = null;
     // The server copy and the client share loopback; each sees only its own dir.
     const box = sandboxBox(gateSpec([srv, rundir], java, 2 * heapGb(heap) + 3));
+    activeBox = box;
     const srvChild = box.run([...NICE, java, ...launchArgs], srv, srv);
     const finish = async (v: Verdict): Promise<void> => {
       if (settled) return;
@@ -650,13 +656,14 @@ async function joinTest(
       clearTimeout(totalKiller);
       clearInterval(upPoll);
       const safe = await box.close();
+      canRemove = safe;
+      activeBox = undefined;
       if (!safe) v = { result: 'unverified', detail: 'The sandbox did not confirm descendant shutdown; its scratch was retained' };
       const work = join(PATHS.data, 'launchgate', serverId);
       try {
         writeFileSync(join(work, 'join.log'), srvOut.slice(-30_000), 'utf8');
         writeFileSync(join(work, 'join-client.log'), cliOut.slice(-40_000), 'utf8');
       } catch { /* diagnostics */ }
-      if (safe) for (const dir of [srv, rundir]) rmSync(dir, { recursive: true, force: true });
       resolve({ ...v, javaFailure: v.result === 'failed' ? classVersionFailure(cliOut) ?? classVersionFailure(srvOut) : undefined, seconds: Math.round((Date.now() - started) / 1000),
         checks: { joinIsolation: box.isolation } });
     };
@@ -777,4 +784,8 @@ async function joinTest(
       });
     }, 2000);
   });
+  } finally {
+    if (activeBox) canRemove = await activeBox.close();
+    if (canRemove) for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  }
 }

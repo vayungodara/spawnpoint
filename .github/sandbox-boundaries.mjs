@@ -17,6 +17,7 @@ const { sandboxIsolation, sandboxSpawn, sandboxBox, scratchDir, runtimeHome, rea
 const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin', process.platform === 'win32' ? 'java.exe' : 'java')
   : execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', ['java'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
 const javac = join(dirname(java), process.platform === 'win32' ? 'javac.exe' : 'javac');
+console.log('Probe runtime:', java, 'resolved:', realpathSync(java), 'home:', runtimeHome(java));
 const host = createServer((socket) => socket.end(Buffer.from([42])));
 host.listen(0, '127.0.0.1'); await once(host, 'listening');
 const hostPort = host.address().port;

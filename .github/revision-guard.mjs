@@ -310,6 +310,7 @@ for line in sys.stdin:
       java: { executable: python } };
     const verdict = await dryBootInner(id, [], source, lock, opts.autoModpackDefaults);
     const log = readFileSync(join(process.env.SPAWNPOINT_ROOT, 'Spawnpoint', 'data', 'preflight', `${id}.log`), 'utf8');
+    if (verdict.result !== 'passed') console.error('First-boot probe failed:', verdict, log.slice(-4000));
     const hex = /^BOOTED ([0-9a-f]+)\r?$/m.exec(log)?.[1];
     return { verdict, booted: hex ? Buffer.from(hex, 'hex').toString('utf8') : undefined };
   };
