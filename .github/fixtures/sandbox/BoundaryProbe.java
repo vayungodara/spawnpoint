@@ -62,6 +62,15 @@ public class BoundaryProbe {
             }
             return;
         }
+        if (args[0].equals("profile")) {
+            Path marker = Path.of("profile-target.txt");
+            long deadline = System.nanoTime() + 10_000_000_000L;
+            while (!Files.exists(marker) && System.nanoTime() < deadline) Thread.sleep(10);
+            Path profile = Path.of(Files.readString(marker));
+            check("profile-read", () -> Files.readAllBytes(profile.resolve("boundary-canary.txt")));
+            check("profile-write", () -> Files.writeString(profile.resolve("boundary-canary.txt"), "changed"));
+            check("profile-list", () -> { try (var files = Files.list(profile)) { files.count(); } });
+        }
         Path outside = Path.of(args[1]), panel = Path.of(args[2]), home = Path.of(args[3]), sibling = Path.of(args[4]);
         int hostPort = Integer.parseInt(args[5]), ownPort = Integer.parseInt(args[6]);
         ServerSocket own = !args[0].equals("pair") ? listen(ownPort) : null;

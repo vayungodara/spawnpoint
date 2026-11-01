@@ -83,8 +83,8 @@ export function scratchDir(name: string): string {
   return mkdtempSync(join(SANDBOX_ROOT, `${name}-`));
 }
 
-/** The installation holding an executable (…/bin/java → …). */
-export function runtimeHome(executable: string): string {
+/** Resolve before confinement: a host-side alias may not exist inside it. */
+export function runtimeExecutable(executable: string): string {
   let real = executable;
   if (!isAbsolute(real)) {
     for (const dir of (process.env.PATH ?? '').split(delimiter)) {
@@ -93,7 +93,12 @@ export function runtimeHome(executable: string): string {
     }
   }
   try { real = realpathSync(real); } catch { /* not installed yet */ }
-  return dirname(dirname(real));
+  return real;
+}
+
+/** The installation holding an executable (…/bin/java → …). */
+export function runtimeHome(executable: string): string {
+  return dirname(dirname(runtimeExecutable(executable)));
 }
 
 const resolved = (p: string): string => { try { return realpathSync(p); } catch { return p; } };

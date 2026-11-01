@@ -7,7 +7,7 @@ import { serverDir, javaFor } from './servers.js';
 import { detect, type Detection } from './detect.js';
 import { IS_WIN, withMemory } from './platform.js';
 import { packPath, type RevisionLock } from './revisions.js';
-import { copyOutput, listOutput, readOutput, runtimeHome, sandboxIsolation, sandboxSpawn, scratchDir } from './testsandbox.js';
+import { copyOutput, listOutput, readOutput, runtimeExecutable, runtimeHome, sandboxIsolation, sandboxSpawn, scratchDir } from './testsandbox.js';
 
 // SERVER BOOT TEST. The loader is the only honest judge of whether a mod set
 // boots, so the panel does not model compatibility: it boots the real thing.
@@ -132,8 +132,9 @@ export async function dryBootInner(serverId: string, jars: string[], dir: string
   const det = detect(dir, serverId);
   const launchArgs = lock ? lockedLaunchArgs(lock, '-Xmx1G') : loaderLaunchArgs(dir, det, '-Xmx2G');
   if (!launchArgs) return { result: 'unverified', detail: `Spawnpoint cannot boot-test ${det.loader} servers yet` };
-  const java = lock?.java.executable ?? javaFor(det.mc, det.loader);
-  if (!java) return { result: 'unverified', detail: 'no JDK for this Minecraft version yet; it downloads the first time the server starts' };
+  const selectedJava = lock?.java.executable ?? javaFor(det.mc, det.loader);
+  if (!selectedJava) return { result: 'unverified', detail: 'no JDK for this Minecraft version yet; it downloads the first time the server starts' };
+  const java = runtimeExecutable(selectedJava);
 
   const isolation = sandboxIsolation();
   if (isolation.result !== 'passed') return { result: 'unverified', detail: isolation.detail, checks: { serverIsolation: isolation } };

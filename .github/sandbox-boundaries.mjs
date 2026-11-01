@@ -13,9 +13,9 @@ chmodSync(root, 0o711); // a root panel's dedicated sandbox account must travers
 const home = mkdtempSync(join(homedir(), 'spawnpoint-boundary-'));
 process.env.SPAWNPOINT_ROOT = root;
 process.env.SPAWNPOINT_BOUNDARY_CANARY = 'disposable-boundary-control';
-const { sandboxIsolation, sandboxSpawn, sandboxBox, scratchDir, runtimeHome, readOutput, listOutput } = await import('../server/dist/services/testsandbox.js');
-const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin', process.platform === 'win32' ? 'java.exe' : 'java')
-  : execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', ['java'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
+const { sandboxIsolation, sandboxSpawn, sandboxBox, scratchDir, runtimeExecutable, runtimeHome, readOutput, listOutput } = await import('../server/dist/services/testsandbox.js');
+const java = runtimeExecutable(process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin', process.platform === 'win32' ? 'java.exe' : 'java')
+  : execFileSync(process.platform === 'win32' ? 'where.exe' : 'which', ['java'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0]);
 const javac = join(dirname(java), process.platform === 'win32' ? 'javac.exe' : 'javac');
 console.log('Probe runtime:', java, 'resolved:', realpathSync(java), 'home:', runtimeHome(java));
 const host = createServer((socket) => socket.end(Buffer.from([42])));
@@ -73,11 +73,55 @@ try {
   for (const file of [outside, homeFile, siblingFile, runtimeFile]) writeFileSync(file, 'boundary control');
   const iso = sandboxIsolation(); console.log(JSON.stringify(iso));
   assert.equal(iso.result, 'passed', 'this host must exercise real confinement, not skip it');
+  if (process.platform === 'win32') {
+    // Temporary loader diagnostic: only inspect public runtime libraries.
+    const diagnostic = scratchDir('library-probe');
+    const code = `
+      const fs = require('node:fs'), path = require('node:path');
+      for (const name of ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'server/jvm.dll']) {
+        const file = path.join(${JSON.stringify(dirname(java))}, name);
+        try { fs.closeSync(fs.openSync(file, 'r')); console.log('READ', name, 'OK'); }
+        catch (error) { console.log('READ', name, error.message); }
+        try { process.dlopen({exports:{}}, file); console.log('LOAD', name, 'OK'); }
+        catch (error) { console.log('LOAD', name, error.message); }
+      }
+    `;
+    const child = sandboxSpawn({ ...spec([diagnostic]), runtimes: [runtimeHome(java), runtimeHome(process.execPath)] }, [process.execPath, '-e', code], diagnostic);
+    console.log(await collect(child));
+  }
   const solo = prepare('solo');
-  const soloProcess = sandboxSpawn(spec([solo]), args('solo'), solo);
+  const soloProcess = sandboxSpawn(spec([solo]), args(process.platform === 'win32' ? 'profile' : 'solo'), solo);
+  let profile;
+  if (process.platform === 'win32') {
+    const name = soloProcess.child.spawnargs[soloProcess.child.spawnargs.indexOf('--name') + 1];
+    assert.match(name, /^Spawnpoint\.Test\./);
+    // Inspect only the disposable profile this process just created.
+    profile = execFileSync('python', ['-I', '-c', `
+import ctypes as c, sys
+api = c.WinDLL('userenv')
+sid, folder = c.c_void_p(), c.c_wchar_p()
+api.DeriveAppContainerSidFromAppContainerName.argtypes = [c.c_wchar_p, c.POINTER(c.c_void_p)]
+assert api.DeriveAppContainerSidFromAppContainerName(sys.argv[1], c.byref(sid)) == 0
+adv = c.WinDLL('advapi32')
+text = c.c_wchar_p()
+adv.ConvertSidToStringSidW.argtypes = [c.c_void_p, c.POINTER(c.c_wchar_p)]
+assert adv.ConvertSidToStringSidW(sid, c.byref(text))
+api.GetAppContainerFolderPath.argtypes = [c.c_wchar_p, c.POINTER(c.c_wchar_p)]
+assert api.GetAppContainerFolderPath(text, c.byref(folder)) == 0
+print(folder.value)
+`, name], { encoding: 'utf8' }).trim();
+    writeFileSync(join(profile, 'boundary-canary.txt'), 'profile control');
+    assert.equal(readFileSync(join(profile, 'boundary-canary.txt'), 'utf8'), 'profile control');
+    writeFileSync(join(solo, 'profile-target.txt'), profile);
+  }
   const output = await collect(soloProcess);
   assert.equal(soloProcess.outputsSafe(), true);
   verify(output); console.log(output.trim());
+  if (profile) {
+    for (const name of ['profile-read', 'profile-write', 'profile-list']) assert.match(output, new RegExp(`^ACCESS ${name} DENIED$`, 'm'));
+    assert.equal(existsSync(profile), false, 'temporary AppContainer profile must be removed');
+    console.log('PASS: AppContainer profile denies candidate access and is removed after shutdown');
+  }
   assert.equal(readOutput(solo, 'control.txt').toString(), 'scratch control');
   assert.deepEqual(listOutput(solo, 'outputs'), ['outputs/nested/control.txt']);
   assert.throws(() => readOutput(solo, 'config/link'));

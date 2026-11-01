@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, renameSync, statSync, linkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { portListening, vmStatAvailableBytes } from '../server/dist/services/platform.js';
@@ -285,6 +285,8 @@ _winapi.CloseHandle(process)
   // leaves, so the sealed baseline matches every later live boot. The stand-in
   // loader does what AutoModpack does and keeps a copy of its output.
   const { dryBootInner } = await import('../server/dist/services/preflight.js');
+  // Do not run Apple's /usr/bin/python3 developer-tools shim in confinement.
+  const interpreter = execFileSync(python, ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim();
   const loader = `import json, pathlib, sys
 p = pathlib.Path('automodpack/automodpack-server.json')
 cfg = json.loads(p.read_text('utf-8'))
@@ -307,7 +309,7 @@ for line in sys.stdin:
     writeFileSync(join(source, 'automodpack/automodpack-server.json'), config);
     const lock = { files: ['fabric.jar', 'loader.py', 'automodpack/automodpack-server.json'].map((path) => ({ path, location: 'server' })),
       arguments: ['loader.py', kind === 'forge' ? 'Done (1.0s)! For help, type "help"' : 'You need to agree to the EULA in order to run the server.'],
-      java: { executable: python } };
+      java: { executable: interpreter } };
     const verdict = await dryBootInner(id, [], source, lock, opts.autoModpackDefaults);
     const log = readFileSync(join(process.env.SPAWNPOINT_ROOT, 'Spawnpoint', 'data', 'preflight', `${id}.log`), 'utf8');
     if (verdict.result !== 'passed') console.error('First-boot probe failed:', verdict, log.slice(-4000));

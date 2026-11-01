@@ -34,8 +34,9 @@ baseline has five server lint warnings and two web lint warnings. Do not
 suppress them to make a change look green.
 In a seeded orb, prepend the installed `Tools/jdk-21…/bin` directory to
 `PATH` for the installer checks. The setup script installs Java there.
-Stop the `crafty` container (`sudo docker stop crafty`) before
-`native-runtime.mjs` and start it again afterwards: the import contract
+Stop the managed `crafty` service (`amp orb service stop crafty`) and its
+container (`sudo docker stop crafty`) before `native-runtime.mjs`. Restart
+the service afterwards with `amp orb service restart crafty`: the import contract
 treats Crafty listening on 8443 as a running Crafty service and fails.
 
 CI also runs `node .github/native-runtime.mjs --service` on each OS. This

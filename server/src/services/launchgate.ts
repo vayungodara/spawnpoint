@@ -9,7 +9,7 @@ import { detect, loaderVersion, type Detection } from './detect.js';
 import { IS_WIN, linkOrCopy, withMemory } from './platform.js';
 import { loaderLaunchArgs, lockedLaunchArgs, linkLoader, excerptOf, classVersionFailure, type Verdict } from './preflight.js';
 import { CLIENT_ROOT_FILES, type RevisionLock } from './revisions.js';
-import { listOutput, readOutput, runtimeHome, sandboxBox, sandboxIsolation, sandboxSpawn, scratchDir, type Box, type BoxProcess, type Isolation, type SandboxSpec } from './testsandbox.js';
+import { listOutput, readOutput, runtimeExecutable, runtimeHome, sandboxBox, sandboxIsolation, sandboxSpawn, scratchDir, type Box, type BoxProcess, type Isolation, type SandboxSpec } from './testsandbox.js';
 
 // CLIENT BOOT TEST. AutoModpack mirrors whatever the server has; it does not
 // check that the result runs. So before a change reaches friends, this boots
@@ -62,7 +62,7 @@ function gateJava(): string | null {
     .sort((a, b) => (parseInt(b.slice(4), 10) || 0) - (parseInt(a.slice(4), 10) || 0));
   for (const d of jdks) {
     const p = join(tools, d, 'bin', IS_WIN ? 'java.exe' : 'java');
-    if (existsSync(p)) return p;
+    if (existsSync(p)) return runtimeExecutable(p);
   }
   return null;
 }
@@ -315,8 +315,9 @@ async function clientGateInner(serverId: string, set: ClientSet, onStatus: (d: s
   let canRemove = true;
   try {
   let version: string;
-  const java = set.lock?.java.executable ?? javaFor(det.mc, det.loader);
-  if (!java) return { result: 'unverified', detail: 'No known client Java runtime' };
+  const selectedJava = set.lock?.java.executable ?? javaFor(det.mc, det.loader);
+  if (!selectedJava) return { result: 'unverified', detail: 'No known client Java runtime' };
+  const java = runtimeExecutable(selectedJava);
   try {
     await ensureHeadlessMc();
     writeHmcConfig(rundir, java); // before any HeadlessMC command, or it installs into ~/.minecraft
@@ -594,8 +595,9 @@ async function joinTest(
   const big = serverJars.length > 200;
   const heap = big ? '-Xmx4G' : '-Xmx2G';
   const launchArgs = set.lock ? lockedLaunchArgs(set.lock, heap) : loaderLaunchArgs(set.sourceDir ?? serverDir(serverId), det, heap);
-  const java = set.lock?.java.executable ?? javaFor(det.mc, det.loader);
-  if (!launchArgs || !java) return { result: 'unverified', detail: 'no boot recipe for this server' };
+  const selectedJava = set.lock?.java.executable ?? javaFor(det.mc, det.loader);
+  if (!launchArgs || !selectedJava) return { result: 'unverified', detail: 'no boot recipe for this server' };
+  const java = runtimeExecutable(selectedJava);
   const serverUpMs = (big ? 8 : 4) * 60_000;
   const totalMs = (big ? 20 : 8) * 60_000;
 
