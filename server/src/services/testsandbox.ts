@@ -118,6 +118,9 @@ function testEnv(scratch: string): Record<string, string> {
   env.HOME = scratch;
   if (IS_WIN) Object.assign(env, { TEMP: scratch, TMP: scratch, USERPROFILE: scratch, APPDATA: scratch, LOCALAPPDATA: scratch });
   else env.TMPDIR = process.platform === 'darwin' ? scratch : '/tmp';
+  // Seatbelt's localhost filter does not match Java's IPv4-mapped IPv6
+  // binds on macOS 26. Keep the test's sockets on its declared IPv4 loopback.
+  if (process.platform === 'darwin') env.JAVA_TOOL_OPTIONS = '-Djava.net.preferIPv4Stack=true';
   return env;
 }
 

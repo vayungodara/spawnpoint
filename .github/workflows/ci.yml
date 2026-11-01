@@ -34,6 +34,8 @@ jobs:
       - run: npm run build -w server
       - run: npm run build -w web
       - run: node .github/sandbox-boundaries.mjs
+      - if: failure()
+        run: node .github/sandbox-diagnostics.mjs
       - if: runner.os == 'Linux'
         run: sudo env "PATH=$PATH" "JAVA_HOME=$JAVA_HOME" node .github/sandbox-boundaries.mjs
       # smoke 1: the built server must load its entrypoint cleanly
