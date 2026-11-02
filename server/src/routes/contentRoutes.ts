@@ -16,12 +16,12 @@ import { detect } from '../services/detect.js';
 import { BOOT_VERIFIED, testedChanges, type RecipeLoader } from '../services/recipes.js';
 import { serverDir } from '../services/servers.js';
 import { autoModpackActive, publishPack, stageClientAsset, buildStarterPack, buildStarterPackCF } from '../services/automodpack.js';
-import { candidate, approve, createFirstVersion, testNow, discard, retest, liveChanged, lastChange, undoLast, recentRejections, clearRejections, assertCanStage } from '../services/packtxn.js';
+import { candidate, approve, createFirstVersion, testNow, discard, retest, liveChanged, lastChange, undoLast, recentRejections, clearRejections, assertCanStage, releaseStrandedGuard } from '../services/packtxn.js';
 import { promotion, lastSeen, choose, cancelUndo } from '../services/promote.js';
 import { craftyApi } from '../clients/crafty.js';
 import { join } from 'node:path';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { assertUnsealed, lockedPath, packPath, readLock, revisionReport, revisionState } from '../services/revisions.js';
+import { assertUnsealed, lockedPath, packPath, readLock, revisionReport, revisionState, strandedGuard } from '../services/revisions.js';
 
 /** A change waiting for a restart, with the players it waits on. */
 function promotionView(id: string) {
@@ -146,7 +146,19 @@ export default async function contentRoutes(app: FastifyInstance) {
   });
 
   // the mod change waiting for (or done with) its boot test
-  app.get<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req) => ({ candidate: candidate(req.params.id), promotion: promotionView(req.params.id) }));
+  app.get<{ Params: { id: string } }>('/api/servers/:id/candidate', async (req) => {
+    const c = candidate(req.params.id);
+    // A guard with no tested version refuses every start; the owner needs a way out.
+    const open = c && ['collecting', 'testing', 'activating'].includes(c.status);
+    const guardStranded = !open && await strandedGuard(req.params.id).catch(() => false);
+    return { candidate: c, promotion: promotionView(req.params.id), guardStranded };
+  });
+  app.post<{ Params: { id: string } }>('/api/servers/:id/launch-guard/remove', async (req, reply) => {
+    try {
+      if (!await releaseStrandedGuard(req.params.id, log)) return reply.code(409).send({ error: 'the launch guard is in use by a tested version or a running test' });
+      return { ok: true };
+    } catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+  });
   app.post<{ Params: { id: string }; Body: { consent?: boolean; revision?: string } }>('/api/servers/:id/candidate/apply', async (req, reply) => {
     try { return { candidate: await approve(req.params.id, log, req.body?.consent === true, req.body?.revision, req.access?.by === 'api' ? `API token "${req.access.name}"` : undefined) }; }
     catch (e) { return reply.code(409).send({ error: (e as Error).message }); }

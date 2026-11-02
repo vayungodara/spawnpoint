@@ -199,6 +199,28 @@ export async function installLaunchGuard(id: string): Promise<void> {
   if (!command.startsWith(GUARD)) await craftyApi.patchServer(id, { execution_command: GUARD + command });
   setRevisionState(id, { managedHosting: true });
 }
+/** The guard verifies every start against the active revision's gate file.
+    Until a first version is active there is no gate, so the guard refuses
+    every start, including Crafty's own. */
+export async function strandedGuard(id: string): Promise<boolean> {
+  return !revisionState(id).active && (await craftyApi.getServer(id)).execution_command.startsWith(GUARD);
+}
+export async function assertLaunchable(id: string): Promise<void> {
+  if (await strandedGuard(id)) throw new Error('Spawnpoint\'s launch guard is installed, but this server has no tested version yet, so every start would be refused. Retry the first tested version, or remove the launch guard on the Overview tab');
+}
+/** Undo installLaunchGuard for a server whose first version never became
+    active. Restores the owner's own start command; nothing else changes. */
+export async function removeUnusedLaunchGuard(id: string): Promise<boolean> {
+  if (revisionState(id).active) throw new Error('this server has a tested version; its launch guard stays');
+  if (hostingHold(id)) throw new Error('AutoModpack hosting is paused for a pending publication; restart the panel to recover it first');
+  const { execution_command: command } = await craftyApi.getServer(id);
+  const script = join(serverDir(id), '.spawnpoint-launch.py');
+  const changed = command.startsWith(GUARD) || existsSync(script) || revisionState(id).managedHosting === true;
+  if (command.startsWith(GUARD)) await craftyApi.patchServer(id, { execution_command: command.slice(GUARD.length) });
+  rmSync(script, { force: true });
+  if (changed) setRevisionState(id, { managedHosting: false });
+  return changed;
+}
 /** A container can read the bind-mounted server, but not the panel's private
     data directory. Give its pre-JVM guard the lock's exact runtime inventory.
     Shelf files are verified in their published mirror, not host-only paths. */

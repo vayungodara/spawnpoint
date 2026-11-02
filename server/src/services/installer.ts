@@ -299,7 +299,11 @@ export function solveCandidate(
         pinsByPath.set(row.path, pin);
         if (before.live.includes(row) && !duplicate(row)) installed.push(pin);
       }
-      catalog = new NetworkCatalog({ mc: det.mc, loader: det.loader, loaderVersion: loader }, local);
+      // Installed jars are local, verified artifacts; only new candidates download.
+      // Limits grow with the pack so 80-150 mod packs can be searched.
+      const size = new Set([...before.live, ...before.rows].map((row) => row.path)).size;
+      catalog = new NetworkCatalog({ mc: det.mc, loader: det.loader, loaderVersion: loader }, local,
+        { downloads: Math.max(64, 2 * size), bytes: Math.min(1024, Math.max(256, 4 * size)) * 1024 * 1024 });
       // Removal/disable proposals stay removed; the solver may not silently
       // reinstall a library that the owner has explicitly taken out.
       const exclusions = before.changes.filter((f) => (f.remove && !f.automatic) || f.file.endsWith('.disabled'));
@@ -330,10 +334,14 @@ export function solveCandidate(
       const loaderJar = det.loader === 'fabric' ? join(serverDir(id), 'libraries', 'net', 'fabricmc', 'fabric-loader', loader, `fabric-loader-${loader}.jar`) : '';
       const loaderNested = loaderJar && existsSync(loaderJar) ? readFabricJar(readFileSync(loaderJar)).nested : [];
       const solved = await solve({ mc: det.mc, loader: det.loader, loaderVersion: loader, java: javaVersion, languageVersions: profile?.languages,
-        installed, add: [...requests.values()], remove, exclude: removed.map((row) => idsByPath.get(row.path)![0]), side: 'both', loaderNested }, catalog, { maxMs: 60_000 });
+        installed, add: [...requests.values()], remove, exclude: removed.map((row) => idsByPath.get(row.path)![0]), side: 'both', loaderNested }, catalog,
+        { maxMs: Math.max(60_000, 1_000 * size), maxNodes: Math.max(100_000, 2_000 * size), maxCatalogCalls: Math.max(2_000, 40 * size) });
       result.solver = solved;
       const selection = solved.status === 'ok' ? solved : solved.status === 'inconclusive' ? solved.tentative : undefined;
-      if (!selection) return { ...result, error: `Nothing was installed. Solver ${solved.status}: ${solved.status === 'conflict' ? solved.explanation.join(' ') : solved.status === 'inconclusive' ? solved.reason : ''}`,
+      const capped = solved.status === 'inconclusive' && /limit reached/.test(solved.reason);
+      if (!selection) return { ...result, error: capped
+        ? `Nothing was installed. This ${size}-mod pack needs more dependency checking than Spawnpoint allows in one run (${solved.reason.replace(/\.$/, '')}). Remove mods that have no build for this exact Minecraft version, or split the change, then test again`
+        : `Nothing was installed. Solver ${solved.status}: ${solved.status === 'conflict' ? solved.explanation.join(' ') : solved.status === 'inconclusive' ? solved.reason : ''}`,
         manualDownloads: catalog.manualDownloads };
       result.warnings = selection.warnings;
       const plan: Planned[] = [];

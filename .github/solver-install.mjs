@@ -59,10 +59,10 @@ const originalDispatcher = getGlobalDispatcher();
 const cf = new MockAgent();
 cf.disableNetConnect();
 setGlobalDispatcher(cf);
-let onDomain;
+let onDomain, downloads = 0;
 globalThis.fetch = async (url, options = {}) => {
   const request = new URL(url);
-  if (artifacts.has(request.href)) return new Response(artifacts.get(request.href));
+  if (artifacts.has(request.href)) { downloads++; return new Response(artifacts.get(request.href)); }
   const path = decodeURIComponent(request.pathname).split('/');
   if (path[2] === 'version_files') {
     const hashes = JSON.parse(options.body).hashes;
@@ -70,7 +70,9 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (path[2] === 'project' && path[4] === 'version') {
     onDomain?.();
-    return Response.json([...versions.values()].filter((v) => v.project_id === path[3]));
+    // Like Modrinth, list a build only under the exact game versions it is tagged with.
+    const game = request.searchParams.get('game_versions');
+    return Response.json([...versions.values()].filter((v) => v.project_id === path[3] && (!game || JSON.parse(game).some((g) => v.game_versions.includes(g)))));
   }
   if (path[2] === 'project') return projects.has(path[3]) ? Response.json(projects.get(path[3])) : new Response('', { status: 404 });
   if (path[2] === 'version') return versions.has(path[3]) ? Response.json(versions.get(path[3])) : new Response('', { status: 404 });
@@ -660,6 +662,21 @@ try {
   writeFileSync(join(main, 'servers.dat'), 'not a pack file');
   check('an unrecognised extras root file is a readable error, not a guess', (() => { try { candidateSet(crafty.id, { files: [] }); return false; } catch (e) { return /not a pack-owned path: extra\/servers\.dat/.test(String(e)); } })());
   rmSync(join(main, 'servers.dat'));
+
+  // A real 80-mod pack: installed builds come from the server and are never
+  // downloaded, even when Modrinth tags them only for another patch release.
+  const bigPack = Array.from({ length: 80 }, (_, i) => {
+    const old = record(`bigmod${i}`, `bigmod${i}-a`, '1.0.0', i ? { depends: { [`bigmod${i - 1}`]: '>=1' } } : {});
+    record(`bigmod${i}`, `bigmod${i}-b`, '2.0.0', i ? { depends: { [`bigmod${i - 1}`]: '>=1' } } : {});
+    if (i % 4 === 0) old.game_versions = ['1.21'];
+    return [old, i % 3 !== 0];
+  });
+  const big = fixture(bigPack);
+  downloads = 0;
+  const bigSolve = await solveCandidate(big.id);
+  check('an 80-mod pack with builds tagged for another patch release solves from its installed jars without downloads', !bigSolve.error
+    && bigSolve.solver?.status === 'ok' && downloads === 0 && !candidate(big.id));
+  discard(big.id);
 
   // Real EMF/ETF jars carry raw control characters inside fabric.mod.json
   // strings. Fabric Loader's reader accepts them; the solver must too, and

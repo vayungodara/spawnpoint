@@ -46,10 +46,14 @@ export class NetworkCatalog implements Catalog {
 
   private async domain(project: string): Promise<Version[]> {
     if (project.startsWith('local:')) return [...this.local.values()].map((f) => f.version).filter((v) => v.project_id === project);
-    if (project.startsWith('cf:')) {
-      return (await curseforge.getFiles(project.slice(3), { ...this.filter, all: true })).map((file) => this.cfVersion(file));
-    }
-    return modrinth.getVersions(project, this.filter);
+    const listed = project.startsWith('cf:')
+      ? (await curseforge.getFiles(project.slice(3), { ...this.filter, all: true })).map((file) => this.cfVersion(file))
+      : await modrinth.getVersions(project, this.filter);
+    // The installed build is always in its own domain. Modrinth lists a build
+    // only under the exact game versions its author tagged, so a 26.1.2 jar
+    // can be missing from a 26.1.1 server's list; Loader checks the jar itself.
+    const ids = new Set(listed.map((v) => v.id));
+    return [...listed, ...[...this.local.values()].map((f) => f.version).filter((v) => v.project_id === project && !ids.has(v.id))];
   }
 
   private cfVersion(file: curseforge.CfFile): Version {

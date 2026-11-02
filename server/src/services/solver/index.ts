@@ -223,8 +223,9 @@ export async function solve(input: SolveInput, catalog: Catalog, limits: Limits 
         return uncertain(`Catalog is missing installed version ${old.versionId} of ${next}; its constraints cannot be checked.`);
       }
       for (const version of candidates) {
-        tick(true);
+        // A version this budget cannot afford is not a search node.
         if (cost + (old && old.versionId !== version.id ? 1 : 0) > budget) continue;
+        tick(true);
         if (!version.files.length) { reject(`${version.name} (${version.id}) has no downloadable file.`); continue; }
         const jar = await meta(version);
         const excluded = modIds(jar).find((id) => input.exclude?.includes(id));

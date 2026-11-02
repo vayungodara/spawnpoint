@@ -196,7 +196,7 @@ const LIVE_STATUS = ['collecting', 'testing', 'activating']
 export function useChange(id: string | undefined) {
   return useQuery({
     queryKey: ['candidate', id],
-    queryFn: () => api<{ candidate: Candidate | null; promotion: Promotion | null }>(`/api/servers/${id}/candidate`),
+    queryFn: () => api<{ candidate: Candidate | null; promotion: Promotion | null; guardStranded?: boolean }>(`/api/servers/${id}/candidate`),
     enabled: !!id,
     refetchInterval: (q) => {
       const d = q.state.data

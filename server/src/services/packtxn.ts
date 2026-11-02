@@ -15,7 +15,7 @@ import { isRunningSafe, busyReason } from './maintenance.js';
 import { promotion, requestPromotion, restarting } from './promote.js';
 import { detect } from './detect.js';
 import { nativeRecord } from './native.js';
-import { sealRevision, verifyRevision, revisionInputs, revisionMoves, withStoppedRevision, lockedPath, revisionDir, reportRevision, revisionReport, revisionState, setRevisionState, installLaunchGuard, writeLaunchGate, packPath, hashes, readLock, type RevisionInput } from './revisions.js';
+import { sealRevision, verifyRevision, revisionInputs, revisionMoves, withStoppedRevision, lockedPath, revisionDir, reportRevision, revisionReport, revisionState, setRevisionState, installLaunchGuard, removeUnusedLaunchGuard, writeLaunchGate, packPath, hashes, readLock, type RevisionInput } from './revisions.js';
 import type { SolveInput, SolveResult } from './solver/index.js';
 
 // PACK TRANSACTIONS. A mod change never touches a live folder until it has
@@ -305,6 +305,18 @@ export function discard(id: string): void {
   if (!isOpen(c) || c.status === 'testing') return;
   dropFiles(id, c);
   save(id, { ...c, status: 'rejected', detail: 'discarded', files: c.files });
+  void releaseStrandedGuard(id, panelLog).catch((e) => panelLog(`packtxn: could not remove the unused launch guard from ${id}: ${String(e)}`));
+}
+
+/** A first version that failed before its baseline became active leaves the
+    launch guard with no gate to check, so the server cannot start at all.
+    Put the owner's start command back; retrying installs it again. */
+export async function releaseStrandedGuard(id: string, log: (m: string) => void): Promise<boolean> {
+  const c = candidate(id);
+  if (revisionState(id).active || (c && ['collecting', 'testing', 'activating'].includes(c.status))) return false;
+  const removed = await removeUnusedLaunchGuard(id);
+  if (removed) log(`packtxn: removed the unused launch guard from ${id}; it has no tested version yet`);
+  return removed;
 }
 
 /** Resolves once this server's candidate is applied, rejected or waiting for approval. */
@@ -334,6 +346,14 @@ export async function resumeCandidates(log: (m: string) => void): Promise<void> 
         log(`packtxn: could not reverse the interrupted undo on ${id} (${String(e)}); retrying on the next start`);
       }
     }
+  }
+  // Repair servers an earlier failed first version left unable to start.
+  const locked = join(PATHS.data, 'locked-revisions');
+  for (const id of existsSync(locked) ? readdirSync(locked) : []) {
+    const c = candidate(id);
+    if (c?.status === 'collecting' || c?.status === 'testing') continue; // re-armed below
+    try { await releaseStrandedGuard(id, log); }
+    catch (e) { log(`packtxn: could not remove the unused launch guard from ${id} (${String(e)}); remove it from Overview`); }
   }
   const dir = join(PATHS.data, 'candidates');
   if (!existsSync(dir)) return;
@@ -680,6 +700,7 @@ async function run(id: string, log: (m: string) => void): Promise<void> {
     running--;
     for (const w of waiters.get(id) ?? []) w();
     waiters.delete(id);
+    await releaseStrandedGuard(id, log).catch((e) => log(`packtxn: could not remove the unused launch guard from ${id}: ${String(e)}`));
   }
 }
 

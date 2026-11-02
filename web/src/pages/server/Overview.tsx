@@ -38,6 +38,30 @@ function MaintenanceBanner({ id, m }: { id: string; m: NonNullable<Stats['mainte
   )
 }
 
+/** A first tested version that failed before it went live leaves the launch
+    guard with nothing to check, so every start is refused. */
+function GuardBanner({ id }: { id: string }) {
+  const qc = useQueryClient()
+  const act = useMutation({
+    mutationFn: (path: string) => api(path, { method: 'POST', body: JSON.stringify({ consent: true, keepNewest: false }) }),
+    onSuccess: () => qc.invalidateQueries(),
+  })
+  return (
+    <div role="alert" className="block border-gold! px-4 py-3 text-sm space-y-3">
+      <div>
+        <span className="hud !opacity-100 !inline-flex mr-2 text-gold">CAN'T START</span>
+        Spawnpoint's launch guard is in this server's start command, but the first tested version never finished, so every start is refused, including in Crafty.
+      </div>
+      <div className="flex flex-wrap gap-3">
+        <button className="btn btn-emerald px-4 py-2 text-sm" disabled={act.isPending} onClick={() => act.mutate(`/api/servers/${id}/revision/first`)}>Retry first version</button>
+        <button className="btn btn-block px-4 py-2 text-sm" disabled={act.isPending} onClick={() => act.mutate(`/api/servers/${id}/launch-guard/remove`)}>Remove launch guard</button>
+      </div>
+      <p className="text-xs text-text-dim max-w-[68ch]">Removing it puts back the start command you had before. Nothing in the pack or world changes.</p>
+      {act.error && <p className="break-words">{act.error.message.replace(/^\d+: /, '')}</p>}
+    </div>
+  )
+}
+
 // CPU samples survive tab switches: the overview remounts, the history should not
 const cpuHistory = new Map<string, number[]>()
 
@@ -320,6 +344,7 @@ export default function Overview() {
   return (
     <div className="space-y-6">
       {stats?.maintenance && <MaintenanceBanner id={s.id} m={stats.maintenance} />}
+      {change?.guardStranded && <GuardBanner id={s.id} />}
       {stats?.crashed && !stats.running && <CrashSweepRow serverId={s.id} />}
       {change?.promotion?.action === 'undo' && <UndoWaitingBanner id={s.id} p={change.promotion} />}
       {changeVisible(c) && <ChangeCard id={s.id} c={c} p={change?.promotion?.action === 'apply' ? change.promotion : null} />}

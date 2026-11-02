@@ -128,8 +128,9 @@ export const craftyApi = {
     action: 'start_server' | 'stop_server' | 'restart_server' | 'kill_server' | 'accept_eula',
   ) => {
     if (action === 'start_server' || action === 'restart_server') {
-      const { verifyActiveRevision, revisionState } = await import('../services/revisions.js');
+      const { verifyActiveRevision, revisionState, assertLaunchable } = await import('../services/revisions.js');
       await verifyActiveRevision(id);
+      await assertLaunchable(id);
       if (revisionState(id).active) {
         const { holdHosting } = await import('../services/automodpack.js');
         holdHosting(id);
