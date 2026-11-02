@@ -37,7 +37,13 @@ export interface Verdict {
   configs?: { path: string; src?: string; remove?: boolean }[];
   /** AutoModpack's config as its first boot left it, when that differs. */
   autoModpackConfig?: string;
+  /** The whole console, when a probe asked for it. */
+  output?: string;
 }
+
+/** A loader change boots other loader files with the live pack, and asks
+    the booted server one console command (its mod list) before stopping. */
+export interface BootExtra { loaderDir?: string; probe?: string }
 
 const AM_CONFIG = 'automodpack/automodpack-server.json';
 const HOSTING_KEYS = ['modpackHost', 'generateModpackOnStart', 'selfUpdater'];
@@ -72,7 +78,7 @@ export function loaderLaunchArgs(dir: string, det: Detection, heap: string): str
 
 /** Clone the loader and pack-owned config into a disposable sandbox. Never
     share writable links with the live server or an immutable revision. */
-export function linkLoader(dir: string, sandbox: string, lock?: RevisionLock): void {
+export function linkLoader(dir: string, sandbox: string, lock?: RevisionLock, loaderDir = dir): void {
   if (lock) {
     for (const f of lock.files.filter((f) => f.location === 'server' && !f.path.startsWith('mods/'))) {
       const target = join(sandbox, f.path);
@@ -82,7 +88,7 @@ export function linkLoader(dir: string, sandbox: string, lock?: RevisionLock): v
     return;
   }
   for (const item of ['fabric.jar', 'libraries', 'versions', '.fabric', 'config', 'defaultconfigs', 'kubejs', 'emotes']) {
-    const src = join(dir, item);
+    const src = join(['libraries', 'versions'].includes(item) ? loaderDir : dir, item);
     if (existsSync(src)) cpSync(src, join(sandbox, item), { recursive: true, mode: constants.COPYFILE_FICLONE });
   }
 }
@@ -114,13 +120,13 @@ let chain: Promise<unknown> = Promise.resolve();
 /** Boot this server's loader with exactly `jars` (absolute paths) as its
     mods folder. Serialized globally. */
 export function dryBoot(serverId: string, jars: string[], onStatus: (d: string) => void = () => {}, sourceDir = serverDir(serverId), lock?: RevisionLock,
-  opts: { autoModpackDefaults?: boolean } = {}): Promise<Verdict> {
+  opts: { autoModpackDefaults?: boolean } & BootExtra = {}): Promise<Verdict> {
   const test = async (): Promise<Verdict> => {
     // a mods-only boot stays well under 1 GB; the live server keeps its share
     let waited = false;
     const v = await withMemory(1, 'the server test', (d) => { waited = true; onStatus(d); }, () => {
       if (waited) onStatus('boot-testing the server with this change');
-      return dryBootInner(serverId, jars, sourceDir, lock, opts.autoModpackDefaults);
+      return dryBootInner(serverId, jars, sourceDir, lock, opts.autoModpackDefaults, opts);
     });
     return typeof v === 'string' ? { result: 'unverified', detail: v } : v;
   };
@@ -132,9 +138,9 @@ export function dryBoot(serverId: string, jars: string[], onStatus: (d: string) 
 /** One sandbox boot, without dryBoot's serialization or memory admission.
     Callers use dryBoot; the revision guard calls this directly so its
     stand-in loader never waits on a runner's free-memory figure. */
-export async function dryBootInner(serverId: string, jars: string[], dir: string, lock?: RevisionLock, autoModpackDefaults = false): Promise<Verdict> {
+export async function dryBootInner(serverId: string, jars: string[], dir: string, lock?: RevisionLock, autoModpackDefaults = false, extra: BootExtra = {}): Promise<Verdict> {
   const det = detect(dir, serverId);
-  const launchArgs = lock ? lockedLaunchArgs(lock, '-Xmx1G') : loaderLaunchArgs(dir, det, '-Xmx2G');
+  const launchArgs = lock ? lockedLaunchArgs(lock, '-Xmx1G') : loaderLaunchArgs(extra.loaderDir ?? dir, det, '-Xmx2G');
   if (!launchArgs) return { result: 'unverified', detail: `Spawnpoint cannot boot-test ${det.loader} servers yet` };
   const selectedJava = lock?.java.executable ?? javaFor(det.mc, det.loader);
   if (!selectedJava) return { result: 'unverified', detail: 'no JDK for this Minecraft version yet; it downloads the first time the server starts' };
@@ -145,7 +151,7 @@ export async function dryBootInner(serverId: string, jars: string[], dir: string
   // Copy inputs even when Windows must run without confinement.
   const sandbox = scratchDir(`preflight-${serverId}`);
   mkdirSync(join(sandbox, 'mods'), { recursive: true });
-  linkLoader(dir, sandbox, lock);
+  linkLoader(dir, sandbox, lock, extra.loaderDir);
   for (const jar of jars) copyFileSync(jar, join(sandbox, 'mods', basename(jar)), constants.COPYFILE_FICLONE);
   const fullBoot = det.loader === 'forge' || det.loader === 'neoforge';
   const pass = fullBoot ? /Done \([\d.]+s\)!/ : PASS_RE;
@@ -217,13 +223,18 @@ export async function dryBootInner(serverId: string, jars: string[], dir: string
       } catch { /* diagnostics only */ }
       if (safe) rmSync(sandbox, { recursive: true, force: true });
       resolve({ ...v, javaFailure: v.result === 'failed' ? classVersionFailure(out) : undefined, seconds: Math.round((Date.now() - started) / 1000),
+        output: extra.probe ? out : undefined,
         checks: { ...v.checks, serverIsolation: isolation } });
     };
     child.output.on('data', (d: Buffer) => { out += d.toString(); });
     child.child.on('error', (e) => { void finish({ result: 'unverified', detail: `could not launch the server test: ${e.message}` }); });
     // Reap the JVM before capturing outputs. Forge's EULA line alone says
     // nothing about mod construction and can never pass this check.
+    let probed = 0;
     const poll = setInterval(() => {
+      // The probe's reply ends at the first log line after its bullet list.
+      if (extra.probe && fullBoot && pass.test(out) && !probed) { probed = Date.now(); child.stdin!.write(`${extra.probe}\n`); return; }
+      if (probed && !/Mod List: *\r?\n(?:•[^\n]*\n)+\[/.test(out) && Date.now() - probed < 20_000) return;
       if (pass.test(out)) finish({ result: 'passed', detail: `the server booted with ${jars.length} mod${jars.length === 1 ? '' : 's'}${fullBoot ? ' into a disposable world' : ''}` });
       else if (FAIL_RE.test(out)) finish({ result: 'failed', detail: 'the loader rejected this mod set', excerpt: excerptOf(out) });
     }, 1000);

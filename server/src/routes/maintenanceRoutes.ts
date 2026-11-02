@@ -18,6 +18,7 @@ import {
   snapshotInfo,
 } from '../services/versionswitch.js';
 import { rconCommand } from '../clients/rcon.js';
+import { loaderChange, loaderOffer, testLoaderChange, applyLoaderChange, rollbackLoaderChange, discardLoaderChange } from '../services/loaderchange.js';
 
 export default async function maintenanceRoutes(app: FastifyInstance) {
   app.get('/api/autostop', async () => autostopStatus());
@@ -128,6 +129,24 @@ export default async function maintenanceRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>('/api/servers/:id/version/snapshot', async (req) => ({
     snapshot: snapshotInfo(req.params.id),
   }));
+
+  // ---- Forge/NeoForge build change to the certified recipe ----
+  app.get<{ Params: { id: string } }>('/api/servers/:id/loader', async (req) => ({
+    offer: await loaderOffer(req.params.id).catch(() => null), change: loaderChange(req.params.id),
+  }));
+  type LoaderReq = { Params: { id: string }; Body: { token?: string; consent?: boolean } | undefined };
+  const loaderAction = (path: string, fn: (id: string, body: { token?: string; consent?: boolean }) => Promise<unknown>) =>
+    app.post<LoaderReq>(path, async (req, reply) => {
+      try { return { ok: true, change: await fn(req.params.id, req.body ?? {}) }; }
+      catch (e) { return reply.code(409).send({ error: e instanceof Error ? e.message : String(e) }); }
+    });
+  loaderAction('/api/servers/:id/loader/test', (id) => testLoaderChange(id, (m) => app.log.warn(m)));
+  loaderAction('/api/servers/:id/loader/apply', async (id, body) => {
+    if (body.consent !== true) throw new Error('explicit owner consent is required to change the live loader');
+    return applyLoaderChange(id, String(body.token ?? ''));
+  });
+  loaderAction('/api/servers/:id/loader/rollback', (id) => rollbackLoaderChange(id));
+  loaderAction('/api/servers/:id/loader/discard', async (id) => { discardLoaderChange(id); return null; });
 
   // ---- schematic library (genie build templates) ----
   app.get('/api/schematics', async () => ({ schematics: listSchematics() }));

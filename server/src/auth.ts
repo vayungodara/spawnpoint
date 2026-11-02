@@ -152,6 +152,8 @@ const NEEDS: Record<string, Scope | 'admin'> = {
   'POST /api/servers/:id/worlds/reset': 'approve',
   'POST /api/servers/:id/version/apply': 'approve',
   'POST /api/servers/:id/version/rollback': 'approve',
+  'POST /api/servers/:id/loader/apply': 'approve',
+  'POST /api/servers/:id/loader/rollback': 'approve',
   'POST /api/servers/:id/reset-players': 'approve',
   'DELETE /api/servers/:id/backups': 'approve',
   'GET /api/tokens': 'admin',

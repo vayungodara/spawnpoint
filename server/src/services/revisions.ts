@@ -190,7 +190,7 @@ const stoppedFences = new Set<string>();
 export function assertRevisionMutation(id: string): void {
   if (!stoppedFences.has(id)) throw new Error('changing the locked launch command requires the stopped revision fence');
 }
-const GUARD = `"${process.platform === 'win32' ? 'python' : 'python3'}" ".spawnpoint-launch.py" `;
+export const GUARD = `"${process.platform === 'win32' ? 'python' : 'python3'}" ".spawnpoint-launch.py" `;
 /** Called only after the owner explicitly approves changing Crafty's launch
     recipe. The wrapper is mandatory even for starts outside the panel. */
 export async function installLaunchGuard(id: string): Promise<void> {
@@ -270,14 +270,25 @@ export async function sealRevision(id: string, revision: string, inputs: Revisio
     throw e;
   }
 }
+/** The one FML build per Minecraft release that locked revisions accept:
+    its version, OS argument file and that file's exact official bytes. */
+export function certifiedFml(loader: string, mc: string | null): { version: string; argfile: string; sha512: string } | null {
+  const win = process.platform === 'win32', name = win ? 'win_args.txt' : 'unix_args.txt';
+  if (loader === 'forge' && mc === '1.20.1') return { version: '47.4.28', argfile: `libraries/net/minecraftforge/forge/1.20.1-47.4.28/${name}`, sha512: win
+    ? 'f86ee984b4577121b7fcbc41f4c5db5457370e7037841e97ceb348b9f9e928fcd5d9fae8320e3ce8399a1e8e46737d62044be5ce2bbe29cfb9fedc1b856c8e30'
+    : '667b0896ec529f99355eaf05761c6d0411c9b14b5c92a2eb9ba1dc3fbff82d1c6f60c27ac07e00f78ceeb40b705bad66ce3e5a64b0aac3c767849e4fb05094e5' };
+  if (loader === 'neoforge' && mc === '1.21.1') return { version: '21.1.219', argfile: `libraries/net/neoforged/neoforge/21.1.219/${name}`, sha512: win
+    ? 'ac7c4cfad7e3c7904cafaaa80ce41288c08bbd4c77bf2ca4c0f0a6d050f0f0ad1bf48366e158be9b840387de71412faa6f21ae25d368d3d8fb73c6316c5ded13'
+    : 'bcfb91eafd64e138016fa689658baa756047a95e3060b70d194540abc50d4fd0a9c60edf3d69ac1afe7ce6341b2503db3a6119828821bc6edf018a27756ac740' };
+  return null;
+}
 /** One validator for adoption and sealing: refuse unsupported recipes before
     changing Crafty. Arbitrary agents, @files and --universe can escape tests. */
 async function launchSpec(id: string, dir = serverDir(id), proposedJava?: string) {
   const det = detect(dir, id);
   const loader = loaderVersion(dir, det);
   if (!det.mc || !loader) throw new Error('Spawnpoint cannot read this server’s Minecraft and loader versions yet. Start it once (in Crafty is fine), stop it, then try again.');
-  if (det.loader !== 'fabric' && !(det.loader === 'forge' && det.mc === '1.20.1' && loader === '47.4.28')
-    && !(det.loader === 'neoforge' && det.mc === '1.21.1' && loader === '21.1.219')) throw new Error('locked revisions support Fabric, Forge 1.20.1 / 47.4.28 and NeoForge 1.21.1 / 21.1.219');
+  if (det.loader !== 'fabric' && certifiedFml(det.loader, det.mc)?.version !== loader) throw new Error('locked revisions support Fabric, Forge 1.20.1 / 47.4.28 and NeoForge 1.21.1 / 21.1.219');
   let command = (await craftyApi.getServer(id)).execution_command;
   if (proposedJava) {
     const prefix = command.startsWith(GUARD) ? GUARD : '';
@@ -315,8 +326,7 @@ async function launchSpec(id: string, dir = serverDir(id), proposedJava?: string
       const cfg = JSON.parse(held ? held.original : readFileSync(autoModpack, 'utf8'));
       if (cfg.DO_NOT_CHANGE_IT !== 2 || cfg.modpackHost !== true || cfg.generateModpackOnStart !== true || cfg.selfUpdater !== false) throw new Error('Locked Forge AutoModpack requires a version 2 managed-publication config with hosting and generation enabled, and selfUpdater:false');
     }
-    const name = process.platform === 'win32' ? 'win_args.txt' : 'unix_args.txt';
-    const argfile = det.loader === 'neoforge' ? `libraries/net/neoforged/neoforge/${loader}/${name}` : `libraries/net/minecraftforge/forge/${det.mc}-${loader}/${name}`;
+    const { argfile, sha512: expected } = certifiedFml(det.loader, det.mc)!;
     const index = argv.indexOf(`@${argfile}`);
     const prefix = argv.slice(1, index);
     if (argv[0] !== executable || index < 1 || argv.slice(index).join(' ') !== `@${argfile} nogui`
@@ -324,11 +334,6 @@ async function launchSpec(id: string, dir = serverDir(id), proposedJava?: string
     // Exact official installer data, not an allowlist that could admit agents,
     // absolute classpaths, nested @files, a different target or world options.
     const bytes = readFileSync(join(dir, argfile));
-    const expected = det.loader === 'neoforge' ? name === 'win_args.txt'
-      ? 'ac7c4cfad7e3c7904cafaaa80ce41288c08bbd4c77bf2ca4c0f0a6d050f0f0ad1bf48366e158be9b840387de71412faa6f21ae25d368d3d8fb73c6316c5ded13'
-      : 'bcfb91eafd64e138016fa689658baa756047a95e3060b70d194540abc50d4fd0a9c60edf3d69ac1afe7ce6341b2503db3a6119828821bc6edf018a27756ac740'
-      : name === 'win_args.txt' ? 'f86ee984b4577121b7fcbc41f4c5db5457370e7037841e97ceb348b9f9e928fcd5d9fae8320e3ce8399a1e8e46737d62044be5ce2bbe29cfb9fedc1b856c8e30'
-        : '667b0896ec529f99355eaf05761c6d0411c9b14b5c92a2eb9ba1dc3fbff82d1c6f60c27ac07e00f78ceeb40b705bad66ce3e5a64b0aac3c767849e4fb05094e5';
     if (createHash('sha512').update(bytes).digest('hex') !== expected) throw new Error('Forge loader arguments differ from the certified official installer');
     const flags = prefix.flatMap((arg) => arg !== '@user_jvm_args.txt' ? [arg]
       : readFileSync(join(dir, 'user_jvm_args.txt'), 'utf8').replace(/#[^\r\n]*/g, '').split(/\s+/).filter(Boolean));
